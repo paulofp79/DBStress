@@ -275,6 +275,36 @@ class SchemaManager {
     }
   }
 
+  // Helper method to set all tables to NOLOGGING mode
+  async setNologging(db) {
+    const tables = ['regions', 'countries', 'warehouses', 'categories', 'products',
+                    'inventory', 'customers', 'orders', 'order_items', 'payments',
+                    'order_history', 'product_reviews'];
+    for (const table of tables) {
+      try {
+        await db.execute(`ALTER TABLE ${table} NOLOGGING`);
+      } catch (err) {
+        // Table might not exist yet, ignore
+      }
+    }
+    console.log('All tables set to NOLOGGING mode');
+  }
+
+  // Helper method to set all tables back to LOGGING mode
+  async setLogging(db) {
+    const tables = ['regions', 'countries', 'warehouses', 'categories', 'products',
+                    'inventory', 'customers', 'orders', 'order_items', 'payments',
+                    'order_history', 'product_reviews'];
+    for (const table of tables) {
+      try {
+        await db.execute(`ALTER TABLE ${table} LOGGING`);
+      } catch (err) {
+        // Ignore errors
+      }
+    }
+    console.log('All tables set to LOGGING mode');
+  }
+
   async populateData(db, scaleFactor = 1, progressCallback = () => {}) {
     const baseCustomers = 1000 * scaleFactor;
     const baseProducts = 500 * scaleFactor;
@@ -282,15 +312,20 @@ class SchemaManager {
 
     let progress = 50;
 
-    // Insert regions (using positional binds - array format)
-    progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
-    for (const region of REGIONS_DATA) {
-      try {
-        await db.execute(`INSERT INTO regions (region_name) VALUES (:1)`, [region]);
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) throw err;
+    // Set all tables to NOLOGGING for faster inserts
+    progressCallback({ step: 'Setting tables to NOLOGGING mode...', progress: progress });
+    await this.setNologging(db);
+
+    try {
+      // Insert regions (using positional binds - array format)
+      progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
+      for (const region of REGIONS_DATA) {
+        try {
+          await db.execute(`INSERT /*+ APPEND */ INTO regions (region_name) VALUES (:1)`, [region]);
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
       }
-    }
 
     // Get region IDs
     const regionsResult = await db.execute('SELECT region_id, region_name FROM regions');
@@ -302,7 +337,7 @@ class SchemaManager {
     for (const country of COUNTRIES_DATA) {
       try {
         await db.execute(
-          `INSERT INTO countries (country_name, country_code, region_id) VALUES (:1, :2, :3)`,
+          `INSERT /*+ APPEND */ INTO countries (country_name, country_code, region_id) VALUES (:1, :2, :3)`,
           [country.name, country.code, regionMap[country.region]]
         );
       } catch (err) {
@@ -324,7 +359,7 @@ class SchemaManager {
     for (let i = 0; i < warehouseLocations.length; i++) {
       try {
         await db.execute(
-          `INSERT INTO warehouses (warehouse_name, location, country_id, capacity) VALUES (:1, :2, :3, :4)`,
+          `INSERT /*+ APPEND */ INTO warehouses (warehouse_name, location, country_id, capacity) VALUES (:1, :2, :3, :4)`,
           [warehouseLocations[i], `Warehouse ${i + 1}`, countryIds[i % countryIds.length], 50000 * scaleFactor]
         );
       } catch (err) {
@@ -342,7 +377,7 @@ class SchemaManager {
       if (!cat.parent) {
         try {
           await db.execute(
-            `INSERT INTO categories (category_name, description) VALUES (:1, :2)`,
+            `INSERT /*+ APPEND */ INTO categories (category_name, description) VALUES (:1, :2)`,
             [cat.name, `${cat.name} category`]
           );
         } catch (err) {
@@ -361,7 +396,7 @@ class SchemaManager {
       if (cat.parent && categoryMap[cat.parent]) {
         try {
           await db.execute(
-            `INSERT INTO categories (category_name, parent_category_id, description) VALUES (:1, :2, :3)`,
+            `INSERT /*+ APPEND */ INTO categories (category_name, parent_category_id, description) VALUES (:1, :2, :3)`,
             [cat.name, categoryMap[cat.parent], `${cat.name} category`]
           );
         } catch (err) {
@@ -391,7 +426,7 @@ class SchemaManager {
 
         try {
           await db.execute(
-            `INSERT INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
+            `INSERT /*+ APPEND */ INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
              VALUES (:1, :2, :3, :4, :5, :6)`,
             [
               `${adj} ${noun} ${i + j + 1}`,
@@ -423,7 +458,7 @@ class SchemaManager {
       for (const warehouseId of warehouseIds) {
         try {
           await db.execute(
-            `INSERT INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
+            `INSERT /*+ APPEND */ INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
              VALUES (:1, :2, :3, :4, :5)`,
             [
               productId,
@@ -451,7 +486,7 @@ class SchemaManager {
 
         try {
           await db.execute(
-            `INSERT INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
+            `INSERT /*+ APPEND */ INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
              VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
             [
               firstName,
@@ -498,7 +533,7 @@ class SchemaManager {
           try {
             // Create order and get the ID using a sequence approach
             await db.execute(
-              `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
+              `INSERT /*+ APPEND */ INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
                VALUES (:1, :2, :3, :4, :5)`,
               [
                 customerId,
@@ -528,7 +563,7 @@ class SchemaManager {
               subtotal += lineTotal;
 
               await db.execute(
-                `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
+                `INSERT /*+ APPEND */ INTO order_items (order_id, product_id, quantity, unit_price, line_total)
                  VALUES (:1, :2, :3, :4, :5)`,
                 [orderId, productId, quantity, unitPrice, lineTotal]
               );
@@ -547,7 +582,7 @@ class SchemaManager {
             // Add payment for non-pending orders
             if (status !== 'PENDING' && status !== 'CANCELLED') {
               await db.execute(
-                `INSERT INTO payments (order_id, amount, payment_method, transaction_ref, status)
+                `INSERT /*+ APPEND */ INTO payments (order_id, amount, payment_method, transaction_ref, status)
                  VALUES (:1, :2, :3, :4, 'COMPLETED')`,
                 [
                   orderId,
@@ -574,7 +609,7 @@ class SchemaManager {
       for (let i = 0; i < reviewCount; i++) {
         try {
           await db.execute(
-            `INSERT INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
+            `INSERT /*+ APPEND */ INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
              VALUES (:1, :2, :3, :4, :5, :6)`,
             [
               productIds[Math.floor(Math.random() * productIds.length)],
@@ -591,7 +626,12 @@ class SchemaManager {
       }
     }
 
-    progressCallback({ step: 'Data population complete!', progress: 100 });
+      progressCallback({ step: 'Data population complete!', progress: 100 });
+    } finally {
+      // Restore LOGGING mode for all tables
+      progressCallback({ step: 'Restoring LOGGING mode...', progress: 100 });
+      await this.setLogging(db);
+    }
   }
 
   async dropSchema(db) {
