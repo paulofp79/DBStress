@@ -87,8 +87,12 @@ app.post('/api/schema/create', async (req, res) => {
     await schemaManager.createSchema(oracleDb, (progress) => {
       io.emit('schema-progress', progress);
     });
-    io.emit('schema-progress', { step: 'Populating data...', progress: 50 });
+    io.emit('schema-progress', { step: 'Populating data...', progress: 30 });
     await schemaManager.populateData(oracleDb, scaleFactor, (progress) => {
+      io.emit('schema-progress', progress);
+    });
+    io.emit('schema-progress', { step: 'Creating indexes...', progress: 90 });
+    await schemaManager.createIndexes(oracleDb, (progress) => {
       io.emit('schema-progress', progress);
     });
     io.emit('schema-progress', { step: 'Schema created successfully!', progress: 100 });
