@@ -227,9 +227,22 @@ const PRODUCT_ADJECTIVES = ['Premium', 'Professional', 'Ultra', 'Advanced', 'Cla
 const PRODUCT_NOUNS = ['Laptop', 'Phone', 'Tablet', 'Headphones', 'Speaker', 'Camera', 'Watch', 'Keyboard', 'Mouse', 'Monitor', 'Shirt', 'Pants', 'Jacket', 'Shoes', 'Bag', 'Chair', 'Desk', 'Lamp', 'Sofa', 'Bed'];
 
 class SchemaManager {
+  // Helper function to handle executeMany with consistent commit logic
+  async executeManyWithCommit(db, sql, binds, batchCommitSize) {
+    const shouldAutoCommit = batchCommitSize >= binds.length;
+    await db.executeMany(sql, binds, {
+      autoCommit: shouldAutoCommit,
+      batchErrors: true
+    });
+    // Manual commit if we didn't auto-commit
+    if (!shouldAutoCommit) {
+      await db.execute('COMMIT');
+    }
+  }
+
   async createSchema(db, progressCallback = () => {}) {
     const tableNames = Object.keys(TABLES);
-    const totalSteps = tableNames.length + INDEXES.length + SEQUENCES.length;
+    const totalSteps = tableNames.length + SEQUENCES.length;
     let currentStep = 0;
 
     // Create sequences first
@@ -242,10 +255,10 @@ class SchemaManager {
         }
       }
       currentStep++;
-      progressCallback({ step: 'Creating sequences...', progress: Math.floor((currentStep / totalSteps) * 50) });
+      progressCallback({ step: 'Creating sequences...', progress: Math.floor((currentStep / totalSteps) * 30) });
     }
 
-    // Create tables in order
+    // Create tables in order (without indexes to avoid overhead during bulk load)
     for (const tableName of tableNames) {
       try {
         await db.execute(TABLES[tableName]);
@@ -257,10 +270,15 @@ class SchemaManager {
         console.log(`Table ${tableName} already exists`);
       }
       currentStep++;
-      progressCallback({ step: `Creating table ${tableName}...`, progress: Math.floor((currentStep / totalSteps) * 50) });
+      progressCallback({ step: `Creating table ${tableName}...`, progress: Math.floor((currentStep / totalSteps) * 30) });
     }
+  }
 
-    // Create indexes
+  async createIndexes(db, progressCallback = () => {}) {
+    // Create indexes after data population to avoid index build overhead during bulk load
+    let currentStep = 0;
+    const totalSteps = INDEXES.length;
+
     for (const indexSql of INDEXES) {
       try {
         await db.execute(indexSql);
@@ -270,16 +288,19 @@ class SchemaManager {
         }
       }
       currentStep++;
-      progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
+      progressCallback({ step: 'Creating indexes...', progress: 90 + Math.floor((currentStep / totalSteps) * 10) });
     }
   }
 
-  async populateData(db, scaleFactor = 1, progressCallback = () => {}) {
+  async populateData(db, scaleFactor = 1, progressCallback = () => {}, options = {}) {
     const baseCustomers = 1000 * scaleFactor;
     const baseProducts = 500 * scaleFactor;
     const baseOrders = 5000 * scaleFactor;
 
-    let progress = 50;
+    // Options for performance optimization
+    const { useDirectPath = false, batchCommitSize = 1000 } = options;
+
+    let progress = 30;
 
     // Insert regions
     progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
@@ -364,202 +385,276 @@ class SchemaManager {
     }
     const categoryIds = Object.values(categoryMap);
 
-    // Insert products in batches
-    progressCallback({ step: `Inserting ${baseProducts} products...`, progress: progress += 2 });
-    const productIds = [];
-    const batchSize = 100;
-
-    for (let i = 0; i < baseProducts; i += batchSize) {
-      const batch = [];
-      for (let j = 0; j < batchSize && (i + j) < baseProducts; j++) {
-        const adj = PRODUCT_ADJECTIVES[Math.floor(Math.random() * PRODUCT_ADJECTIVES.length)];
-        const noun = PRODUCT_NOUNS[Math.floor(Math.random() * PRODUCT_NOUNS.length)];
-        const price = (Math.random() * 500 + 10).toFixed(2);
-        batch.push({
-          name: `${adj} ${noun} ${i + j + 1}`,
-          desc: `High quality ${noun.toLowerCase()} with premium features`,
-          categoryId: categoryIds[Math.floor(Math.random() * categoryIds.length)],
-          price: parseFloat(price),
-          cost: parseFloat((price * 0.6).toFixed(2)),
-          weight: parseFloat((Math.random() * 10 + 0.5).toFixed(2))
-        });
-      }
-
-      for (const prod of batch) {
-        try {
-          const result = await db.execute(
-            `INSERT INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
-             VALUES (:name, :desc, :categoryId, :price, :cost, :weight) RETURNING product_id INTO :id`,
-            {
-              name: prod.name,
-              desc: prod.desc,
-              categoryId: prod.categoryId,
-              price: prod.price,
-              cost: prod.cost,
-              weight: prod.weight,
-              id: { type: 2002, dir: 3003 }
-            }
-          );
-          productIds.push(result.outBinds.id[0]);
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Product insert warning:', err.message);
-        }
-      }
-      progressCallback({ step: `Inserting products (${Math.min(i + batchSize, baseProducts)}/${baseProducts})...`, progress: 60 + Math.floor((i / baseProducts) * 5) });
+    // Insert products in batches using executeMany
+    progressCallback({ step: `Inserting ${baseProducts} products...`, progress: progress = 40 });
+    const productBinds = [];
+    
+    for (let i = 0; i < baseProducts; i++) {
+      const adj = PRODUCT_ADJECTIVES[Math.floor(Math.random() * PRODUCT_ADJECTIVES.length)];
+      const noun = PRODUCT_NOUNS[Math.floor(Math.random() * PRODUCT_NOUNS.length)];
+      const price = (Math.random() * 500 + 10).toFixed(2);
+      productBinds.push({
+        name: `${adj} ${noun} ${i + 1}`,
+        desc: `High quality ${noun.toLowerCase()} with premium features`,
+        categoryId: categoryIds[Math.floor(Math.random() * categoryIds.length)],
+        price: parseFloat(price),
+        cost: parseFloat((price * 0.6).toFixed(2)),
+        weight: parseFloat((Math.random() * 10 + 0.5).toFixed(2))
+      });
     }
 
-    // Get all product IDs if we didn't capture them
-    if (productIds.length === 0) {
-      const prodsResult = await db.execute('SELECT product_id FROM products');
-      productIds.push(...prodsResult.rows.map(p => p.PRODUCT_ID));
+    // Use executeMany for bulk insert with optional direct-path hints
+    const productSql = useDirectPath 
+      ? `INSERT /*+ APPEND */ INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
+         VALUES (:name, :desc, :categoryId, :price, :cost, :weight)`
+      : `INSERT INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
+         VALUES (:name, :desc, :categoryId, :price, :cost, :weight)`;
+    
+    try {
+      await this.executeManyWithCommit(db, productSql, productBinds, batchCommitSize);
+      progressCallback({ step: `Inserted ${baseProducts} products`, progress: progress = 45 });
+    } catch (err) {
+      console.log('Product bulk insert warning:', err.message);
     }
 
-    // Insert inventory for each product in each warehouse
-    progressCallback({ step: 'Inserting inventory...', progress: progress = 67 });
+    // Get all product IDs via SELECT
+    const prodsResult = await db.execute('SELECT product_id FROM products ORDER BY product_id');
+    const productIds = prodsResult.rows.map(p => p.PRODUCT_ID);
+
+    // Insert inventory for each product in each warehouse using executeMany
+    progressCallback({ step: 'Inserting inventory...', progress: progress = 50 });
+    const inventoryBinds = [];
+    
     for (const productId of productIds) {
       for (const warehouseId of warehouseIds) {
-        try {
-          await db.execute(
-            `INSERT INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
-             VALUES (:prodId, :whId, :qty, :reserved, :reorder)`,
-            {
-              prodId: productId,
-              whId: warehouseId,
-              qty: Math.floor(Math.random() * 1000) + 100,
-              reserved: Math.floor(Math.random() * 50),
-              reorder: Math.floor(Math.random() * 20) + 10
-            }
-          );
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Inventory warning:', err.message);
-        }
+        inventoryBinds.push({
+          prodId: productId,
+          whId: warehouseId,
+          qty: Math.floor(Math.random() * 1000) + 100,
+          reserved: Math.floor(Math.random() * 50),
+          reorder: Math.floor(Math.random() * 20) + 10
+        });
       }
     }
 
-    // Insert customers in batches
-    progressCallback({ step: `Inserting ${baseCustomers} customers...`, progress: progress = 70 });
-    const customerIds = [];
+    const inventorySql = useDirectPath
+      ? `INSERT /*+ APPEND */ INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
+         VALUES (:prodId, :whId, :qty, :reserved, :reorder)`
+      : `INSERT INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
+         VALUES (:prodId, :whId, :qty, :reserved, :reorder)`;
 
-    for (let i = 0; i < baseCustomers; i += batchSize) {
-      for (let j = 0; j < batchSize && (i + j) < baseCustomers; j++) {
-        const firstName = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
-        const lastName = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
-        const city = CITIES[Math.floor(Math.random() * CITIES.length)];
-
-        try {
-          const result = await db.execute(
-            `INSERT INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
-             VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit) RETURNING customer_id INTO :id`,
-            {
-              firstName,
-              lastName,
-              email: `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${i + j}@example.com`,
-              phone: `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
-              addr: `${Math.floor(Math.random() * 9999) + 1} Main Street`,
-              city,
-              state: 'State',
-              postal: String(Math.floor(Math.random() * 90000) + 10000),
-              countryId: countryIds[Math.floor(Math.random() * countryIds.length)],
-              credit: Math.floor(Math.random() * 10000) + 1000,
-              id: { type: 2002, dir: 3003 }
-            }
-          );
-          customerIds.push(result.outBinds.id[0]);
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Customer warning:', err.message);
-        }
-      }
-      progressCallback({ step: `Inserting customers (${Math.min(i + batchSize, baseCustomers)}/${baseCustomers})...`, progress: 70 + Math.floor((i / baseCustomers) * 10) });
+    try {
+      await this.executeManyWithCommit(db, inventorySql, inventoryBinds, batchCommitSize);
+      progressCallback({ step: `Inserted ${inventoryBinds.length} inventory records`, progress: progress = 55 });
+    } catch (err) {
+      console.log('Inventory bulk insert warning:', err.message);
     }
 
-    // Get all customer IDs if needed
-    if (customerIds.length === 0) {
-      const custResult = await db.execute('SELECT customer_id FROM customers');
-      customerIds.push(...custResult.rows.map(c => c.CUSTOMER_ID));
+    // Insert customers in batches using executeMany
+    progressCallback({ step: `Inserting ${baseCustomers} customers...`, progress: progress = 60 });
+    const customerBinds = [];
+
+    for (let i = 0; i < baseCustomers; i++) {
+      const firstName = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
+      const lastName = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
+      const city = CITIES[Math.floor(Math.random() * CITIES.length)];
+
+      customerBinds.push({
+        firstName,
+        lastName,
+        email: `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${i}@example.com`,
+        phone: `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
+        addr: `${Math.floor(Math.random() * 9999) + 1} Main Street`,
+        city,
+        state: 'State',
+        postal: String(Math.floor(Math.random() * 90000) + 10000),
+        countryId: countryIds[Math.floor(Math.random() * countryIds.length)],
+        credit: Math.floor(Math.random() * 10000) + 1000
+      });
     }
 
-    // Insert orders and order items
-    progressCallback({ step: `Inserting ${baseOrders} orders...`, progress: progress = 82 });
+    const customerSql = useDirectPath
+      ? `INSERT /*+ APPEND */ INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
+         VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit)`
+      : `INSERT INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
+         VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit)`;
+
+    try {
+      await this.executeManyWithCommit(db, customerSql, customerBinds, batchCommitSize);
+      progressCallback({ step: `Inserted ${baseCustomers} customers`, progress: progress = 65 });
+    } catch (err) {
+      console.log('Customer bulk insert warning:', err.message);
+    }
+
+    // Get all customer IDs via SELECT
+    const custResult = await db.execute('SELECT customer_id FROM customers ORDER BY customer_id');
+    const customerIds = custResult.rows.map(c => c.CUSTOMER_ID);
+
+    // Insert orders and order items using executeMany
+    progressCallback({ step: `Inserting ${baseOrders} orders...`, progress: progress = 70 });
     const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
     const paymentMethods = ['CREDIT_CARD', 'DEBIT_CARD', 'PAYPAL', 'BANK_TRANSFER', 'CRYPTO'];
 
-    for (let i = 0; i < baseOrders; i += batchSize) {
-      for (let j = 0; j < batchSize && (i + j) < baseOrders; j++) {
-        const customerId = customerIds[Math.floor(Math.random() * customerIds.length)];
-        const warehouseId = warehouseIds[Math.floor(Math.random() * warehouseIds.length)];
-        const status = statuses[Math.floor(Math.random() * statuses.length)];
-        const itemCount = Math.floor(Math.random() * 5) + 1;
+    // Prepare order data
+    const orderBinds = [];
+    const orderItemsData = [];
+    const paymentsData = [];
 
-        try {
-          // Create order
-          const orderResult = await db.execute(
-            `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
-             VALUES (:custId, :status, :whId, :ship, :notes) RETURNING order_id INTO :id`,
-            {
-              custId: customerId,
-              status,
-              whId: warehouseId,
-              ship: ['Standard', 'Express', 'Overnight'][Math.floor(Math.random() * 3)],
-              notes: `Order ${i + j + 1}`,
-              id: { type: 2002, dir: 3003 }
-            }
-          );
-          const orderId = orderResult.outBinds.id[0];
+    for (let i = 0; i < baseOrders; i++) {
+      const customerId = customerIds[Math.floor(Math.random() * customerIds.length)];
+      const warehouseId = warehouseIds[Math.floor(Math.random() * warehouseIds.length)];
+      const status = statuses[Math.floor(Math.random() * statuses.length)];
+      const itemCount = Math.floor(Math.random() * 5) + 1;
+      const shippingMethod = ['Standard', 'Express', 'Overnight'][Math.floor(Math.random() * 3)];
 
-          // Add order items
-          let subtotal = 0;
-          for (let k = 0; k < itemCount; k++) {
-            const productId = productIds[Math.floor(Math.random() * productIds.length)];
-            const quantity = Math.floor(Math.random() * 5) + 1;
-            const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
-            const lineTotal = quantity * unitPrice;
-            subtotal += lineTotal;
-
-            await db.execute(
-              `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-               VALUES (:orderId, :prodId, :qty, :price, :total)`,
-              {
-                orderId,
-                prodId: productId,
-                qty: quantity,
-                price: unitPrice,
-                total: lineTotal
-              }
-            );
-          }
-
-          // Update order totals
-          const tax = subtotal * 0.08;
-          const shipping = Math.random() * 20 + 5;
-          const total = subtotal + tax + shipping;
-
-          await db.execute(
-            `UPDATE orders SET subtotal = :sub, tax_amount = :tax, shipping_cost = :ship, total_amount = :total WHERE order_id = :id`,
-            { sub: subtotal, tax, ship: shipping, total, id: orderId }
-          );
-
-          // Add payment for non-pending orders
-          if (status !== 'PENDING' && status !== 'CANCELLED') {
-            await db.execute(
-              `INSERT INTO payments (order_id, amount, payment_method, transaction_ref, status)
-               VALUES (:orderId, :amount, :method, :ref, 'COMPLETED')`,
-              {
-                orderId,
-                amount: total,
-                method: paymentMethods[Math.floor(Math.random() * paymentMethods.length)],
-                ref: `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`
-              }
-            );
-          }
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Order warning:', err.message);
-        }
+      // Calculate order totals
+      let subtotal = 0;
+      const items = [];
+      for (let k = 0; k < itemCount; k++) {
+        const productId = productIds[Math.floor(Math.random() * productIds.length)];
+        const quantity = Math.floor(Math.random() * 5) + 1;
+        const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
+        const lineTotal = quantity * unitPrice;
+        subtotal += lineTotal;
+        items.push({ productId, quantity, unitPrice, lineTotal });
       }
-      progressCallback({ step: `Inserting orders (${Math.min(i + batchSize, baseOrders)}/${baseOrders})...`, progress: 82 + Math.floor((i / baseOrders) * 15) });
+
+      const tax = subtotal * 0.08;
+      const shipping = Math.random() * 20 + 5;
+      const total = subtotal + tax + shipping;
+
+      orderBinds.push({
+        custId: customerId,
+        status,
+        whId: warehouseId,
+        ship: shippingMethod,
+        notes: `Order ${i + 1}`,
+        subtotal,
+        tax,
+        shippingCost: shipping,
+        total
+      });
+
+      // Store order items for this order (we'll need the order ID later)
+      orderItemsData.push({ orderIndex: i, items });
+
+      // Store payment data for non-pending orders
+      if (status !== 'PENDING' && status !== 'CANCELLED') {
+        paymentsData.push({
+          orderIndex: i,
+          amount: total,
+          method: paymentMethods[Math.floor(Math.random() * paymentMethods.length)],
+          ref: `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`
+        });
+      }
+    }
+
+    // Insert orders using executeMany
+    const orderSql = useDirectPath
+      ? `INSERT /*+ APPEND */ INTO orders (customer_id, status, warehouse_id, shipping_method, notes, subtotal, tax_amount, shipping_cost, total_amount)
+         VALUES (:custId, :status, :whId, :ship, :notes, :subtotal, :tax, :shippingCost, :total)`
+      : `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes, subtotal, tax_amount, shipping_cost, total_amount)
+         VALUES (:custId, :status, :whId, :ship, :notes, :subtotal, :tax, :shippingCost, :total)`;
+
+    try {
+      await this.executeManyWithCommit(db, orderSql, orderBinds, batchCommitSize);
+      progressCallback({ step: `Inserted ${baseOrders} orders`, progress: progress = 75 });
+    } catch (err) {
+      console.log('Order bulk insert warning:', err.message);
+    }
+
+    // Get all order IDs via SELECT (get the most recent baseOrders orders)
+    // Since we're in the schema creation process, we expect minimal concurrent activity
+    // Note: Using string interpolation with validated integer to avoid FETCH FIRST bind parameter limitation
+    // Validate baseOrders is a safe integer to prevent SQL injection
+    const safeBaseOrders = Math.max(1, Math.floor(Number(baseOrders)));
+    if (safeBaseOrders !== baseOrders) {
+      throw new Error(`Invalid baseOrders value: ${baseOrders}`);
+    }
+    
+    const ordersResult = await db.execute(
+      `SELECT order_id FROM orders ORDER BY created_at DESC, order_id DESC FETCH FIRST ${safeBaseOrders} ROWS ONLY`
+    );
+    const orderIds = ordersResult.rows.map(o => o.ORDER_ID).reverse();
+    
+    // Validate we got the expected number of orders
+    if (orderIds.length !== safeBaseOrders) {
+      const message = `Warning: Expected ${safeBaseOrders} orders but found ${orderIds.length}. Some order items and payments may be skipped.`;
+      console.log(message);
+      progressCallback({ step: message, progress: progress });
+    }
+
+    // Insert order items using executeMany
+    progressCallback({ step: 'Inserting order items...', progress: progress = 78 });
+    const orderItemBinds = [];
+    
+    for (let i = 0; i < Math.min(orderItemsData.length, orderIds.length); i++) {
+      const orderId = orderIds[i];
+      if (!orderId) continue;
+      
+      for (const item of orderItemsData[i].items) {
+        orderItemBinds.push({
+          orderId,
+          prodId: item.productId,
+          qty: item.quantity,
+          price: item.unitPrice,
+          total: item.lineTotal
+        });
+      }
+    }
+
+    const orderItemSql = useDirectPath
+      ? `INSERT /*+ APPEND */ INTO order_items (order_id, product_id, quantity, unit_price, line_total)
+         VALUES (:orderId, :prodId, :qty, :price, :total)`
+      : `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
+         VALUES (:orderId, :prodId, :qty, :price, :total)`;
+
+    try {
+      await this.executeManyWithCommit(db, orderItemSql, orderItemBinds, batchCommitSize);
+      progressCallback({ step: `Inserted ${orderItemBinds.length} order items`, progress: progress = 82 });
+    } catch (err) {
+      console.log('Order items bulk insert warning:', err.message);
+    }
+
+    // Insert payments using executeMany
+    progressCallback({ step: 'Inserting payments...', progress: progress = 85 });
+    
+    // Create a map for O(1) lookup of payment data by order index
+    const paymentsMap = new Map(paymentsData.map(p => [p.orderIndex, p]));
+    
+    const paymentBinds = [];
+    for (let i = 0; i < Math.min(orderIds.length, safeBaseOrders); i++) {
+      const payment = paymentsMap.get(i);
+      if (!payment) continue;
+      
+      const orderId = orderIds[i];
+      if (!orderId) continue;
+      
+      paymentBinds.push({
+        orderId,
+        amount: payment.amount,
+        method: payment.method,
+        ref: payment.ref
+      });
+    }
+
+    const paymentSql = useDirectPath
+      ? `INSERT /*+ APPEND */ INTO payments (order_id, amount, payment_method, transaction_ref, status)
+         VALUES (:orderId, :amount, :method, :ref, 'COMPLETED')`
+      : `INSERT INTO payments (order_id, amount, payment_method, transaction_ref, status)
+         VALUES (:orderId, :amount, :method, :ref, 'COMPLETED')`;
+
+    if (paymentBinds.length > 0) {
+      try {
+        await this.executeManyWithCommit(db, paymentSql, paymentBinds, batchCommitSize);
+        progressCallback({ step: `Inserted ${paymentBinds.length} payments`, progress: progress = 88 });
+      } catch (err) {
+        console.log('Payment bulk insert warning:', err.message);
+      }
     }
 
     // Add some product reviews
-    progressCallback({ step: 'Adding product reviews...', progress: 98 });
+    progressCallback({ step: 'Adding product reviews...', progress: 90 });
     const reviewCount = Math.min(baseCustomers, baseProducts) * 0.5;
     for (let i = 0; i < reviewCount; i++) {
       try {
@@ -580,7 +675,7 @@ class SchemaManager {
       }
     }
 
-    progressCallback({ step: 'Data population complete!', progress: 100 });
+    progressCallback({ step: 'Data population complete!', progress: 90 });
   }
 
   async dropSchema(db) {
