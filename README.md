@@ -129,12 +129,19 @@ Enter your Oracle database credentials:
 
 Choose a scale factor to determine the size of your test data:
 
-| Scale Factor | Customers | Products | Orders |
-|-------------|-----------|----------|--------|
-| 1x          | 1,000     | 500      | 5,000  |
-| 10x         | 10,000    | 5,000    | 50,000 |
-| 50x         | 50,000    | 25,000   | 250,000|
-| 100x        | 100,000   | 50,000   | 500,000|
+| Scale Factor | Customers | Products | Orders | Est. Load Time |
+|-------------|-----------|----------|--------|----------------|
+| 1x          | 1,000     | 500      | 5,000  | ~10-20 sec     |
+| 10x         | 10,000    | 5,000    | 50,000 | ~2-3 min       |
+| 50x         | 50,000    | 25,000   | 250,000| ~8-12 min      |
+| 100x        | 100,000   | 50,000   | 500,000| ~15-25 min     |
+
+**Performance Optimizations**: The schema creation process has been optimized for faster loading:
+- **Deferred Index Creation**: Indexes are created after data population to avoid overhead during bulk inserts
+- **Bulk Operations**: Uses Oracle's `executeMany` for efficient batch processing
+- **Three-Phase Progress**: Schema creation (0-30%), data population (30-90%), index creation (90-100%)
+
+See [PERFORMANCE_IMPROVEMENTS.md](PERFORMANCE_IMPROVEMENTS.md) for detailed information about performance optimizations.
 
 ### 3. Configure and Run Stress Test
 
