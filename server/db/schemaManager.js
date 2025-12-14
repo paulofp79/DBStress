@@ -565,15 +565,21 @@ class SchemaManager {
 
     // Get all order IDs via SELECT (get the most recent baseOrders orders)
     // Since we're in the schema creation process, we expect minimal concurrent activity
-    // Note: Using string interpolation since FETCH FIRST doesn't support bind variables
+    // Note: Using string interpolation with validated integer to avoid FETCH FIRST bind parameter limitation
+    // Validate baseOrders is a safe integer to prevent SQL injection
+    const safeBaseOrders = Math.max(1, Math.floor(Number(baseOrders)));
+    if (safeBaseOrders !== baseOrders) {
+      throw new Error(`Invalid baseOrders value: ${baseOrders}`);
+    }
+    
     const ordersResult = await db.execute(
-      `SELECT order_id FROM orders ORDER BY created_at DESC, order_id DESC FETCH FIRST ${baseOrders} ROWS ONLY`
+      `SELECT order_id FROM orders ORDER BY created_at DESC, order_id DESC FETCH FIRST ${safeBaseOrders} ROWS ONLY`
     );
     const orderIds = ordersResult.rows.map(o => o.ORDER_ID).reverse();
     
     // Validate we got the expected number of orders
-    if (orderIds.length !== baseOrders) {
-      const message = `Warning: Expected ${baseOrders} orders but found ${orderIds.length}. Some order items and payments may be skipped.`;
+    if (orderIds.length !== safeBaseOrders) {
+      const message = `Warning: Expected ${safeBaseOrders} orders but found ${orderIds.length}. Some order items and payments may be skipped.`;
       console.log(message);
       progressCallback({ step: message, progress: progress });
     }
@@ -614,13 +620,10 @@ class SchemaManager {
     progressCallback({ step: 'Inserting payments...', progress: progress = 85 });
     
     // Create a map for O(1) lookup of payment data by order index
-    const paymentsMap = new Map();
-    for (const payment of paymentsData) {
-      paymentsMap.set(payment.orderIndex, payment);
-    }
+    const paymentsMap = new Map(paymentsData.map(p => [p.orderIndex, p]));
     
     const paymentBinds = [];
-    for (let i = 0; i < Math.min(orderIds.length, baseOrders); i++) {
+    for (let i = 0; i < Math.min(orderIds.length, safeBaseOrders); i++) {
       const payment = paymentsMap.get(i);
       if (!payment) continue;
       
