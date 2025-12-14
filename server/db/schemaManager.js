@@ -282,14 +282,11 @@ class SchemaManager {
 
     let progress = 50;
 
-    // Insert regions
+    // Insert regions (using positional binds - array format)
     progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
     for (const region of REGIONS_DATA) {
       try {
-        await db.execute(
-          `INSERT INTO regions (region_name) VALUES (:name)`,
-          [region]
-        );
+        await db.execute(`INSERT INTO regions (region_name) VALUES (:1)`, [region]);
       } catch (err) {
         if (!err.message.includes('ORA-00001')) throw err;
       }
@@ -305,7 +302,7 @@ class SchemaManager {
     for (const country of COUNTRIES_DATA) {
       try {
         await db.execute(
-          `INSERT INTO countries (country_name, country_code, region_id) VALUES (:name, :code, :regionId)`,
+          `INSERT INTO countries (country_name, country_code, region_id) VALUES (:1, :2, :3)`,
           [country.name, country.code, regionMap[country.region]]
         );
       } catch (err) {
@@ -314,12 +311,9 @@ class SchemaManager {
     }
 
     // Get country IDs
-    const countriesResult = await db.execute('SELECT country_id, country_name FROM countries');
-    const countryMap = {};
-    countriesResult.rows.forEach(c => countryMap[c.COUNTRY_NAME] = c.COUNTRY_ID);
-    const countryIds = Object.values(countryMap);
+    const countriesResult = await db.execute('SELECT country_id FROM countries');
+    const countryIds = countriesResult.rows.map(c => c.COUNTRY_ID);
 
-    // Ensure we have countries
     if (countryIds.length === 0) {
       throw new Error('No countries available. Please check database permissions.');
     }
@@ -330,7 +324,7 @@ class SchemaManager {
     for (let i = 0; i < warehouseLocations.length; i++) {
       try {
         await db.execute(
-          `INSERT INTO warehouses (warehouse_name, location, country_id, capacity) VALUES (:name, :loc, :countryId, :cap)`,
+          `INSERT INTO warehouses (warehouse_name, location, country_id, capacity) VALUES (:1, :2, :3, :4)`,
           [warehouseLocations[i], `Warehouse ${i + 1}`, countryIds[i % countryIds.length], 50000 * scaleFactor]
         );
       } catch (err) {
@@ -342,100 +336,72 @@ class SchemaManager {
     const warehousesResult = await db.execute('SELECT warehouse_id FROM warehouses');
     const warehouseIds = warehousesResult.rows.map(w => w.WAREHOUSE_ID);
 
-    // Insert categories
+    // Insert categories (parent categories first, then children)
     progressCallback({ step: 'Inserting categories...', progress: progress += 2 });
-    const categoryMap = {};
     for (const cat of CATEGORIES_DATA) {
-      try {
-        const parentId = cat.parent ? categoryMap[cat.parent] : null;
-        const result = await db.execute(
-          `INSERT INTO categories (category_name, parent_category_id, description) VALUES (:name, :parentId, :desc) RETURNING category_id INTO :id`,
-          {
-            name: cat.name,
-            parentId: parentId,
-            desc: `${cat.name} category`,
-            id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
-          }
-        );
-        categoryMap[cat.name] = result.outBinds.id[0];
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) {
-          // Try to get existing category ID
-          try {
-            const existing = await db.execute('SELECT category_id FROM categories WHERE category_name = :name', [cat.name]);
-            if (existing.rows.length > 0) {
-              categoryMap[cat.name] = existing.rows[0].CATEGORY_ID;
-            }
-          } catch (e) {
-            console.log('Category lookup warning:', e.message);
-          }
-        } else {
-          // Duplicate - try to get existing ID
-          try {
-            const existing = await db.execute('SELECT category_id FROM categories WHERE category_name = :name', [cat.name]);
-            if (existing.rows.length > 0) {
-              categoryMap[cat.name] = existing.rows[0].CATEGORY_ID;
-            }
-          } catch (e) {
-            // Ignore
-          }
+      if (!cat.parent) {
+        try {
+          await db.execute(
+            `INSERT INTO categories (category_name, description) VALUES (:1, :2)`,
+            [cat.name, `${cat.name} category`]
+          );
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
         }
       }
     }
 
-    // Get category IDs, fetch from DB if empty
-    let categoryIds = Object.values(categoryMap);
-    if (categoryIds.length === 0) {
-      const catResult = await db.execute('SELECT category_id FROM categories');
-      categoryIds = catResult.rows.map(c => c.CATEGORY_ID);
+    // Get parent category IDs
+    const parentCatResult = await db.execute('SELECT category_id, category_name FROM categories');
+    const categoryMap = {};
+    parentCatResult.rows.forEach(c => categoryMap[c.CATEGORY_NAME] = c.CATEGORY_ID);
+
+    // Insert child categories
+    for (const cat of CATEGORIES_DATA) {
+      if (cat.parent && categoryMap[cat.parent]) {
+        try {
+          await db.execute(
+            `INSERT INTO categories (category_name, parent_category_id, description) VALUES (:1, :2, :3)`,
+            [cat.name, categoryMap[cat.parent], `${cat.name} category`]
+          );
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
+      }
     }
 
-    // Ensure we have at least one category
+    // Get all category IDs
+    const catResult = await db.execute('SELECT category_id FROM categories');
+    const categoryIds = catResult.rows.map(c => c.CATEGORY_ID);
+
     if (categoryIds.length === 0) {
       throw new Error('No categories available. Please check database permissions.');
     }
 
-    // Insert products in batches
+    // Insert products in batches (no RETURNING INTO - just insert)
     progressCallback({ step: `Inserting ${baseProducts} products...`, progress: progress += 2 });
-    const productIds = [];
     const batchSize = 100;
 
     for (let i = 0; i < baseProducts; i += batchSize) {
-      const batch = [];
       for (let j = 0; j < batchSize && (i + j) < baseProducts; j++) {
         const adj = PRODUCT_ADJECTIVES[Math.floor(Math.random() * PRODUCT_ADJECTIVES.length)];
         const noun = PRODUCT_NOUNS[Math.floor(Math.random() * PRODUCT_NOUNS.length)];
-        const price = (Math.random() * 500 + 10).toFixed(2);
-        batch.push({
-          name: `${adj} ${noun} ${i + j + 1}`,
-          desc: `High quality ${noun.toLowerCase()} with premium features`,
-          categoryId: categoryIds[Math.floor(Math.random() * categoryIds.length)],
-          price: parseFloat(price),
-          cost: parseFloat((price * 0.6).toFixed(2)),
-          weight: parseFloat((Math.random() * 10 + 0.5).toFixed(2))
-        });
-      }
+        const price = parseFloat((Math.random() * 500 + 10).toFixed(2));
+        const categoryId = categoryIds[Math.floor(Math.random() * categoryIds.length)];
 
-      for (const prod of batch) {
         try {
-          // Ensure categoryId is valid
-          if (prod.categoryId === undefined || prod.categoryId === null) {
-            prod.categoryId = categoryIds[0];
-          }
-          const result = await db.execute(
+          await db.execute(
             `INSERT INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
-             VALUES (:name, :desc, :categoryId, :price, :cost, :weight) RETURNING product_id INTO :id`,
-            {
-              name: prod.name,
-              desc: prod.desc,
-              categoryId: prod.categoryId,
-              price: prod.price,
-              cost: prod.cost,
-              weight: prod.weight,
-              id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
-            }
+             VALUES (:1, :2, :3, :4, :5, :6)`,
+            [
+              `${adj} ${noun} ${i + j + 1}`,
+              `High quality ${noun.toLowerCase()} with premium features`,
+              categoryId,
+              price,
+              parseFloat((price * 0.6).toFixed(2)),
+              parseFloat((Math.random() * 10 + 0.5).toFixed(2))
+            ]
           );
-          productIds.push(result.outBinds.id[0]);
         } catch (err) {
           if (!err.message.includes('ORA-00001')) console.log('Product insert warning:', err.message);
         }
@@ -443,10 +409,12 @@ class SchemaManager {
       progressCallback({ step: `Inserting products (${Math.min(i + batchSize, baseProducts)}/${baseProducts})...`, progress: 60 + Math.floor((i / baseProducts) * 5) });
     }
 
-    // Get all product IDs if we didn't capture them
+    // Get all product IDs
+    const prodsResult = await db.execute('SELECT product_id FROM products');
+    const productIds = prodsResult.rows.map(p => p.PRODUCT_ID);
+
     if (productIds.length === 0) {
-      const prodsResult = await db.execute('SELECT product_id FROM products');
-      productIds.push(...prodsResult.rows.map(p => p.PRODUCT_ID));
+      console.log('Warning: No products were inserted');
     }
 
     // Insert inventory for each product in each warehouse
@@ -456,14 +424,14 @@ class SchemaManager {
         try {
           await db.execute(
             `INSERT INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
-             VALUES (:prodId, :whId, :qty, :reserved, :reorder)`,
-            {
-              prodId: productId,
-              whId: warehouseId,
-              qty: Math.floor(Math.random() * 1000) + 100,
-              reserved: Math.floor(Math.random() * 50),
-              reorder: Math.floor(Math.random() * 20) + 10
-            }
+             VALUES (:1, :2, :3, :4, :5)`,
+            [
+              productId,
+              warehouseId,
+              Math.floor(Math.random() * 1000) + 100,
+              Math.floor(Math.random() * 50),
+              Math.floor(Math.random() * 20) + 10
+            ]
           );
         } catch (err) {
           if (!err.message.includes('ORA-00001')) console.log('Inventory warning:', err.message);
@@ -473,40 +441,31 @@ class SchemaManager {
 
     // Insert customers in batches
     progressCallback({ step: `Inserting ${baseCustomers} customers...`, progress: progress = 70 });
-    const customerIds = [];
 
     for (let i = 0; i < baseCustomers; i += batchSize) {
       for (let j = 0; j < batchSize && (i + j) < baseCustomers; j++) {
         const firstName = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
         const lastName = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
         const city = CITIES[Math.floor(Math.random() * CITIES.length)];
-        const selectedCountryId = countryIds[Math.floor(Math.random() * countryIds.length)];
-
-        // Skip if we don't have a valid country ID
-        if (selectedCountryId === undefined || selectedCountryId === null) {
-          console.log('Skipping customer - no valid country ID');
-          continue;
-        }
+        const countryId = countryIds[Math.floor(Math.random() * countryIds.length)];
 
         try {
-          const result = await db.execute(
+          await db.execute(
             `INSERT INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
-             VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit) RETURNING customer_id INTO :id`,
-            {
-              firstName: firstName,
-              lastName: lastName,
-              email: `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${i + j}@example.com`,
-              phone: `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
-              addr: `${Math.floor(Math.random() * 9999) + 1} Main Street`,
-              city: city,
-              state: 'State',
-              postal: String(Math.floor(Math.random() * 90000) + 10000),
-              countryId: selectedCountryId,
-              credit: Math.floor(Math.random() * 10000) + 1000,
-              id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
-            }
+             VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
+            [
+              firstName,
+              lastName,
+              `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${i + j}@example.com`,
+              `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
+              `${Math.floor(Math.random() * 9999) + 1} Main Street`,
+              city,
+              'State',
+              String(Math.floor(Math.random() * 90000) + 10000),
+              countryId,
+              Math.floor(Math.random() * 10000) + 1000
+            ]
           );
-          customerIds.push(result.outBinds.id[0]);
         } catch (err) {
           if (!err.message.includes('ORA-00001')) console.log('Customer warning:', err.message);
         }
@@ -514,27 +473,20 @@ class SchemaManager {
       progressCallback({ step: `Inserting customers (${Math.min(i + batchSize, baseCustomers)}/${baseCustomers})...`, progress: 70 + Math.floor((i / baseCustomers) * 10) });
     }
 
-    // Get all customer IDs if needed
-    if (customerIds.length === 0) {
-      const custResult = await db.execute('SELECT customer_id FROM customers');
-      customerIds.push(...custResult.rows.map(c => c.CUSTOMER_ID));
-    }
+    // Get all customer IDs
+    const custResult = await db.execute('SELECT customer_id FROM customers');
+    const customerIds = custResult.rows.map(c => c.CUSTOMER_ID);
 
-    // Ensure we have customers and warehouses before creating orders
-    if (customerIds.length === 0) {
-      console.log('No customers available, skipping order creation');
-      progressCallback({ step: 'Skipping orders - no customers', progress: 95 });
-    } else if (warehouseIds.length === 0) {
-      console.log('No warehouses available, skipping order creation');
-      progressCallback({ step: 'Skipping orders - no warehouses', progress: 95 });
-    } else if (productIds.length === 0) {
-      console.log('No products available, skipping order creation');
-      progressCallback({ step: 'Skipping orders - no products', progress: 95 });
+    // Check if we can create orders
+    if (customerIds.length === 0 || warehouseIds.length === 0 || productIds.length === 0) {
+      console.log('Skipping orders - missing required data');
+      progressCallback({ step: 'Skipping orders - missing data', progress: 95 });
     } else {
       // Insert orders and order items
       progressCallback({ step: `Inserting ${baseOrders} orders...`, progress: progress = 82 });
       const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
       const paymentMethods = ['CREDIT_CARD', 'DEBIT_CARD', 'PAYPAL', 'BANK_TRANSFER', 'CRYPTO'];
+      const shippingMethods = ['Standard', 'Express', 'Overnight'];
 
       for (let i = 0; i < baseOrders; i += batchSize) {
         for (let j = 0; j < batchSize && (i + j) < baseOrders; j++) {
@@ -543,70 +495,66 @@ class SchemaManager {
           const status = statuses[Math.floor(Math.random() * statuses.length)];
           const itemCount = Math.floor(Math.random() * 5) + 1;
 
-          // Skip if any ID is invalid
-          if (!customerId || !warehouseId) continue;
-
           try {
-            // Create order
-            const orderResult = await db.execute(
+            // Create order and get the ID using a sequence approach
+            await db.execute(
               `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
-               VALUES (:custId, :status, :whId, :ship, :notes) RETURNING order_id INTO :id`,
-              {
-                custId: customerId,
-                status: status,
-                whId: warehouseId,
-                ship: ['Standard', 'Express', 'Overnight'][Math.floor(Math.random() * 3)],
-                notes: `Order ${i + j + 1}`,
-                id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
-              }
+               VALUES (:1, :2, :3, :4, :5)`,
+              [
+                customerId,
+                status,
+                warehouseId,
+                shippingMethods[Math.floor(Math.random() * 3)],
+                `Order ${i + j + 1}`
+              ]
             );
-            const orderId = orderResult.outBinds.id[0];
+
+            // Get the order ID we just created
+            const orderIdResult = await db.execute(
+              `SELECT MAX(order_id) as order_id FROM orders WHERE customer_id = :1`,
+              [customerId]
+            );
+            const orderId = orderIdResult.rows[0]?.ORDER_ID;
+
+            if (!orderId) continue;
 
             // Add order items
             let subtotal = 0;
             for (let k = 0; k < itemCount; k++) {
               const productId = productIds[Math.floor(Math.random() * productIds.length)];
-              if (!productId) continue;
-
               const quantity = Math.floor(Math.random() * 5) + 1;
               const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
-              const lineTotal = quantity * unitPrice;
+              const lineTotal = parseFloat((quantity * unitPrice).toFixed(2));
               subtotal += lineTotal;
 
               await db.execute(
                 `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-                 VALUES (:orderId, :prodId, :qty, :price, :total)`,
-                {
-                  orderId: orderId,
-                  prodId: productId,
-                  qty: quantity,
-                  price: unitPrice,
-                  total: lineTotal
-                }
+                 VALUES (:1, :2, :3, :4, :5)`,
+                [orderId, productId, quantity, unitPrice, lineTotal]
               );
             }
 
-          // Update order totals
-          const tax = subtotal * 0.08;
-          const shipping = Math.random() * 20 + 5;
-          const total = subtotal + tax + shipping;
+            // Update order totals
+            const tax = parseFloat((subtotal * 0.08).toFixed(2));
+            const shipping = parseFloat((Math.random() * 20 + 5).toFixed(2));
+            const total = parseFloat((subtotal + tax + shipping).toFixed(2));
 
-          await db.execute(
-            `UPDATE orders SET subtotal = :sub, tax_amount = :tax, shipping_cost = :ship, total_amount = :total WHERE order_id = :id`,
-            { sub: subtotal, tax, ship: shipping, total, id: orderId }
-          );
+            await db.execute(
+              `UPDATE orders SET subtotal = :1, tax_amount = :2, shipping_cost = :3, total_amount = :4 WHERE order_id = :5`,
+              [subtotal, tax, shipping, total, orderId]
+            );
 
             // Add payment for non-pending orders
             if (status !== 'PENDING' && status !== 'CANCELLED') {
               await db.execute(
                 `INSERT INTO payments (order_id, amount, payment_method, transaction_ref, status)
-                 VALUES (:orderId, :amount, :method, :ref, 'COMPLETED')`,
-                {
-                  orderId: orderId,
-                  amount: total,
-                  method: paymentMethods[Math.floor(Math.random() * paymentMethods.length)],
-                  ref: `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`
-                }
+                 VALUES (:1, :2, :3, :4, 'COMPLETED')`,
+                [
+                  orderId,
+                  total,
+                  paymentMethods[Math.floor(Math.random() * paymentMethods.length)],
+                  `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`
+                ]
               );
             }
           } catch (err) {
@@ -615,27 +563,31 @@ class SchemaManager {
         }
         progressCallback({ step: `Inserting orders (${Math.min(i + batchSize, baseOrders)}/${baseOrders})...`, progress: 82 + Math.floor((i / baseOrders) * 15) });
       }
-    } // end else block for orders
+    }
 
     // Add some product reviews
     progressCallback({ step: 'Adding product reviews...', progress: 98 });
-    const reviewCount = Math.min(baseCustomers, baseProducts) * 0.5;
-    for (let i = 0; i < reviewCount; i++) {
-      try {
-        await db.execute(
-          `INSERT INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
-           VALUES (:prodId, :custId, :rating, :title, :text, :verified)`,
-          {
-            prodId: productIds[Math.floor(Math.random() * productIds.length)],
-            custId: customerIds[Math.floor(Math.random() * customerIds.length)],
-            rating: Math.floor(Math.random() * 5) + 1,
-            title: ['Great product!', 'Good value', 'As expected', 'Could be better', 'Excellent quality'][Math.floor(Math.random() * 5)],
-            text: 'This is a sample review for the product.',
-            verified: Math.random() > 0.3 ? 1 : 0
-          }
-        );
-      } catch (err) {
-        // Ignore duplicate reviews
+    if (productIds.length > 0 && customerIds.length > 0) {
+      const reviewCount = Math.floor(Math.min(baseCustomers, baseProducts) * 0.5);
+      const reviewTitles = ['Great product!', 'Good value', 'As expected', 'Could be better', 'Excellent quality'];
+
+      for (let i = 0; i < reviewCount; i++) {
+        try {
+          await db.execute(
+            `INSERT INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
+             VALUES (:1, :2, :3, :4, :5, :6)`,
+            [
+              productIds[Math.floor(Math.random() * productIds.length)],
+              customerIds[Math.floor(Math.random() * customerIds.length)],
+              Math.floor(Math.random() * 5) + 1,
+              reviewTitles[Math.floor(Math.random() * reviewTitles.length)],
+              'This is a sample review for the product.',
+              Math.random() > 0.3 ? 1 : 0
+            ]
+          );
+        } catch (err) {
+          // Ignore duplicate reviews
+        }
       }
     }
 

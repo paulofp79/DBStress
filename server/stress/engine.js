@@ -152,18 +152,21 @@ class StressEngine {
 
       if (!customerId || !warehouseId) return;
 
-      const result = await connection.execute(
+      // Insert order
+      await connection.execute(
         `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
-         VALUES (:custId, 'PENDING', :whId, 'Standard', 'Stress test order')
-         RETURNING order_id INTO :id`,
-        {
-          custId: customerId,
-          whId: warehouseId,
-          id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
-        }
+         VALUES (:1, 'PENDING', :2, 'Standard', 'Stress test order')`,
+        [customerId, warehouseId]
       );
 
-      const orderId = result.outBinds.id[0];
+      // Get the order ID we just created
+      const orderIdResult = await connection.execute(
+        `SELECT MAX(order_id) as order_id FROM orders WHERE customer_id = :1`,
+        [customerId]
+      );
+      const orderId = orderIdResult.rows[0]?.ORDER_ID;
+
+      if (!orderId) return;
 
       // Add 1-3 order items
       const itemCount = Math.floor(Math.random() * 3) + 1;
@@ -175,23 +178,24 @@ class StressEngine {
 
         const quantity = Math.floor(Math.random() * 5) + 1;
         const unitPrice = parseFloat((Math.random() * 100 + 10).toFixed(2));
-        const lineTotal = quantity * unitPrice;
+        const lineTotal = parseFloat((quantity * unitPrice).toFixed(2));
         subtotal += lineTotal;
 
         await connection.execute(
           `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-           VALUES (:orderId, :prodId, :qty, :price, :total)`,
-          { orderId, prodId: productId, qty: quantity, price: unitPrice, total: lineTotal }
+           VALUES (:1, :2, :3, :4, :5)`,
+          [orderId, productId, quantity, unitPrice, lineTotal]
         );
       }
 
       // Update order total
-      const tax = subtotal * 0.08;
-      const shipping = Math.random() * 15 + 5;
+      const tax = parseFloat((subtotal * 0.08).toFixed(2));
+      const shipping = parseFloat((Math.random() * 15 + 5).toFixed(2));
+      const total = parseFloat((subtotal + tax + shipping).toFixed(2));
       await connection.execute(
-        `UPDATE orders SET subtotal = :sub, tax_amount = :tax, shipping_cost = :ship, total_amount = :total
-         WHERE order_id = :id`,
-        { sub: subtotal, tax, ship: shipping, total: subtotal + tax + shipping, id: orderId }
+        `UPDATE orders SET subtotal = :1, tax_amount = :2, shipping_cost = :3, total_amount = :4
+         WHERE order_id = :5`,
+        [subtotal, tax, shipping, total, orderId]
       );
 
     } else if (type === 1) {
@@ -203,15 +207,15 @@ class StressEngine {
 
       await connection.execute(
         `INSERT INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
-         VALUES (:prodId, :custId, :rating, :title, :text, :verified)`,
-        {
-          prodId: productId,
-          custId: customerId,
-          rating: Math.floor(Math.random() * 5) + 1,
-          title: 'Stress test review',
-          text: 'This is an automated review generated during stress testing.',
-          verified: Math.random() > 0.5 ? 1 : 0
-        }
+         VALUES (:1, :2, :3, :4, :5, :6)`,
+        [
+          productId,
+          customerId,
+          Math.floor(Math.random() * 5) + 1,
+          'Stress test review',
+          'This is an automated review generated during stress testing.',
+          Math.random() > 0.5 ? 1 : 0
+        ]
       );
 
     } else {
@@ -221,8 +225,8 @@ class StressEngine {
 
       await connection.execute(
         `INSERT INTO order_history (order_id, old_status, new_status, changed_by, change_reason)
-         VALUES (:orderId, 'PENDING', 'PROCESSING', 'STRESS_TEST', 'Automated status change')`,
-        { orderId }
+         VALUES (:1, 'PENDING', 'PROCESSING', 'STRESS_TEST', 'Automated status change')`,
+        [orderId]
       );
     }
   }
@@ -240,8 +244,8 @@ class StressEngine {
       const newStatus = statuses[Math.floor(Math.random() * statuses.length)];
 
       await connection.execute(
-        `UPDATE orders SET status = :status, updated_at = CURRENT_TIMESTAMP WHERE order_id = :id`,
-        { status: newStatus, id: orderId }
+        `UPDATE orders SET status = :1, updated_at = CURRENT_TIMESTAMP WHERE order_id = :2`,
+        [newStatus, orderId]
       );
 
     } else if (type === 1) {
@@ -253,10 +257,10 @@ class StressEngine {
 
       await connection.execute(
         `UPDATE inventory
-         SET quantity_on_hand = GREATEST(0, quantity_on_hand + :change),
+         SET quantity_on_hand = GREATEST(0, quantity_on_hand + :1),
              updated_at = CURRENT_TIMESTAMP
-         WHERE inventory_id = :id`,
-        { change: qtyChange, id: inventoryId }
+         WHERE inventory_id = :2`,
+        [qtyChange, inventoryId]
       );
 
     } else if (type === 2) {
@@ -268,10 +272,10 @@ class StressEngine {
 
       await connection.execute(
         `UPDATE customers
-         SET balance = balance + :change,
+         SET balance = balance + :1,
              updated_at = CURRENT_TIMESTAMP
-         WHERE customer_id = :id`,
-        { change: balanceChange, id: customerId }
+         WHERE customer_id = :2`,
+        [balanceChange, customerId]
       );
 
     } else {
@@ -283,10 +287,10 @@ class StressEngine {
 
       await connection.execute(
         `UPDATE products
-         SET unit_price = GREATEST(1, unit_price + :change),
+         SET unit_price = GREATEST(1, unit_price + :1),
              updated_at = CURRENT_TIMESTAMP
-         WHERE product_id = :id`,
-        { change: priceChange, id: productId }
+         WHERE product_id = :2`,
+        [priceChange, productId]
       );
     }
   }
@@ -301,8 +305,8 @@ class StressEngine {
       if (!reviewId) return;
 
       await connection.execute(
-        `DELETE FROM product_reviews WHERE review_id = :id`,
-        { id: reviewId }
+        `DELETE FROM product_reviews WHERE review_id = :1`,
+        [reviewId]
       );
 
     } else if (type === 1) {
@@ -311,8 +315,8 @@ class StressEngine {
       if (!historyId) return;
 
       await connection.execute(
-        `DELETE FROM order_history WHERE history_id = :id`,
-        { id: historyId }
+        `DELETE FROM order_history WHERE history_id = :1`,
+        [historyId]
       );
 
     } else {
@@ -326,10 +330,10 @@ class StressEngine {
           const orderId = result.rows[0].ORDER_ID;
 
           // Delete in correct order due to FK constraints
-          await connection.execute(`DELETE FROM payments WHERE order_id = :id`, { id: orderId });
-          await connection.execute(`DELETE FROM order_history WHERE order_id = :id`, { id: orderId });
-          await connection.execute(`DELETE FROM order_items WHERE order_id = :id`, { id: orderId });
-          await connection.execute(`DELETE FROM orders WHERE order_id = :id`, { id: orderId });
+          await connection.execute(`DELETE FROM payments WHERE order_id = :1`, [orderId]);
+          await connection.execute(`DELETE FROM order_history WHERE order_id = :1`, [orderId]);
+          await connection.execute(`DELETE FROM order_items WHERE order_id = :1`, [orderId]);
+          await connection.execute(`DELETE FROM orders WHERE order_id = :1`, [orderId]);
         }
       } catch (err) {
         // Ignore - might have concurrent deletes
@@ -379,10 +383,10 @@ class StressEngine {
       await connection.execute(
         `SELECT o.order_id, o.order_date, o.status, o.total_amount
          FROM orders o
-         WHERE o.customer_id = :custId
+         WHERE o.customer_id = :1
          ORDER BY o.order_date DESC
          FETCH FIRST 50 ROWS ONLY`,
-        { custId: customerId }
+        [customerId]
       );
 
     } else if (type === 4) {
@@ -395,8 +399,8 @@ class StressEngine {
          FROM orders o
          JOIN order_items oi ON o.order_id = oi.order_id
          JOIN products p ON oi.product_id = p.product_id
-         WHERE o.order_id = :orderId`,
-        { orderId }
+         WHERE o.order_id = :1`,
+        [orderId]
       );
 
     } else {
