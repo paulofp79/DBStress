@@ -1,4 +1,5 @@
 // Stress Test Engine for Oracle Database
+const oracledb = require('oracledb');
 
 class StressEngine {
   constructor() {
@@ -158,7 +159,7 @@ class StressEngine {
         {
           custId: customerId,
           whId: warehouseId,
-          id: { type: 2002, dir: 3003 }
+          id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
         }
       );
 

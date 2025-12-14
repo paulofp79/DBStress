@@ -1,4 +1,5 @@
 // Schema Manager for Online Sales Database
+const oracledb = require('oracledb');
 
 const TABLES = {
   REGIONS: `
@@ -348,21 +349,46 @@ class SchemaManager {
             name: cat.name,
             parentId: parentId,
             desc: `${cat.name} category`,
-            id: { type: 2002, dir: 3003 } // NUMBER, BIND_OUT
+            id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
           }
         );
         categoryMap[cat.name] = result.outBinds.id[0];
       } catch (err) {
         if (!err.message.includes('ORA-00001')) {
           // Try to get existing category ID
-          const existing = await db.execute('SELECT category_id FROM categories WHERE category_name = :name', [cat.name]);
-          if (existing.rows.length > 0) {
-            categoryMap[cat.name] = existing.rows[0].CATEGORY_ID;
+          try {
+            const existing = await db.execute('SELECT category_id FROM categories WHERE category_name = :name', [cat.name]);
+            if (existing.rows.length > 0) {
+              categoryMap[cat.name] = existing.rows[0].CATEGORY_ID;
+            }
+          } catch (e) {
+            console.log('Category lookup warning:', e.message);
+          }
+        } else {
+          // Duplicate - try to get existing ID
+          try {
+            const existing = await db.execute('SELECT category_id FROM categories WHERE category_name = :name', [cat.name]);
+            if (existing.rows.length > 0) {
+              categoryMap[cat.name] = existing.rows[0].CATEGORY_ID;
+            }
+          } catch (e) {
+            // Ignore
           }
         }
       }
     }
-    const categoryIds = Object.values(categoryMap);
+
+    // Get category IDs, fetch from DB if empty
+    let categoryIds = Object.values(categoryMap);
+    if (categoryIds.length === 0) {
+      const catResult = await db.execute('SELECT category_id FROM categories');
+      categoryIds = catResult.rows.map(c => c.CATEGORY_ID);
+    }
+
+    // Ensure we have at least one category
+    if (categoryIds.length === 0) {
+      throw new Error('No categories available. Please check database permissions.');
+    }
 
     // Insert products in batches
     progressCallback({ step: `Inserting ${baseProducts} products...`, progress: progress += 2 });
@@ -387,6 +413,10 @@ class SchemaManager {
 
       for (const prod of batch) {
         try {
+          // Ensure categoryId is valid
+          if (prod.categoryId === undefined || prod.categoryId === null) {
+            prod.categoryId = categoryIds[0];
+          }
           const result = await db.execute(
             `INSERT INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
              VALUES (:name, :desc, :categoryId, :price, :cost, :weight) RETURNING product_id INTO :id`,
@@ -397,7 +427,7 @@ class SchemaManager {
               price: prod.price,
               cost: prod.cost,
               weight: prod.weight,
-              id: { type: 2002, dir: 3003 }
+              id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
             }
           );
           productIds.push(result.outBinds.id[0]);
@@ -461,7 +491,7 @@ class SchemaManager {
               postal: String(Math.floor(Math.random() * 90000) + 10000),
               countryId: countryIds[Math.floor(Math.random() * countryIds.length)],
               credit: Math.floor(Math.random() * 10000) + 1000,
-              id: { type: 2002, dir: 3003 }
+              id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
             }
           );
           customerIds.push(result.outBinds.id[0]);
@@ -501,7 +531,7 @@ class SchemaManager {
               whId: warehouseId,
               ship: ['Standard', 'Express', 'Overnight'][Math.floor(Math.random() * 3)],
               notes: `Order ${i + j + 1}`,
-              id: { type: 2002, dir: 3003 }
+              id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT }
             }
           );
           const orderId = orderResult.outBinds.id[0];
