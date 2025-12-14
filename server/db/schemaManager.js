@@ -227,6 +227,19 @@ const PRODUCT_ADJECTIVES = ['Premium', 'Professional', 'Ultra', 'Advanced', 'Cla
 const PRODUCT_NOUNS = ['Laptop', 'Phone', 'Tablet', 'Headphones', 'Speaker', 'Camera', 'Watch', 'Keyboard', 'Mouse', 'Monitor', 'Shirt', 'Pants', 'Jacket', 'Shoes', 'Bag', 'Chair', 'Desk', 'Lamp', 'Sofa', 'Bed'];
 
 class SchemaManager {
+  // Helper function to handle executeMany with consistent commit logic
+  async executeManyWithCommit(db, sql, binds, batchCommitSize) {
+    const shouldAutoCommit = batchCommitSize >= binds.length;
+    await db.executeMany(sql, binds, {
+      autoCommit: shouldAutoCommit,
+      batchErrors: true
+    });
+    // Manual commit if we didn't auto-commit
+    if (!shouldAutoCommit) {
+      await db.execute('COMMIT');
+    }
+  }
+
   async createSchema(db, progressCallback = () => {}) {
     const tableNames = Object.keys(TABLES);
     const totalSteps = tableNames.length + SEQUENCES.length;
@@ -398,16 +411,7 @@ class SchemaManager {
          VALUES (:name, :desc, :categoryId, :price, :cost, :weight)`;
     
     try {
-      // Auto-commit when batch size allows processing all data in one transaction
-      const shouldAutoCommit = batchCommitSize >= baseProducts;
-      await db.executeMany(productSql, productBinds, { 
-        autoCommit: shouldAutoCommit,
-        batchErrors: true 
-      });
-      // Manual commit if we didn't auto-commit
-      if (!shouldAutoCommit) {
-        await db.execute('COMMIT');
-      }
+      await this.executeManyWithCommit(db, productSql, productBinds, batchCommitSize);
       progressCallback({ step: `Inserted ${baseProducts} products`, progress: progress = 45 });
     } catch (err) {
       console.log('Product bulk insert warning:', err.message);
@@ -440,14 +444,7 @@ class SchemaManager {
          VALUES (:prodId, :whId, :qty, :reserved, :reorder)`;
 
     try {
-      const shouldAutoCommit = batchCommitSize >= inventoryBinds.length;
-      await db.executeMany(inventorySql, inventoryBinds, {
-        autoCommit: shouldAutoCommit,
-        batchErrors: true
-      });
-      if (!shouldAutoCommit) {
-        await db.execute('COMMIT');
-      }
+      await this.executeManyWithCommit(db, inventorySql, inventoryBinds, batchCommitSize);
       progressCallback({ step: `Inserted ${inventoryBinds.length} inventory records`, progress: progress = 55 });
     } catch (err) {
       console.log('Inventory bulk insert warning:', err.message);
@@ -483,14 +480,7 @@ class SchemaManager {
          VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit)`;
 
     try {
-      const shouldAutoCommit = batchCommitSize >= baseCustomers;
-      await db.executeMany(customerSql, customerBinds, {
-        autoCommit: shouldAutoCommit,
-        batchErrors: true
-      });
-      if (!shouldAutoCommit) {
-        await db.execute('COMMIT');
-      }
+      await this.executeManyWithCommit(db, customerSql, customerBinds, batchCommitSize);
       progressCallback({ step: `Inserted ${baseCustomers} customers`, progress: progress = 65 });
     } catch (err) {
       console.log('Customer bulk insert warning:', err.message);
@@ -567,14 +557,7 @@ class SchemaManager {
          VALUES (:custId, :status, :whId, :ship, :notes, :subtotal, :tax, :shippingCost, :total)`;
 
     try {
-      const shouldAutoCommit = batchCommitSize >= baseOrders;
-      await db.executeMany(orderSql, orderBinds, {
-        autoCommit: shouldAutoCommit,
-        batchErrors: true
-      });
-      if (!shouldAutoCommit) {
-        await db.execute('COMMIT');
-      }
+      await this.executeManyWithCommit(db, orderSql, orderBinds, batchCommitSize);
       progressCallback({ step: `Inserted ${baseOrders} orders`, progress: progress = 75 });
     } catch (err) {
       console.log('Order bulk insert warning:', err.message);
@@ -582,15 +565,17 @@ class SchemaManager {
 
     // Get all order IDs via SELECT (get the most recent baseOrders orders)
     // Since we're in the schema creation process, we expect minimal concurrent activity
+    // Note: Using string interpolation since FETCH FIRST doesn't support bind variables
     const ordersResult = await db.execute(
-      'SELECT order_id FROM orders ORDER BY created_at DESC, order_id DESC FETCH FIRST :limit ROWS ONLY', 
-      [baseOrders]
+      `SELECT order_id FROM orders ORDER BY created_at DESC, order_id DESC FETCH FIRST ${baseOrders} ROWS ONLY`
     );
     const orderIds = ordersResult.rows.map(o => o.ORDER_ID).reverse();
     
     // Validate we got the expected number of orders
     if (orderIds.length !== baseOrders) {
-      console.log(`Warning: Expected ${baseOrders} orders but found ${orderIds.length}. Order items and payments may be incomplete.`);
+      const message = `Warning: Expected ${baseOrders} orders but found ${orderIds.length}. Some order items and payments may be skipped.`;
+      console.log(message);
+      progressCallback({ step: message, progress: progress });
     }
 
     // Insert order items using executeMany
@@ -619,14 +604,7 @@ class SchemaManager {
          VALUES (:orderId, :prodId, :qty, :price, :total)`;
 
     try {
-      const shouldAutoCommit = batchCommitSize >= orderItemBinds.length;
-      await db.executeMany(orderItemSql, orderItemBinds, {
-        autoCommit: shouldAutoCommit,
-        batchErrors: true
-      });
-      if (!shouldAutoCommit) {
-        await db.execute('COMMIT');
-      }
+      await this.executeManyWithCommit(db, orderItemSql, orderItemBinds, batchCommitSize);
       progressCallback({ step: `Inserted ${orderItemBinds.length} order items`, progress: progress = 82 });
     } catch (err) {
       console.log('Order items bulk insert warning:', err.message);
@@ -634,10 +612,16 @@ class SchemaManager {
 
     // Insert payments using executeMany
     progressCallback({ step: 'Inserting payments...', progress: progress = 85 });
-    const paymentBinds = [];
     
-    for (let i = 0; i < Math.min(paymentsData.length, orderIds.length); i++) {
-      const payment = paymentsData.find(p => p.orderIndex === i);
+    // Create a map for O(1) lookup of payment data by order index
+    const paymentsMap = new Map();
+    for (const payment of paymentsData) {
+      paymentsMap.set(payment.orderIndex, payment);
+    }
+    
+    const paymentBinds = [];
+    for (let i = 0; i < Math.min(orderIds.length, baseOrders); i++) {
+      const payment = paymentsMap.get(i);
       if (!payment) continue;
       
       const orderId = orderIds[i];
@@ -659,14 +643,7 @@ class SchemaManager {
 
     if (paymentBinds.length > 0) {
       try {
-        const shouldAutoCommit = batchCommitSize >= paymentBinds.length;
-        await db.executeMany(paymentSql, paymentBinds, {
-          autoCommit: shouldAutoCommit,
-          batchErrors: true
-        });
-        if (!shouldAutoCommit) {
-          await db.execute('COMMIT');
-        }
+        await this.executeManyWithCommit(db, paymentSql, paymentBinds, batchCommitSize);
         progressCallback({ step: `Inserted ${paymentBinds.length} payments`, progress: progress = 88 });
       } catch (err) {
         console.log('Payment bulk insert warning:', err.message);
