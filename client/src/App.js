@@ -16,12 +16,15 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [dbStatus, setDbStatus] = useState({ connected: false });
   const [stressStatus, setStressStatus] = useState({ isRunning: false });
-  const [schemaInfo, setSchemaInfo] = useState(null);
+  const [schemas, setSchemas] = useState([]);
   const [metrics, setMetrics] = useState({
     tps: [],
     operations: [],
     waitEvents: [],
-    systemStats: {}
+    systemStats: {},
+    // Multi-schema metrics
+    tpsBySchema: {},
+    operationsBySchema: {}
   });
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -44,19 +47,76 @@ function App() {
       setStressStatus(status);
     });
 
+    // Handle multi-schema metrics
+    newSocket.on('stress-metrics-by-schema', (schemaMetrics) => {
+      setMetrics(prev => {
+        const newTpsBySchema = { ...prev.tpsBySchema };
+        const newOpsBySchema = { ...prev.operationsBySchema };
+
+        for (const schemaId of Object.keys(schemaMetrics)) {
+          const data = schemaMetrics[schemaId];
+
+          // TPS data
+          if (!newTpsBySchema[schemaId]) {
+            newTpsBySchema[schemaId] = [];
+          }
+          newTpsBySchema[schemaId] = [
+            ...newTpsBySchema[schemaId].slice(-59),
+            { time: new Date(), value: data.tps }
+          ];
+
+          // Operations data
+          if (!newOpsBySchema[schemaId]) {
+            newOpsBySchema[schemaId] = [];
+          }
+          newOpsBySchema[schemaId] = [
+            ...newOpsBySchema[schemaId].slice(-59),
+            {
+              time: new Date(),
+              inserts: data.perSecond.inserts,
+              updates: data.perSecond.updates,
+              deletes: data.perSecond.deletes
+            }
+          ];
+        }
+
+        return {
+          ...prev,
+          tpsBySchema: newTpsBySchema,
+          operationsBySchema: newOpsBySchema,
+          // Also update single-schema metrics for backward compatibility
+          tps: Object.keys(schemaMetrics).length === 1
+            ? [...prev.tps.slice(-59), { time: new Date(), value: schemaMetrics[Object.keys(schemaMetrics)[0]].tps }]
+            : prev.tps,
+          operations: Object.keys(schemaMetrics).length === 1
+            ? [...prev.operations.slice(-59), {
+                time: new Date(),
+                inserts: schemaMetrics[Object.keys(schemaMetrics)[0]].perSecond.inserts,
+                updates: schemaMetrics[Object.keys(schemaMetrics)[0]].perSecond.updates,
+                deletes: schemaMetrics[Object.keys(schemaMetrics)[0]].perSecond.deletes
+              }]
+            : prev.operations
+        };
+      });
+    });
+
+    // Keep backward compatible single metric handler
     newSocket.on('stress-metrics', (data) => {
-      setMetrics(prev => ({
-        ...prev,
-        tps: [...prev.tps.slice(-59), { time: new Date(), value: data.tps }],
-        operations: [...prev.operations.slice(-59), {
-          time: new Date(),
-          inserts: data.perSecond.inserts,
-          updates: data.perSecond.updates,
-          deletes: data.perSecond.deletes
-        }],
-        total: data.total,
-        perSecond: data.perSecond
-      }));
+      if (!data.schemas) {
+        // Single schema mode
+        setMetrics(prev => ({
+          ...prev,
+          tps: [...prev.tps.slice(-59), { time: new Date(), value: data.tps }],
+          operations: [...prev.operations.slice(-59), {
+            time: new Date(),
+            inserts: data.perSecond.inserts,
+            updates: data.perSecond.updates,
+            deletes: data.perSecond.deletes
+          }],
+          total: data.total,
+          perSecond: data.perSecond
+        }));
+      }
     });
 
     newSocket.on('db-metrics', (data) => {
@@ -70,7 +130,8 @@ function App() {
 
     newSocket.on('stress-stopped', (finalStats) => {
       setStressStatus({ isRunning: false });
-      showSuccess(`Stress test completed. Total transactions: ${finalStats.transactions}`);
+      const total = finalStats.transactions || 0;
+      showSuccess(`Stress test completed. Total transactions: ${total}`);
     });
 
     setSocket(newSocket);
@@ -91,7 +152,7 @@ function App() {
       const response = await axios.get(`${API_BASE}/db/status`);
       setDbStatus(response.data);
       if (response.data.connected) {
-        fetchSchemaInfo();
+        fetchSchemas();
       }
     } catch (err) {
       console.error('Error fetching DB status:', err);
@@ -107,14 +168,16 @@ function App() {
     }
   };
 
-  const fetchSchemaInfo = async () => {
+  const fetchSchemas = useCallback(async () => {
     try {
-      const response = await axios.get(`${API_BASE}/schema/info`);
-      setSchemaInfo(response.data);
+      const response = await axios.get(`${API_BASE}/schemas/list`);
+      if (response.data.success) {
+        setSchemas(response.data.schemas || []);
+      }
     } catch (err) {
-      console.error('Error fetching schema info:', err);
+      console.error('Error fetching schemas:', err);
     }
-  };
+  }, []);
 
   const showError = useCallback((message) => {
     setError(message);
@@ -133,7 +196,7 @@ function App() {
       if (response.data.success) {
         setDbStatus({ connected: true, config: { user: credentials.user, connectionString: credentials.connectionString } });
         showSuccess('Connected to Oracle database');
-        fetchSchemaInfo();
+        fetchSchemas();
       }
     } catch (err) {
       showError(err.response?.data?.message || 'Failed to connect to database');
@@ -144,29 +207,29 @@ function App() {
     try {
       await axios.post(`${API_BASE}/db/disconnect`);
       setDbStatus({ connected: false });
-      setSchemaInfo(null);
+      setSchemas([]);
       showSuccess('Disconnected from database');
     } catch (err) {
       showError(err.response?.data?.message || 'Failed to disconnect');
     }
   };
 
-  const handleCreateSchema = async (scaleFactor) => {
+  const handleCreateSchema = async (options) => {
     try {
       setError(null);
-      await axios.post(`${API_BASE}/schema/create`, { scaleFactor });
-      showSuccess('Schema created successfully');
-      fetchSchemaInfo();
+      await axios.post(`${API_BASE}/schema/create`, options);
+      showSuccess(`Schema${options.prefix ? ` '${options.prefix}'` : ''} created successfully`);
+      fetchSchemas();
     } catch (err) {
       showError(err.response?.data?.message || 'Failed to create schema');
     }
   };
 
-  const handleDropSchema = async () => {
+  const handleDropSchema = async (prefix) => {
     try {
-      await axios.post(`${API_BASE}/schema/drop`);
-      showSuccess('Schema dropped successfully');
-      fetchSchemaInfo();
+      await axios.post(`${API_BASE}/schema/drop`, { prefix });
+      showSuccess(`Schema${prefix ? ` '${prefix}'` : ''} dropped successfully`);
+      fetchSchemas();
     } catch (err) {
       showError(err.response?.data?.message || 'Failed to drop schema');
     }
@@ -175,7 +238,14 @@ function App() {
   const handleStartStress = async (config) => {
     try {
       setError(null);
-      setMetrics(prev => ({ ...prev, tps: [], operations: [] }));
+      // Clear previous metrics
+      setMetrics(prev => ({
+        ...prev,
+        tps: [],
+        operations: [],
+        tpsBySchema: {},
+        operationsBySchema: {}
+      }));
       const response = await axios.post(`${API_BASE}/stress/start`, config);
       if (response.data.success) {
         setStressStatus({ isRunning: true, config });
@@ -203,6 +273,10 @@ function App() {
       showError(err.response?.data?.message || 'Failed to update configuration');
     }
   };
+
+  // Determine if multi-schema mode
+  const schemaIds = Object.keys(metrics.tpsBySchema);
+  const isMultiSchema = schemaIds.length > 1;
 
   return (
     <div className="app">
@@ -233,15 +307,16 @@ function App() {
 
           <SchemaPanel
             dbStatus={dbStatus}
-            schemaInfo={schemaInfo}
+            schemas={schemas}
             onCreateSchema={handleCreateSchema}
             onDropSchema={handleDropSchema}
+            onRefreshSchemas={fetchSchemas}
             socket={socket}
           />
 
           <StressConfigPanel
             dbStatus={dbStatus}
-            schemaInfo={schemaInfo}
+            schemas={schemas}
             stressStatus={stressStatus}
             onStart={handleStartStress}
             onStop={handleStopStress}
@@ -254,8 +329,14 @@ function App() {
             <MetricsPanel metrics={metrics} stressStatus={stressStatus} />
 
             <div className="grid-2">
-              <TPSChart data={metrics.tps} />
-              <OperationsChart data={metrics.operations} />
+              <TPSChart
+                data={metrics.tps}
+                schemaData={isMultiSchema ? metrics.tpsBySchema : null}
+              />
+              <OperationsChart
+                data={metrics.operations}
+                schemaData={isMultiSchema ? metrics.operationsBySchema : null}
+              />
             </div>
 
             <WaitEventsPanel waitEvents={metrics.waitEvents} />

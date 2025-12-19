@@ -1,30 +1,40 @@
 import React, { useState, useEffect } from 'react';
 
-function SchemaPanel({ dbStatus, schemaInfo, onCreateSchema, onDropSchema, socket }) {
+function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefreshSchemas, socket }) {
   const [scaleFactor, setScaleFactor] = useState(1);
-  const [creating, setCreating] = useState(false);
-  const [progress, setProgress] = useState({ step: '', progress: 0 });
+  const [prefix, setPrefix] = useState('');
+  const [compress, setCompress] = useState(false);
+  const [parallelism, setParallelism] = useState(10);
+  const [creating, setCreating] = useState({});
+  const [progress, setProgress] = useState({});
 
   useEffect(() => {
     if (socket) {
       socket.on('schema-progress', (data) => {
-        setProgress(data);
+        const schemaId = data.schemaId || 'default';
+        setProgress(prev => ({ ...prev, [schemaId]: data }));
         if (data.progress === 100 || data.progress === -1) {
-          setCreating(false);
+          setCreating(prev => ({ ...prev, [schemaId]: false }));
+          if (data.progress === 100) {
+            // Refresh schemas list after creation
+            setTimeout(() => onRefreshSchemas?.(), 1000);
+          }
         }
       });
     }
-  }, [socket]);
+  }, [socket, onRefreshSchemas]);
 
   const handleCreate = async () => {
-    setCreating(true);
-    setProgress({ step: 'Starting...', progress: 0 });
-    await onCreateSchema(scaleFactor);
+    const schemaId = prefix || 'default';
+    setCreating(prev => ({ ...prev, [schemaId]: true }));
+    setProgress(prev => ({ ...prev, [schemaId]: { step: 'Starting...', progress: 0 } }));
+    await onCreateSchema({ scaleFactor, prefix, compress, parallelism });
   };
 
-  const handleDrop = async () => {
-    if (window.confirm('Are you sure you want to drop the schema? All data will be lost.')) {
-      await onDropSchema();
+  const handleDrop = async (schemaPrefix) => {
+    const displayName = schemaPrefix || 'default';
+    if (window.confirm(`Are you sure you want to drop schema '${displayName}'? All data will be lost.`)) {
+      await onDropSchema(schemaPrefix);
     }
   };
 
@@ -38,7 +48,7 @@ function SchemaPanel({ dbStatus, schemaInfo, onCreateSchema, onDropSchema, socke
     return (
       <div className="panel">
         <div className="panel-header">
-          <h2>Sales Schema</h2>
+          <h2>Schema Management</h2>
         </div>
         <div className="panel-content">
           <p style={{ color: 'var(--text-muted)' }}>Connect to database first</p>
@@ -47,86 +57,164 @@ function SchemaPanel({ dbStatus, schemaInfo, onCreateSchema, onDropSchema, socke
     );
   }
 
+  const isCreatingAny = Object.values(creating).some(v => v);
+  const existingSchemas = schemas || [];
+
   return (
-    <div className="panel">
+    <div className="panel" style={{ maxHeight: '600px', overflow: 'auto' }}>
       <div className="panel-header">
-        <h2>Sales Schema</h2>
-        {schemaInfo?.schemaExists && (
-          <span style={{ color: 'var(--accent-success)', fontSize: '0.875rem' }}>
-            {schemaInfo.totalSizeMB?.toFixed(1)} MB
-          </span>
-        )}
+        <h2>Schema Management</h2>
+        <span style={{ color: 'var(--accent-success)', fontSize: '0.875rem' }}>
+          {existingSchemas.length} schema(s)
+        </span>
       </div>
       <div className="panel-content">
-        {creating ? (
-          <div>
-            <p style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>{progress.step}</p>
-            <div className="progress-bar">
-              <div className="fill" style={{ width: `${Math.max(0, progress.progress)}%` }}></div>
-            </div>
-            <p className="progress-text">{progress.progress}% complete</p>
-          </div>
-        ) : schemaInfo?.schemaExists ? (
-          <div>
-            <div className="schema-stats">
-              <div className="schema-stat">
-                <div className="name">Products</div>
-                <div className="count">{formatNumber(schemaInfo.counts?.products)}</div>
-              </div>
-              <div className="schema-stat">
-                <div className="name">Customers</div>
-                <div className="count">{formatNumber(schemaInfo.counts?.customers)}</div>
-              </div>
-              <div className="schema-stat">
-                <div className="name">Orders</div>
-                <div className="count">{formatNumber(schemaInfo.counts?.orders)}</div>
-              </div>
-              <div className="schema-stat">
-                <div className="name">Order Items</div>
-                <div className="count">{formatNumber(schemaInfo.counts?.order_items)}</div>
-              </div>
-              <div className="schema-stat">
-                <div className="name">Inventory</div>
-                <div className="count">{formatNumber(schemaInfo.counts?.inventory)}</div>
-              </div>
-              <div className="schema-stat">
-                <div className="name">Payments</div>
-                <div className="count">{formatNumber(schemaInfo.counts?.payments)}</div>
-              </div>
-            </div>
-            <button
-              className="btn btn-danger btn-sm"
-              onClick={handleDrop}
-              style={{ marginTop: '1rem' }}
-            >
-              Drop Schema
-            </button>
-          </div>
-        ) : (
-          <div>
-            <div className="form-group">
-              <label>Scale Factor</label>
-              <div className="slider-group">
-                <input
-                  type="range"
-                  min="1"
-                  max="100"
-                  value={scaleFactor}
-                  onChange={(e) => setScaleFactor(parseInt(e.target.value))}
-                />
-                <span className="slider-value">{scaleFactor}x</span>
-              </div>
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-                {scaleFactor}x = ~{formatNumber(1000 * scaleFactor)} customers,
-                ~{formatNumber(500 * scaleFactor)} products,
-                ~{formatNumber(5000 * scaleFactor)} orders
-              </p>
-            </div>
-            <button className="btn btn-success" onClick={handleCreate}>
-              Create Schema
-            </button>
+        {/* Existing Schemas */}
+        {existingSchemas.length > 0 && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ fontSize: '0.875rem', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
+              Existing Schemas
+            </h3>
+            {existingSchemas.map((schema) => {
+              const schemaId = schema.prefix || 'default';
+              const schemaProgress = progress[schemaId];
+              const isCreating = creating[schemaId];
+
+              return (
+                <div key={schemaId} className="schema-card" style={{
+                  background: 'var(--surface)',
+                  padding: '0.75rem',
+                  borderRadius: '6px',
+                  marginBottom: '0.5rem',
+                  border: '1px solid var(--border)'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <span style={{ fontWeight: '500' }}>
+                      {schemaId}
+                      {schema.compress && (
+                        <span style={{ marginLeft: '0.5rem', fontSize: '0.7rem', background: 'var(--accent-primary)', padding: '2px 6px', borderRadius: '4px' }}>
+                          COMPRESSED
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      {schema.totalSizeMB?.toFixed(1)} MB
+                    </span>
+                  </div>
+
+                  {isCreating ? (
+                    <div>
+                      <p style={{ marginBottom: '0.5rem', fontSize: '0.75rem' }}>{schemaProgress?.step}</p>
+                      <div className="progress-bar">
+                        <div className="fill" style={{ width: `${Math.max(0, schemaProgress?.progress || 0)}%` }}></div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.25rem', fontSize: '0.75rem' }}>
+                        <div>Products: {formatNumber(schema.counts?.products)}</div>
+                        <div>Customers: {formatNumber(schema.counts?.customers)}</div>
+                        <div>Orders: {formatNumber(schema.counts?.orders)}</div>
+                      </div>
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() => handleDrop(schema.prefix)}
+                        style={{ marginTop: '0.5rem', fontSize: '0.75rem', padding: '4px 8px' }}
+                      >
+                        Drop
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
+
+        {/* Create New Schema */}
+        <div style={{ borderTop: existingSchemas.length > 0 ? '1px solid var(--border)' : 'none', paddingTop: existingSchemas.length > 0 ? '1rem' : 0 }}>
+          <h3 style={{ fontSize: '0.875rem', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
+            Create New Schema
+          </h3>
+
+          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+            <label>Schema Prefix (optional)</label>
+            <input
+              type="text"
+              value={prefix}
+              onChange={(e) => setPrefix(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
+              placeholder="e.g., comp, nocomp, test1"
+              style={{
+                width: '100%',
+                padding: '0.5rem',
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                color: 'var(--text-primary)'
+              }}
+              disabled={isCreatingAny}
+            />
+            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              Leave empty for default schema. Use prefixes to create multiple schemas.
+            </p>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={compress}
+                onChange={(e) => setCompress(e.target.checked)}
+                disabled={isCreatingAny}
+                style={{ marginRight: '0.5rem' }}
+              />
+              Enable Compression (COMPRESS FOR OLTP)
+            </label>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+            <label>Scale Factor</label>
+            <div className="slider-group">
+              <input
+                type="range"
+                min="1"
+                max="100"
+                value={scaleFactor}
+                onChange={(e) => setScaleFactor(parseInt(e.target.value))}
+                disabled={isCreatingAny}
+              />
+              <span className="slider-value">{scaleFactor}x</span>
+            </div>
+            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              ~{formatNumber(1000 * scaleFactor)} customers,
+              ~{formatNumber(500 * scaleFactor)} products,
+              ~{formatNumber(5000 * scaleFactor)} orders
+            </p>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+            <label>Insert Parallelism</label>
+            <div className="slider-group">
+              <input
+                type="range"
+                min="1"
+                max="50"
+                value={parallelism}
+                onChange={(e) => setParallelism(parseInt(e.target.value))}
+                disabled={isCreatingAny}
+              />
+              <span className="slider-value">{parallelism}</span>
+            </div>
+          </div>
+
+          <button
+            className="btn btn-success"
+            onClick={handleCreate}
+            disabled={isCreatingAny}
+          >
+            {isCreatingAny ? 'Creating...' : 'Create Schema'}
+          </button>
+        </div>
       </div>
     </div>
   );
