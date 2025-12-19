@@ -2,11 +2,15 @@ import React, { useState, useEffect } from 'react';
 
 function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefreshSchemas, socket }) {
   const [scaleFactor, setScaleFactor] = useState(1);
-  const [prefix, setPrefix] = useState('');
-  const [compress, setCompress] = useState(false);
   const [parallelism, setParallelism] = useState(10);
   const [creating, setCreating] = useState({});
   const [progress, setProgress] = useState({});
+
+  // Batch schema definitions - create multiple schemas at once
+  const [schemaDefinitions, setSchemaDefinitions] = useState([
+    { prefix: 'nocomp', compress: false, enabled: true },
+    { prefix: 'comp', compress: true, enabled: true }
+  ]);
 
   useEffect(() => {
     if (socket) {
@@ -16,7 +20,6 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
         if (data.progress === 100 || data.progress === -1) {
           setCreating(prev => ({ ...prev, [schemaId]: false }));
           if (data.progress === 100) {
-            // Refresh schemas list after creation
             setTimeout(() => onRefreshSchemas?.(), 1000);
           }
         }
@@ -24,11 +27,35 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
     }
   }, [socket, onRefreshSchemas]);
 
-  const handleCreate = async () => {
-    const schemaId = prefix || 'default';
-    setCreating(prev => ({ ...prev, [schemaId]: true }));
-    setProgress(prev => ({ ...prev, [schemaId]: { step: 'Starting...', progress: 0 } }));
-    await onCreateSchema({ scaleFactor, prefix, compress, parallelism });
+  const handleCreateAll = async () => {
+    const enabledSchemas = schemaDefinitions.filter(s => s.enabled);
+
+    if (enabledSchemas.length === 0) {
+      alert('Please enable at least one schema to create');
+      return;
+    }
+
+    // Mark all as creating
+    const newCreating = {};
+    enabledSchemas.forEach(s => {
+      const schemaId = s.prefix || 'default';
+      newCreating[schemaId] = true;
+    });
+    setCreating(newCreating);
+
+    // Create all schemas in parallel
+    const promises = enabledSchemas.map(schema => {
+      const schemaId = schema.prefix || 'default';
+      setProgress(prev => ({ ...prev, [schemaId]: { step: 'Starting...', progress: 0 } }));
+      return onCreateSchema({
+        scaleFactor,
+        prefix: schema.prefix,
+        compress: schema.compress,
+        parallelism
+      });
+    });
+
+    await Promise.all(promises);
   };
 
   const handleDrop = async (schemaPrefix) => {
@@ -36,6 +63,26 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
     if (window.confirm(`Are you sure you want to drop schema '${displayName}'? All data will be lost.`)) {
       await onDropSchema(schemaPrefix);
     }
+  };
+
+  const updateSchemaDefinition = (index, field, value) => {
+    setSchemaDefinitions(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], [field]: value };
+      return updated;
+    });
+  };
+
+  const addSchemaDefinition = () => {
+    setSchemaDefinitions(prev => [
+      ...prev,
+      { prefix: `schema${prev.length + 1}`, compress: false, enabled: true }
+    ]);
+  };
+
+  const removeSchemaDefinition = (index) => {
+    if (schemaDefinitions.length <= 1) return;
+    setSchemaDefinitions(prev => prev.filter((_, i) => i !== index));
   };
 
   const formatNumber = (num) => {
@@ -48,7 +95,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
     return (
       <div className="panel">
         <div className="panel-header">
-          <h2>Schema Management</h2>
+          <h2>Sales Schema</h2>
         </div>
         <div className="panel-content">
           <p style={{ color: 'var(--text-muted)' }}>Connect to database first</p>
@@ -61,12 +108,14 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
   const existingSchemas = schemas || [];
 
   return (
-    <div className="panel" style={{ maxHeight: '600px', overflow: 'auto' }}>
+    <div className="panel" style={{ maxHeight: '700px', overflow: 'auto' }}>
       <div className="panel-header">
-        <h2>Schema Management</h2>
-        <span style={{ color: 'var(--accent-success)', fontSize: '0.875rem' }}>
-          {existingSchemas.length} schema(s)
-        </span>
+        <h2>Sales Schema</h2>
+        {existingSchemas.length > 0 && (
+          <span style={{ color: 'var(--accent-success)', fontSize: '0.875rem' }}>
+            {existingSchemas.length} schema(s) exist
+          </span>
+        )}
       </div>
       <div className="panel-content">
         {/* Existing Schemas */}
@@ -81,7 +130,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
               const isCreating = creating[schemaId];
 
               return (
-                <div key={schemaId} className="schema-card" style={{
+                <div key={schemaId} style={{
                   background: 'var(--surface)',
                   padding: '0.75rem',
                   borderRadius: '6px',
@@ -131,48 +180,14 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
           </div>
         )}
 
-        {/* Create New Schema */}
+        {/* Create New Schemas - Batch Mode */}
         <div style={{ borderTop: existingSchemas.length > 0 ? '1px solid var(--border)' : 'none', paddingTop: existingSchemas.length > 0 ? '1rem' : 0 }}>
           <h3 style={{ fontSize: '0.875rem', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
-            Create New Schema
+            Create Schema(s)
           </h3>
 
-          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
-            <label>Schema Prefix (optional)</label>
-            <input
-              type="text"
-              value={prefix}
-              onChange={(e) => setPrefix(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
-              placeholder="e.g., comp, nocomp, test1"
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                background: 'var(--surface)',
-                border: '1px solid var(--border)',
-                borderRadius: '4px',
-                color: 'var(--text-primary)'
-              }}
-              disabled={isCreatingAny}
-            />
-            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-              Leave empty for default schema. Use prefixes to create multiple schemas.
-            </p>
-          </div>
-
-          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
-            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={compress}
-                onChange={(e) => setCompress(e.target.checked)}
-                disabled={isCreatingAny}
-                style={{ marginRight: '0.5rem' }}
-              />
-              Enable Compression (COMPRESS FOR OLTP)
-            </label>
-          </div>
-
-          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+          {/* Global Settings */}
+          <div className="form-group" style={{ marginBottom: '1rem' }}>
             <label>Scale Factor</label>
             <div className="slider-group">
               <input
@@ -186,33 +201,148 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
               <span className="slider-value">{scaleFactor}x</span>
             </div>
             <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-              ~{formatNumber(1000 * scaleFactor)} customers,
+              {scaleFactor}x = ~{formatNumber(1000 * scaleFactor)} customers,
               ~{formatNumber(500 * scaleFactor)} products,
               ~{formatNumber(5000 * scaleFactor)} orders
             </p>
           </div>
 
-          <div className="form-group" style={{ marginBottom: '0.75rem' }}>
-            <label>Insert Parallelism</label>
-            <div className="slider-group">
-              <input
-                type="range"
-                min="1"
-                max="50"
-                value={parallelism}
-                onChange={(e) => setParallelism(parseInt(e.target.value))}
+          {/* Schema Definitions */}
+          <div style={{ marginBottom: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <label style={{ fontSize: '0.875rem' }}>Table Compression Options</label>
+              <button
+                type="button"
+                onClick={addSchemaDefinition}
                 disabled={isCreatingAny}
-              />
-              <span className="slider-value">{parallelism}</span>
+                style={{
+                  background: 'var(--accent-primary)',
+                  border: 'none',
+                  color: 'white',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  fontSize: '0.75rem',
+                  cursor: isCreatingAny ? 'not-allowed' : 'pointer',
+                  opacity: isCreatingAny ? 0.5 : 1
+                }}
+              >
+                + Add Schema
+              </button>
             </div>
+
+            {schemaDefinitions.map((schema, index) => {
+              const schemaId = schema.prefix || 'default';
+              const schemaProgress = progress[schemaId];
+              const isCreating = creating[schemaId];
+
+              return (
+                <div key={index} style={{
+                  background: 'var(--surface)',
+                  padding: '0.75rem',
+                  borderRadius: '6px',
+                  marginBottom: '0.5rem',
+                  border: schema.enabled ? '2px solid var(--accent-primary)' : '1px solid var(--border)',
+                  opacity: schema.enabled ? 1 : 0.6
+                }}>
+                  {isCreating ? (
+                    <div>
+                      <div style={{ fontWeight: '500', marginBottom: '0.5rem' }}>{schemaId}</div>
+                      <p style={{ marginBottom: '0.5rem', fontSize: '0.75rem' }}>{schemaProgress?.step}</p>
+                      <div className="progress-bar">
+                        <div className="fill" style={{ width: `${Math.max(0, schemaProgress?.progress || 0)}%` }}></div>
+                      </div>
+                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        {schemaProgress?.progress}% complete
+                      </p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={schema.enabled}
+                          onChange={(e) => updateSchemaDefinition(index, 'enabled', e.target.checked)}
+                          disabled={isCreatingAny}
+                          style={{ marginRight: '0.5rem' }}
+                        />
+                      </label>
+
+                      <div style={{ flex: '1', minWidth: '100px' }}>
+                        <input
+                          type="text"
+                          value={schema.prefix}
+                          onChange={(e) => updateSchemaDefinition(index, 'prefix', e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
+                          placeholder="prefix"
+                          disabled={isCreatingAny}
+                          style={{
+                            width: '100%',
+                            padding: '0.4rem',
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border)',
+                            borderRadius: '4px',
+                            color: 'var(--text-primary)',
+                            fontSize: '0.8rem'
+                          }}
+                        />
+                      </div>
+
+                      <select
+                        value={schema.compress ? 'compress' : 'nocompress'}
+                        onChange={(e) => updateSchemaDefinition(index, 'compress', e.target.value === 'compress')}
+                        disabled={isCreatingAny}
+                        style={{
+                          padding: '0.4rem',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '4px',
+                          color: 'var(--text-primary)',
+                          fontSize: '0.8rem',
+                          minWidth: '140px'
+                        }}
+                      >
+                        <option value="nocompress">No Compression</option>
+                        <option value="compress">COMPRESS FOR OLTP</option>
+                      </select>
+
+                      {schemaDefinitions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => removeSchemaDefinition(index)}
+                          disabled={isCreatingAny}
+                          style={{
+                            background: 'var(--accent-danger)',
+                            border: 'none',
+                            color: 'white',
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            fontSize: '0.75rem',
+                            cursor: isCreatingAny ? 'not-allowed' : 'pointer'
+                          }}
+                        >
+                          X
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
+              Create multiple schemas with different compression to compare performance.
+              Requires corresponding Oracle license/features for compression.
+            </p>
           </div>
 
           <button
             className="btn btn-success"
-            onClick={handleCreate}
-            disabled={isCreatingAny}
+            onClick={handleCreateAll}
+            disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
+            style={{ width: '100%' }}
           >
-            {isCreatingAny ? 'Creating...' : 'Create Schema'}
+            {isCreatingAny
+              ? 'Creating...'
+              : `Create ${schemaDefinitions.filter(s => s.enabled).length} Schema(s)`}
           </button>
         </div>
       </div>
