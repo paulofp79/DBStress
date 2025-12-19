@@ -1,181 +1,184 @@
-// Schema Manager for Online Sales Database
+// Schema Manager for Online Sales Database - Multi-Schema Support
 const oracledb = require('oracledb');
 
-const TABLES = {
-  REGIONS: `
-    CREATE TABLE regions (
-      region_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      region_name VARCHAR2(100) NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+// Base table definitions (prefix will be added dynamically)
+const getTableDDL = (prefix, compress = false) => {
+  const p = prefix ? `${prefix}_` : '';
+  const compressClause = compress ? ' COMPRESS FOR OLTP' : '';
 
-  COUNTRIES: `
-    CREATE TABLE countries (
-      country_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      country_name VARCHAR2(100) NOT NULL,
-      country_code VARCHAR2(3) NOT NULL,
-      region_id NUMBER REFERENCES regions(region_id),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+  return {
+    [`${p}regions`]: `
+      CREATE TABLE ${p}regions (
+        region_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        region_name VARCHAR2(100) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  WAREHOUSES: `
-    CREATE TABLE warehouses (
-      warehouse_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      warehouse_name VARCHAR2(100) NOT NULL,
-      location VARCHAR2(200),
-      country_id NUMBER REFERENCES countries(country_id),
-      capacity NUMBER DEFAULT 10000,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}countries`]: `
+      CREATE TABLE ${p}countries (
+        country_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        country_name VARCHAR2(100) NOT NULL,
+        country_code VARCHAR2(3) NOT NULL,
+        region_id NUMBER REFERENCES ${p}regions(region_id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  CATEGORIES: `
-    CREATE TABLE categories (
-      category_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      category_name VARCHAR2(100) NOT NULL,
-      parent_category_id NUMBER REFERENCES categories(category_id),
-      description VARCHAR2(500),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}warehouses`]: `
+      CREATE TABLE ${p}warehouses (
+        warehouse_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        warehouse_name VARCHAR2(100) NOT NULL,
+        location VARCHAR2(200),
+        country_id NUMBER REFERENCES ${p}countries(country_id),
+        capacity NUMBER DEFAULT 10000,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  PRODUCTS: `
-    CREATE TABLE products (
-      product_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      product_name VARCHAR2(200) NOT NULL,
-      description VARCHAR2(2000),
-      category_id NUMBER REFERENCES categories(category_id),
-      unit_price NUMBER(10,2) NOT NULL,
-      unit_cost NUMBER(10,2),
-      weight NUMBER(10,2),
-      status VARCHAR2(20) DEFAULT 'ACTIVE',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}categories`]: `
+      CREATE TABLE ${p}categories (
+        category_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        category_name VARCHAR2(100) NOT NULL,
+        parent_category_id NUMBER REFERENCES ${p}categories(category_id),
+        description VARCHAR2(500),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  INVENTORY: `
-    CREATE TABLE inventory (
-      inventory_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      product_id NUMBER NOT NULL REFERENCES products(product_id),
-      warehouse_id NUMBER NOT NULL REFERENCES warehouses(warehouse_id),
-      quantity_on_hand NUMBER DEFAULT 0,
-      quantity_reserved NUMBER DEFAULT 0,
-      reorder_level NUMBER DEFAULT 10,
-      last_restock_date TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT uk_inventory UNIQUE (product_id, warehouse_id)
-    )`,
+    [`${p}products`]: `
+      CREATE TABLE ${p}products (
+        product_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_name VARCHAR2(200) NOT NULL,
+        description VARCHAR2(2000),
+        category_id NUMBER REFERENCES ${p}categories(category_id),
+        unit_price NUMBER(10,2) NOT NULL,
+        unit_cost NUMBER(10,2),
+        weight NUMBER(10,2),
+        status VARCHAR2(20) DEFAULT 'ACTIVE',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  CUSTOMERS: `
-    CREATE TABLE customers (
-      customer_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      first_name VARCHAR2(100) NOT NULL,
-      last_name VARCHAR2(100) NOT NULL,
-      email VARCHAR2(200) UNIQUE NOT NULL,
-      phone VARCHAR2(20),
-      address_line1 VARCHAR2(200),
-      address_line2 VARCHAR2(200),
-      city VARCHAR2(100),
-      state_province VARCHAR2(100),
-      postal_code VARCHAR2(20),
-      country_id NUMBER REFERENCES countries(country_id),
-      customer_type VARCHAR2(20) DEFAULT 'REGULAR',
-      credit_limit NUMBER(10,2) DEFAULT 1000,
-      balance NUMBER(10,2) DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}inventory`]: `
+      CREATE TABLE ${p}inventory (
+        inventory_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_id NUMBER NOT NULL REFERENCES ${p}products(product_id),
+        warehouse_id NUMBER NOT NULL REFERENCES ${p}warehouses(warehouse_id),
+        quantity_on_hand NUMBER DEFAULT 0,
+        quantity_reserved NUMBER DEFAULT 0,
+        reorder_level NUMBER DEFAULT 10,
+        last_restock_date TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}uk_inventory UNIQUE (product_id, warehouse_id)
+      )${compressClause} NOLOGGING`,
 
-  ORDERS: `
-    CREATE TABLE orders (
-      order_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      customer_id NUMBER NOT NULL REFERENCES customers(customer_id),
-      order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      status VARCHAR2(20) DEFAULT 'PENDING',
-      shipping_address VARCHAR2(500),
-      shipping_method VARCHAR2(50),
-      subtotal NUMBER(12,2) DEFAULT 0,
-      tax_amount NUMBER(12,2) DEFAULT 0,
-      shipping_cost NUMBER(10,2) DEFAULT 0,
-      total_amount NUMBER(12,2) DEFAULT 0,
-      notes VARCHAR2(1000),
-      warehouse_id NUMBER REFERENCES warehouses(warehouse_id),
-      shipped_date TIMESTAMP,
-      delivered_date TIMESTAMP,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}customers`]: `
+      CREATE TABLE ${p}customers (
+        customer_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        first_name VARCHAR2(100) NOT NULL,
+        last_name VARCHAR2(100) NOT NULL,
+        email VARCHAR2(200) NOT NULL,
+        phone VARCHAR2(20),
+        address_line1 VARCHAR2(200),
+        address_line2 VARCHAR2(200),
+        city VARCHAR2(100),
+        state_province VARCHAR2(100),
+        postal_code VARCHAR2(20),
+        country_id NUMBER REFERENCES ${p}countries(country_id),
+        customer_type VARCHAR2(20) DEFAULT 'REGULAR',
+        credit_limit NUMBER(10,2) DEFAULT 1000,
+        balance NUMBER(10,2) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  ORDER_ITEMS: `
-    CREATE TABLE order_items (
-      order_item_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      order_id NUMBER NOT NULL REFERENCES orders(order_id),
-      product_id NUMBER NOT NULL REFERENCES products(product_id),
-      quantity NUMBER NOT NULL,
-      unit_price NUMBER(10,2) NOT NULL,
-      discount_percent NUMBER(5,2) DEFAULT 0,
-      line_total NUMBER(12,2),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}orders`]: `
+      CREATE TABLE ${p}orders (
+        order_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        customer_id NUMBER NOT NULL REFERENCES ${p}customers(customer_id),
+        order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status VARCHAR2(20) DEFAULT 'PENDING',
+        shipping_address VARCHAR2(500),
+        shipping_method VARCHAR2(50),
+        subtotal NUMBER(12,2) DEFAULT 0,
+        tax_amount NUMBER(12,2) DEFAULT 0,
+        shipping_cost NUMBER(10,2) DEFAULT 0,
+        total_amount NUMBER(12,2) DEFAULT 0,
+        notes VARCHAR2(1000),
+        warehouse_id NUMBER REFERENCES ${p}warehouses(warehouse_id),
+        shipped_date TIMESTAMP,
+        delivered_date TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  PAYMENTS: `
-    CREATE TABLE payments (
-      payment_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      order_id NUMBER NOT NULL REFERENCES orders(order_id),
-      payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      amount NUMBER(12,2) NOT NULL,
-      payment_method VARCHAR2(50) NOT NULL,
-      transaction_ref VARCHAR2(100),
-      status VARCHAR2(20) DEFAULT 'COMPLETED',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}order_items`]: `
+      CREATE TABLE ${p}order_items (
+        order_item_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_id NUMBER NOT NULL REFERENCES ${p}orders(order_id),
+        product_id NUMBER NOT NULL REFERENCES ${p}products(product_id),
+        quantity NUMBER NOT NULL,
+        unit_price NUMBER(10,2) NOT NULL,
+        discount_percent NUMBER(5,2) DEFAULT 0,
+        line_total NUMBER(12,2),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  ORDER_HISTORY: `
-    CREATE TABLE order_history (
-      history_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      order_id NUMBER NOT NULL REFERENCES orders(order_id),
-      old_status VARCHAR2(20),
-      new_status VARCHAR2(20),
-      changed_by VARCHAR2(100),
-      change_reason VARCHAR2(500),
-      changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
+    [`${p}payments`]: `
+      CREATE TABLE ${p}payments (
+        payment_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_id NUMBER NOT NULL REFERENCES ${p}orders(order_id),
+        payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        amount NUMBER(12,2) NOT NULL,
+        payment_method VARCHAR2(50) NOT NULL,
+        transaction_ref VARCHAR2(100),
+        status VARCHAR2(20) DEFAULT 'COMPLETED',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
 
-  PRODUCT_REVIEWS: `
-    CREATE TABLE product_reviews (
-      review_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      product_id NUMBER NOT NULL REFERENCES products(product_id),
-      customer_id NUMBER NOT NULL REFERENCES customers(customer_id),
-      rating NUMBER(1) CHECK (rating BETWEEN 1 AND 5),
-      review_title VARCHAR2(200),
-      review_text VARCHAR2(4000),
-      is_verified_purchase NUMBER(1) DEFAULT 0,
-      helpful_votes NUMBER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`
+    [`${p}order_history`]: `
+      CREATE TABLE ${p}order_history (
+        history_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_id NUMBER NOT NULL REFERENCES ${p}orders(order_id),
+        old_status VARCHAR2(20),
+        new_status VARCHAR2(20),
+        changed_by VARCHAR2(100),
+        change_reason VARCHAR2(500),
+        changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}product_reviews`]: `
+      CREATE TABLE ${p}product_reviews (
+        review_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_id NUMBER NOT NULL REFERENCES ${p}products(product_id),
+        customer_id NUMBER NOT NULL REFERENCES ${p}customers(customer_id),
+        rating NUMBER(1) CHECK (rating BETWEEN 1 AND 5),
+        review_title VARCHAR2(200),
+        review_text VARCHAR2(4000),
+        is_verified_purchase NUMBER(1) DEFAULT 0,
+        helpful_votes NUMBER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`
+  };
 };
 
-const INDEXES = [
-  'CREATE INDEX idx_products_category ON products(category_id)',
-  'CREATE INDEX idx_products_status ON products(status)',
-  'CREATE INDEX idx_inventory_product ON inventory(product_id)',
-  'CREATE INDEX idx_inventory_warehouse ON inventory(warehouse_id)',
-  'CREATE INDEX idx_customers_email ON customers(email)',
-  'CREATE INDEX idx_customers_country ON customers(country_id)',
-  'CREATE INDEX idx_orders_customer ON orders(customer_id)',
-  'CREATE INDEX idx_orders_status ON orders(status)',
-  'CREATE INDEX idx_orders_date ON orders(order_date)',
-  'CREATE INDEX idx_orders_warehouse ON orders(warehouse_id)',
-  'CREATE INDEX idx_order_items_order ON order_items(order_id)',
-  'CREATE INDEX idx_order_items_product ON order_items(product_id)',
-  'CREATE INDEX idx_payments_order ON payments(order_id)',
-  'CREATE INDEX idx_order_history_order ON order_history(order_id)',
-  'CREATE INDEX idx_reviews_product ON product_reviews(product_id)',
-  'CREATE INDEX idx_reviews_customer ON product_reviews(customer_id)'
-];
-
-const SEQUENCES = [
-  'CREATE SEQUENCE order_seq START WITH 100000 INCREMENT BY 1 CACHE 1000',
-  'CREATE SEQUENCE customer_seq START WITH 100000 INCREMENT BY 1 CACHE 1000'
-];
+const getIndexes = (prefix) => {
+  const p = prefix ? `${prefix}_` : '';
+  return [
+    `CREATE INDEX ${p}idx_products_category ON ${p}products(category_id)`,
+    `CREATE INDEX ${p}idx_products_status ON ${p}products(status)`,
+    `CREATE INDEX ${p}idx_inventory_product ON ${p}inventory(product_id)`,
+    `CREATE INDEX ${p}idx_inventory_warehouse ON ${p}inventory(warehouse_id)`,
+    `CREATE INDEX ${p}idx_customers_country ON ${p}customers(country_id)`,
+    `CREATE INDEX ${p}idx_orders_customer ON ${p}orders(customer_id)`,
+    `CREATE INDEX ${p}idx_orders_status ON ${p}orders(status)`,
+    `CREATE INDEX ${p}idx_orders_date ON ${p}orders(order_date)`,
+    `CREATE INDEX ${p}idx_orders_warehouse ON ${p}orders(warehouse_id)`,
+    `CREATE INDEX ${p}idx_order_items_order ON ${p}order_items(order_id)`,
+    `CREATE INDEX ${p}idx_order_items_product ON ${p}order_items(product_id)`,
+    `CREATE INDEX ${p}idx_payments_order ON ${p}payments(order_id)`,
+    `CREATE INDEX ${p}idx_order_history_order ON ${p}order_history(order_id)`,
+    `CREATE INDEX ${p}idx_reviews_product ON ${p}product_reviews(product_id)`,
+    `CREATE INDEX ${p}idx_reviews_customer ON ${p}product_reviews(customer_id)`
+  ];
+};
 
 // Sample data generators
 const REGIONS_DATA = [
@@ -223,36 +226,40 @@ const CATEGORIES_DATA = [
 const FIRST_NAMES = ['James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph', 'Thomas', 'Charles', 'Mary', 'Patricia', 'Jennifer', 'Linda', 'Elizabeth', 'Barbara', 'Susan', 'Jessica', 'Sarah', 'Karen', 'Emma', 'Olivia', 'Ava', 'Isabella', 'Sophia', 'Mia', 'Charlotte', 'Amelia', 'Harper', 'Evelyn'];
 const LAST_NAMES = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson', 'White', 'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson'];
 const CITIES = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose', 'Austin', 'Jacksonville', 'Fort Worth', 'Columbus', 'Charlotte', 'Seattle', 'Denver', 'Boston', 'Detroit', 'Portland'];
-
 const PRODUCT_ADJECTIVES = ['Premium', 'Professional', 'Ultra', 'Advanced', 'Classic', 'Modern', 'Deluxe', 'Essential', 'Elite', 'Pro'];
 const PRODUCT_NOUNS = ['Laptop', 'Phone', 'Tablet', 'Headphones', 'Speaker', 'Camera', 'Watch', 'Keyboard', 'Mouse', 'Monitor', 'Shirt', 'Pants', 'Jacket', 'Shoes', 'Bag', 'Chair', 'Desk', 'Lamp', 'Sofa', 'Bed'];
 
 class SchemaManager {
-  async createSchema(db, progressCallback = () => {}) {
-    const tableNames = Object.keys(TABLES);
-    const totalSteps = tableNames.length + INDEXES.length + SEQUENCES.length;
+  constructor() {
+    this.schemas = new Map(); // Store schema metadata
+  }
+
+  getTableNames(prefix) {
+    const p = prefix ? `${prefix}_` : '';
+    return [
+      `${p}regions`, `${p}countries`, `${p}warehouses`, `${p}categories`,
+      `${p}products`, `${p}inventory`, `${p}customers`, `${p}orders`,
+      `${p}order_items`, `${p}payments`, `${p}order_history`, `${p}product_reviews`
+    ];
+  }
+
+  async createSchema(db, options = {}, progressCallback = () => {}) {
+    const { prefix = '', compress = false } = options;
+    const tables = getTableDDL(prefix, compress);
+    const indexes = getIndexes(prefix);
+    const tableNames = Object.keys(tables);
+    const totalSteps = tableNames.length + indexes.length;
     let currentStep = 0;
 
-    // Create sequences first
-    for (const seqSql of SEQUENCES) {
-      try {
-        await db.execute(seqSql);
-      } catch (err) {
-        if (!err.message.includes('ORA-00955')) { // Ignore "name already used"
-          console.log('Sequence warning:', err.message);
-        }
-      }
-      currentStep++;
-      progressCallback({ step: 'Creating sequences...', progress: Math.floor((currentStep / totalSteps) * 50) });
-    }
+    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compress ? 'compressed' : 'standard'})...`, progress: 0 });
 
     // Create tables in order
     for (const tableName of tableNames) {
       try {
-        await db.execute(TABLES[tableName]);
+        await db.execute(tables[tableName]);
         console.log(`Created table: ${tableName}`);
       } catch (err) {
-        if (!err.message.includes('ORA-00955')) { // Ignore "name already used"
+        if (!err.message.includes('ORA-00955')) {
           throw err;
         }
         console.log(`Table ${tableName} already exists`);
@@ -262,7 +269,7 @@ class SchemaManager {
     }
 
     // Create indexes
-    for (const indexSql of INDEXES) {
+    for (const indexSql of indexes) {
       try {
         await db.execute(indexSql);
       } catch (err) {
@@ -273,368 +280,340 @@ class SchemaManager {
       currentStep++;
       progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
     }
+
+    // Store schema metadata
+    this.schemas.set(prefix || 'default', { prefix, compress, createdAt: new Date() });
   }
 
-  // Helper method to set all tables to NOLOGGING mode
-  async setNologging(db) {
-    const tables = ['regions', 'countries', 'warehouses', 'categories', 'products',
-                    'inventory', 'customers', 'orders', 'order_items', 'payments',
-                    'order_history', 'product_reviews'];
-    for (const table of tables) {
-      try {
-        await db.execute(`ALTER TABLE ${table} NOLOGGING`);
-      } catch (err) {
-        // Table might not exist yet, ignore
-      }
+  // Parallel batch insert helper
+  async parallelInsert(db, sql, dataArray, batchSize = 100, parallelism = 10) {
+    const batches = [];
+    for (let i = 0; i < dataArray.length; i += batchSize) {
+      batches.push(dataArray.slice(i, i + batchSize));
     }
-    console.log('All tables set to NOLOGGING mode');
-  }
 
-  // Helper method to set all tables back to LOGGING mode
-  async setLogging(db) {
-    const tables = ['regions', 'countries', 'warehouses', 'categories', 'products',
-                    'inventory', 'customers', 'orders', 'order_items', 'payments',
-                    'order_history', 'product_reviews'];
-    for (const table of tables) {
-      try {
-        await db.execute(`ALTER TABLE ${table} LOGGING`);
-      } catch (err) {
-        // Ignore errors
-      }
+    // Process batches in parallel groups
+    for (let i = 0; i < batches.length; i += parallelism) {
+      const parallelBatches = batches.slice(i, i + parallelism);
+      await Promise.all(parallelBatches.map(async (batch) => {
+        for (const data of batch) {
+          try {
+            await db.execute(sql, data);
+          } catch (err) {
+            if (!err.message.includes('ORA-00001')) {
+              console.log('Insert warning:', err.message);
+            }
+          }
+        }
+      }));
     }
-    console.log('All tables set to LOGGING mode');
   }
 
-  async populateData(db, scaleFactor = 1, progressCallback = () => {}) {
+  async populateData(db, options = {}, progressCallback = () => {}) {
+    const {
+      prefix = '',
+      scaleFactor = 1,
+      parallelism = 10  // Number of parallel insert streams
+    } = options;
+
+    const p = prefix ? `${prefix}_` : '';
     const baseCustomers = 1000 * scaleFactor;
     const baseProducts = 500 * scaleFactor;
     const baseOrders = 5000 * scaleFactor;
 
     let progress = 50;
-
-    // Set all tables to NOLOGGING for faster inserts
-    progressCallback({ step: 'Setting tables to NOLOGGING mode...', progress: progress });
-    await this.setNologging(db);
+    progressCallback({ step: 'Starting data population...', progress });
 
     try {
-      // Insert regions (using positional binds - array format)
+      // Insert regions
       progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
       for (const region of REGIONS_DATA) {
         try {
-          await db.execute(`INSERT /*+ APPEND */ INTO regions (region_name) VALUES (:1)`, [region]);
+          await db.execute(`INSERT /*+ APPEND */ INTO ${p}regions (region_name) VALUES (:1)`, [region]);
         } catch (err) {
           if (!err.message.includes('ORA-00001')) throw err;
         }
       }
 
-    // Get region IDs
-    const regionsResult = await db.execute('SELECT region_id, region_name FROM regions');
-    const regionMap = {};
-    regionsResult.rows.forEach(r => regionMap[r.REGION_NAME] = r.REGION_ID);
+      // Get region IDs
+      const regionsResult = await db.execute(`SELECT region_id, region_name FROM ${p}regions`);
+      const regionMap = {};
+      regionsResult.rows.forEach(r => regionMap[r.REGION_NAME] = r.REGION_ID);
 
-    // Insert countries
-    progressCallback({ step: 'Inserting countries...', progress: progress += 2 });
-    for (const country of COUNTRIES_DATA) {
-      try {
-        await db.execute(
-          `INSERT /*+ APPEND */ INTO countries (country_name, country_code, region_id) VALUES (:1, :2, :3)`,
-          [country.name, country.code, regionMap[country.region]]
-        );
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) throw err;
-      }
-    }
-
-    // Get country IDs
-    const countriesResult = await db.execute('SELECT country_id FROM countries');
-    const countryIds = countriesResult.rows.map(c => c.COUNTRY_ID);
-
-    if (countryIds.length === 0) {
-      throw new Error('No countries available. Please check database permissions.');
-    }
-
-    // Insert warehouses
-    progressCallback({ step: 'Inserting warehouses...', progress: progress += 2 });
-    const warehouseLocations = ['East Coast DC', 'West Coast DC', 'Central DC', 'European DC', 'Asian DC'];
-    for (let i = 0; i < warehouseLocations.length; i++) {
-      try {
-        await db.execute(
-          `INSERT /*+ APPEND */ INTO warehouses (warehouse_name, location, country_id, capacity) VALUES (:1, :2, :3, :4)`,
-          [warehouseLocations[i], `Warehouse ${i + 1}`, countryIds[i % countryIds.length], 50000 * scaleFactor]
-        );
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) throw err;
-      }
-    }
-
-    // Get warehouse IDs
-    const warehousesResult = await db.execute('SELECT warehouse_id FROM warehouses');
-    const warehouseIds = warehousesResult.rows.map(w => w.WAREHOUSE_ID);
-
-    // Insert categories (parent categories first, then children)
-    progressCallback({ step: 'Inserting categories...', progress: progress += 2 });
-    for (const cat of CATEGORIES_DATA) {
-      if (!cat.parent) {
+      // Insert countries
+      progressCallback({ step: 'Inserting countries...', progress: progress += 2 });
+      for (const country of COUNTRIES_DATA) {
         try {
           await db.execute(
-            `INSERT /*+ APPEND */ INTO categories (category_name, description) VALUES (:1, :2)`,
-            [cat.name, `${cat.name} category`]
+            `INSERT /*+ APPEND */ INTO ${p}countries (country_name, country_code, region_id) VALUES (:1, :2, :3)`,
+            [country.name, country.code, regionMap[country.region]]
           );
         } catch (err) {
           if (!err.message.includes('ORA-00001')) throw err;
         }
       }
-    }
 
-    // Get parent category IDs
-    const parentCatResult = await db.execute('SELECT category_id, category_name FROM categories');
-    const categoryMap = {};
-    parentCatResult.rows.forEach(c => categoryMap[c.CATEGORY_NAME] = c.CATEGORY_ID);
+      // Get country IDs
+      const countriesResult = await db.execute(`SELECT country_id FROM ${p}countries`);
+      const countryIds = countriesResult.rows.map(c => c.COUNTRY_ID);
 
-    // Insert child categories
-    for (const cat of CATEGORIES_DATA) {
-      if (cat.parent && categoryMap[cat.parent]) {
+      if (countryIds.length === 0) {
+        throw new Error('No countries available.');
+      }
+
+      // Insert warehouses
+      progressCallback({ step: 'Inserting warehouses...', progress: progress += 2 });
+      const warehouseLocations = ['East Coast DC', 'West Coast DC', 'Central DC', 'European DC', 'Asian DC'];
+      for (let i = 0; i < warehouseLocations.length; i++) {
         try {
           await db.execute(
-            `INSERT /*+ APPEND */ INTO categories (category_name, parent_category_id, description) VALUES (:1, :2, :3)`,
-            [cat.name, categoryMap[cat.parent], `${cat.name} category`]
+            `INSERT /*+ APPEND */ INTO ${p}warehouses (warehouse_name, location, country_id, capacity) VALUES (:1, :2, :3, :4)`,
+            [warehouseLocations[i], `Warehouse ${i + 1}`, countryIds[i % countryIds.length], 50000 * scaleFactor]
           );
         } catch (err) {
           if (!err.message.includes('ORA-00001')) throw err;
         }
       }
-    }
 
-    // Get all category IDs
-    const catResult = await db.execute('SELECT category_id FROM categories');
-    const categoryIds = catResult.rows.map(c => c.CATEGORY_ID);
+      // Get warehouse IDs
+      const warehousesResult = await db.execute(`SELECT warehouse_id FROM ${p}warehouses`);
+      const warehouseIds = warehousesResult.rows.map(w => w.WAREHOUSE_ID);
 
-    if (categoryIds.length === 0) {
-      throw new Error('No categories available. Please check database permissions.');
-    }
+      // Insert categories
+      progressCallback({ step: 'Inserting categories...', progress: progress += 2 });
+      for (const cat of CATEGORIES_DATA) {
+        if (!cat.parent) {
+          try {
+            await db.execute(
+              `INSERT /*+ APPEND */ INTO ${p}categories (category_name, description) VALUES (:1, :2)`,
+              [cat.name, `${cat.name} category`]
+            );
+          } catch (err) {
+            if (!err.message.includes('ORA-00001')) throw err;
+          }
+        }
+      }
 
-    // Insert products in batches (no RETURNING INTO - just insert)
-    progressCallback({ step: `Inserting ${baseProducts} products...`, progress: progress += 2 });
-    const batchSize = 100;
+      const parentCatResult = await db.execute(`SELECT category_id, category_name FROM ${p}categories`);
+      const categoryMap = {};
+      parentCatResult.rows.forEach(c => categoryMap[c.CATEGORY_NAME] = c.CATEGORY_ID);
 
-    for (let i = 0; i < baseProducts; i += batchSize) {
-      for (let j = 0; j < batchSize && (i + j) < baseProducts; j++) {
+      for (const cat of CATEGORIES_DATA) {
+        if (cat.parent && categoryMap[cat.parent]) {
+          try {
+            await db.execute(
+              `INSERT /*+ APPEND */ INTO ${p}categories (category_name, parent_category_id, description) VALUES (:1, :2, :3)`,
+              [cat.name, categoryMap[cat.parent], `${cat.name} category`]
+            );
+          } catch (err) {
+            if (!err.message.includes('ORA-00001')) throw err;
+          }
+        }
+      }
+
+      const catResult = await db.execute(`SELECT category_id FROM ${p}categories`);
+      const categoryIds = catResult.rows.map(c => c.CATEGORY_ID);
+
+      if (categoryIds.length === 0) {
+        throw new Error('No categories available.');
+      }
+
+      // PARALLEL INSERT: Products
+      progressCallback({ step: `Inserting ${baseProducts} products (parallel)...`, progress: progress += 2 });
+      const productData = [];
+      for (let i = 0; i < baseProducts; i++) {
         const adj = PRODUCT_ADJECTIVES[Math.floor(Math.random() * PRODUCT_ADJECTIVES.length)];
         const noun = PRODUCT_NOUNS[Math.floor(Math.random() * PRODUCT_NOUNS.length)];
         const price = parseFloat((Math.random() * 500 + 10).toFixed(2));
-        const categoryId = categoryIds[Math.floor(Math.random() * categoryIds.length)];
+        productData.push([
+          `${adj} ${noun} ${i + 1}`,
+          `High quality ${noun.toLowerCase()} with premium features`,
+          categoryIds[Math.floor(Math.random() * categoryIds.length)],
+          price,
+          parseFloat((price * 0.6).toFixed(2)),
+          parseFloat((Math.random() * 10 + 0.5).toFixed(2))
+        ]);
+      }
 
-        try {
-          await db.execute(
-            `INSERT /*+ APPEND */ INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
-             VALUES (:1, :2, :3, :4, :5, :6)`,
-            [
-              `${adj} ${noun} ${i + j + 1}`,
-              `High quality ${noun.toLowerCase()} with premium features`,
-              categoryId,
-              price,
-              parseFloat((price * 0.6).toFixed(2)),
-              parseFloat((Math.random() * 10 + 0.5).toFixed(2))
-            ]
-          );
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Product insert warning:', err.message);
+      await this.parallelInsert(
+        db,
+        `INSERT /*+ APPEND */ INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight) VALUES (:1, :2, :3, :4, :5, :6)`,
+        productData,
+        100,
+        parallelism
+      );
+      progressCallback({ step: `Products inserted`, progress: 65 });
+
+      // Get product IDs
+      const prodsResult = await db.execute(`SELECT product_id FROM ${p}products`);
+      const productIds = prodsResult.rows.map(r => r.PRODUCT_ID);
+
+      // PARALLEL INSERT: Inventory
+      progressCallback({ step: 'Inserting inventory (parallel)...', progress: 67 });
+      const inventoryData = [];
+      for (const productId of productIds) {
+        for (const warehouseId of warehouseIds) {
+          inventoryData.push([
+            productId,
+            warehouseId,
+            Math.floor(Math.random() * 1000) + 100,
+            Math.floor(Math.random() * 50),
+            Math.floor(Math.random() * 20) + 10
+          ]);
         }
       }
-      progressCallback({ step: `Inserting products (${Math.min(i + batchSize, baseProducts)}/${baseProducts})...`, progress: 60 + Math.floor((i / baseProducts) * 5) });
-    }
 
-    // Get all product IDs
-    const prodsResult = await db.execute('SELECT product_id FROM products');
-    const productIds = prodsResult.rows.map(p => p.PRODUCT_ID);
+      await this.parallelInsert(
+        db,
+        `INSERT /*+ APPEND */ INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level) VALUES (:1, :2, :3, :4, :5)`,
+        inventoryData,
+        100,
+        parallelism
+      );
+      progressCallback({ step: 'Inventory inserted', progress: 70 });
 
-    if (productIds.length === 0) {
-      console.log('Warning: No products were inserted');
-    }
-
-    // Insert inventory for each product in each warehouse
-    progressCallback({ step: 'Inserting inventory...', progress: progress = 67 });
-    for (const productId of productIds) {
-      for (const warehouseId of warehouseIds) {
-        try {
-          await db.execute(
-            `INSERT /*+ APPEND */ INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
-             VALUES (:1, :2, :3, :4, :5)`,
-            [
-              productId,
-              warehouseId,
-              Math.floor(Math.random() * 1000) + 100,
-              Math.floor(Math.random() * 50),
-              Math.floor(Math.random() * 20) + 10
-            ]
-          );
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Inventory warning:', err.message);
-        }
-      }
-    }
-
-    // Insert customers in batches
-    progressCallback({ step: `Inserting ${baseCustomers} customers...`, progress: progress = 70 });
-
-    for (let i = 0; i < baseCustomers; i += batchSize) {
-      for (let j = 0; j < batchSize && (i + j) < baseCustomers; j++) {
+      // PARALLEL INSERT: Customers
+      progressCallback({ step: `Inserting ${baseCustomers} customers (parallel)...`, progress: 72 });
+      const customerData = [];
+      for (let i = 0; i < baseCustomers; i++) {
         const firstName = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
         const lastName = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
         const city = CITIES[Math.floor(Math.random() * CITIES.length)];
-        const countryId = countryIds[Math.floor(Math.random() * countryIds.length)];
-
-        try {
-          await db.execute(
-            `INSERT /*+ APPEND */ INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
-             VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
-            [
-              firstName,
-              lastName,
-              `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${i + j}@example.com`,
-              `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
-              `${Math.floor(Math.random() * 9999) + 1} Main Street`,
-              city,
-              'State',
-              String(Math.floor(Math.random() * 90000) + 10000),
-              countryId,
-              Math.floor(Math.random() * 10000) + 1000
-            ]
-          );
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) console.log('Customer warning:', err.message);
-        }
+        customerData.push([
+          firstName,
+          lastName,
+          `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${prefix || 'def'}.${i}@example.com`,
+          `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
+          `${Math.floor(Math.random() * 9999) + 1} Main Street`,
+          city,
+          'State',
+          String(Math.floor(Math.random() * 90000) + 10000),
+          countryIds[Math.floor(Math.random() * countryIds.length)],
+          Math.floor(Math.random() * 10000) + 1000
+        ]);
       }
-      progressCallback({ step: `Inserting customers (${Math.min(i + batchSize, baseCustomers)}/${baseCustomers})...`, progress: 70 + Math.floor((i / baseCustomers) * 10) });
-    }
 
-    // Get all customer IDs
-    const custResult = await db.execute('SELECT customer_id FROM customers');
-    const customerIds = custResult.rows.map(c => c.CUSTOMER_ID);
+      await this.parallelInsert(
+        db,
+        `INSERT /*+ APPEND */ INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
+        customerData,
+        100,
+        parallelism
+      );
+      progressCallback({ step: 'Customers inserted', progress: 80 });
 
-    // Check if we can create orders
-    if (customerIds.length === 0 || warehouseIds.length === 0 || productIds.length === 0) {
-      console.log('Skipping orders - missing required data');
-      progressCallback({ step: 'Skipping orders - missing data', progress: 95 });
-    } else {
-      // Insert orders and order items
-      progressCallback({ step: `Inserting ${baseOrders} orders...`, progress: progress = 82 });
-      const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
-      const paymentMethods = ['CREDIT_CARD', 'DEBIT_CARD', 'PAYPAL', 'BANK_TRANSFER', 'CRYPTO'];
-      const shippingMethods = ['Standard', 'Express', 'Overnight'];
+      // Get customer IDs
+      const custResult = await db.execute(`SELECT customer_id FROM ${p}customers`);
+      const customerIds = custResult.rows.map(c => c.CUSTOMER_ID);
 
-      for (let i = 0; i < baseOrders; i += batchSize) {
-        for (let j = 0; j < batchSize && (i + j) < baseOrders; j++) {
-          const customerId = customerIds[Math.floor(Math.random() * customerIds.length)];
-          const warehouseId = warehouseIds[Math.floor(Math.random() * warehouseIds.length)];
-          const status = statuses[Math.floor(Math.random() * statuses.length)];
-          const itemCount = Math.floor(Math.random() * 5) + 1;
+      if (customerIds.length === 0 || productIds.length === 0) {
+        progressCallback({ step: 'Skipping orders - missing data', progress: 95 });
+      } else {
+        // PARALLEL INSERT: Orders
+        progressCallback({ step: `Inserting ${baseOrders} orders (parallel)...`, progress: 82 });
+        const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+        const shippingMethods = ['Standard', 'Express', 'Overnight'];
 
-          try {
-            // Create order and get the ID using a sequence approach
-            await db.execute(
-              `INSERT /*+ APPEND */ INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
-               VALUES (:1, :2, :3, :4, :5)`,
-              [
-                customerId,
-                status,
-                warehouseId,
-                shippingMethods[Math.floor(Math.random() * 3)],
-                `Order ${i + j + 1}`
-              ]
-            );
+        // Prepare all order data
+        const orderData = [];
+        for (let i = 0; i < baseOrders; i++) {
+          orderData.push([
+            customerIds[Math.floor(Math.random() * customerIds.length)],
+            statuses[Math.floor(Math.random() * statuses.length)],
+            warehouseIds[Math.floor(Math.random() * warehouseIds.length)],
+            shippingMethods[Math.floor(Math.random() * 3)],
+            `Order ${i + 1}`
+          ]);
+        }
 
-            // Get the order ID we just created
-            const orderIdResult = await db.execute(
-              `SELECT MAX(order_id) as order_id FROM orders WHERE customer_id = :1`,
-              [customerId]
-            );
-            const orderId = orderIdResult.rows[0]?.ORDER_ID;
+        await this.parallelInsert(
+          db,
+          `INSERT /*+ APPEND */ INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes) VALUES (:1, :2, :3, :4, :5)`,
+          orderData,
+          100,
+          parallelism
+        );
+        progressCallback({ step: 'Orders inserted', progress: 88 });
 
-            if (!orderId) continue;
+        // Get order IDs
+        const ordersResult = await db.execute(`SELECT order_id FROM ${p}orders`);
+        const orderIds = ordersResult.rows.map(o => o.ORDER_ID);
 
-            // Add order items
-            let subtotal = 0;
-            for (let k = 0; k < itemCount; k++) {
-              const productId = productIds[Math.floor(Math.random() * productIds.length)];
-              const quantity = Math.floor(Math.random() * 5) + 1;
-              const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
-              const lineTotal = parseFloat((quantity * unitPrice).toFixed(2));
-              subtotal += lineTotal;
-
-              await db.execute(
-                `INSERT /*+ APPEND */ INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-                 VALUES (:1, :2, :3, :4, :5)`,
-                [orderId, productId, quantity, unitPrice, lineTotal]
-              );
-            }
-
-            // Update order totals
-            const tax = parseFloat((subtotal * 0.08).toFixed(2));
-            const shipping = parseFloat((Math.random() * 20 + 5).toFixed(2));
-            const total = parseFloat((subtotal + tax + shipping).toFixed(2));
-
-            await db.execute(
-              `UPDATE orders SET subtotal = :1, tax_amount = :2, shipping_cost = :3, total_amount = :4 WHERE order_id = :5`,
-              [subtotal, tax, shipping, total, orderId]
-            );
-
-            // Add payment for non-pending orders
-            if (status !== 'PENDING' && status !== 'CANCELLED') {
-              await db.execute(
-                `INSERT /*+ APPEND */ INTO payments (order_id, amount, payment_method, transaction_ref, status)
-                 VALUES (:1, :2, :3, :4, 'COMPLETED')`,
-                [
-                  orderId,
-                  total,
-                  paymentMethods[Math.floor(Math.random() * paymentMethods.length)],
-                  `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`
-                ]
-              );
-            }
-          } catch (err) {
-            if (!err.message.includes('ORA-00001')) console.log('Order warning:', err.message);
+        // PARALLEL INSERT: Order Items
+        progressCallback({ step: 'Inserting order items (parallel)...', progress: 90 });
+        const orderItemData = [];
+        for (const orderId of orderIds) {
+          const itemCount = Math.floor(Math.random() * 3) + 1;
+          for (let k = 0; k < itemCount; k++) {
+            const quantity = Math.floor(Math.random() * 5) + 1;
+            const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
+            const lineTotal = parseFloat((quantity * unitPrice).toFixed(2));
+            orderItemData.push([
+              orderId,
+              productIds[Math.floor(Math.random() * productIds.length)],
+              quantity,
+              unitPrice,
+              lineTotal
+            ]);
           }
         }
-        progressCallback({ step: `Inserting orders (${Math.min(i + batchSize, baseOrders)}/${baseOrders})...`, progress: 82 + Math.floor((i / baseOrders) * 15) });
+
+        await this.parallelInsert(
+          db,
+          `INSERT /*+ APPEND */ INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total) VALUES (:1, :2, :3, :4, :5)`,
+          orderItemData,
+          200,
+          parallelism
+        );
+        progressCallback({ step: 'Order items inserted', progress: 95 });
       }
-    }
 
-    // Add some product reviews
-    progressCallback({ step: 'Adding product reviews...', progress: 98 });
-    if (productIds.length > 0 && customerIds.length > 0) {
-      const reviewCount = Math.floor(Math.min(baseCustomers, baseProducts) * 0.5);
-      const reviewTitles = ['Great product!', 'Good value', 'As expected', 'Could be better', 'Excellent quality'];
+      // Product reviews
+      progressCallback({ step: 'Adding product reviews...', progress: 97 });
+      if (productIds.length > 0 && customerIds.length > 0) {
+        const reviewCount = Math.floor(Math.min(baseCustomers, baseProducts) * 0.3);
+        const reviewTitles = ['Great product!', 'Good value', 'As expected', 'Could be better', 'Excellent quality'];
+        const reviewData = [];
 
-      for (let i = 0; i < reviewCount; i++) {
+        for (let i = 0; i < reviewCount; i++) {
+          reviewData.push([
+            productIds[Math.floor(Math.random() * productIds.length)],
+            customerIds[Math.floor(Math.random() * customerIds.length)],
+            Math.floor(Math.random() * 5) + 1,
+            reviewTitles[Math.floor(Math.random() * reviewTitles.length)],
+            'This is a sample review for the product.',
+            Math.random() > 0.3 ? 1 : 0
+          ]);
+        }
+
+        await this.parallelInsert(
+          db,
+          `INSERT /*+ APPEND */ INTO ${p}product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase) VALUES (:1, :2, :3, :4, :5, :6)`,
+          reviewData,
+          100,
+          parallelism
+        );
+      }
+
+      // Set tables back to LOGGING
+      progressCallback({ step: 'Setting tables to LOGGING mode...', progress: 99 });
+      for (const tableName of this.getTableNames(prefix)) {
         try {
-          await db.execute(
-            `INSERT /*+ APPEND */ INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
-             VALUES (:1, :2, :3, :4, :5, :6)`,
-            [
-              productIds[Math.floor(Math.random() * productIds.length)],
-              customerIds[Math.floor(Math.random() * customerIds.length)],
-              Math.floor(Math.random() * 5) + 1,
-              reviewTitles[Math.floor(Math.random() * reviewTitles.length)],
-              'This is a sample review for the product.',
-              Math.random() > 0.3 ? 1 : 0
-            ]
-          );
+          await db.execute(`ALTER TABLE ${tableName} LOGGING`);
         } catch (err) {
-          // Ignore duplicate reviews
+          // Ignore
         }
       }
-    }
 
       progressCallback({ step: 'Data population complete!', progress: 100 });
-    } finally {
-      // Restore LOGGING mode for all tables
-      progressCallback({ step: 'Restoring LOGGING mode...', progress: 100 });
-      await this.setLogging(db);
+    } catch (error) {
+      console.error('Error during data population:', error);
+      throw error;
     }
   }
 
-  async dropSchema(db) {
+  async dropSchema(db, prefix = '') {
+    const p = prefix ? `${prefix}_` : '';
     const dropOrder = [
       'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
       'customers', 'inventory', 'products', 'categories', 'warehouses',
@@ -643,69 +622,84 @@ class SchemaManager {
 
     for (const table of dropOrder) {
       try {
-        await db.execute(`DROP TABLE ${table} CASCADE CONSTRAINTS PURGE`);
-        console.log(`Dropped table: ${table}`);
+        await db.execute(`DROP TABLE ${p}${table} CASCADE CONSTRAINTS PURGE`);
+        console.log(`Dropped table: ${p}${table}`);
       } catch (err) {
-        if (!err.message.includes('ORA-00942')) { // Table doesn't exist
-          console.log(`Warning dropping ${table}:`, err.message);
+        if (!err.message.includes('ORA-00942')) {
+          console.log(`Warning dropping ${p}${table}:`, err.message);
         }
       }
     }
 
-    // Drop sequences
-    for (const seq of ['order_seq', 'customer_seq']) {
-      try {
-        await db.execute(`DROP SEQUENCE ${seq}`);
-      } catch (err) {
-        // Ignore
-      }
-    }
+    this.schemas.delete(prefix || 'default');
   }
 
-  async getSchemaInfo(db) {
+  async getSchemaInfo(db, prefix = '') {
+    const p = prefix ? `${prefix}_` : '';
     try {
-      const tables = await db.execute(`
-        SELECT table_name, num_rows, blocks, avg_row_len
-        FROM user_tables
-        WHERE table_name IN ('REGIONS', 'COUNTRIES', 'WAREHOUSES', 'CATEGORIES', 'PRODUCTS',
-                             'INVENTORY', 'CUSTOMERS', 'ORDERS', 'ORDER_ITEMS', 'PAYMENTS',
-                             'ORDER_HISTORY', 'PRODUCT_REVIEWS')
-        ORDER BY table_name
-      `);
-
+      const tableNames = this.getTableNames(prefix);
       const counts = {};
-      for (const table of ['regions', 'countries', 'warehouses', 'categories', 'products',
-                           'inventory', 'customers', 'orders', 'order_items', 'payments']) {
+
+      for (const tableName of tableNames) {
         try {
-          const result = await db.execute(`SELECT COUNT(*) as cnt FROM ${table}`);
-          counts[table] = result.rows[0].CNT;
+          const shortName = tableName.replace(p, '');
+          const result = await db.execute(`SELECT COUNT(*) as cnt FROM ${tableName}`);
+          counts[shortName] = result.rows[0].CNT;
         } catch (err) {
-          counts[table] = 0;
+          // Table doesn't exist
         }
       }
 
       const totalSize = await db.execute(`
-        SELECT SUM(bytes)/1024/1024 as size_mb
+        SELECT NVL(SUM(bytes)/1024/1024, 0) as size_mb
         FROM user_segments
-        WHERE segment_name IN ('REGIONS', 'COUNTRIES', 'WAREHOUSES', 'CATEGORIES', 'PRODUCTS',
-                               'INVENTORY', 'CUSTOMERS', 'ORDERS', 'ORDER_ITEMS', 'PAYMENTS',
-                               'ORDER_HISTORY', 'PRODUCT_REVIEWS')
+        WHERE segment_name LIKE '${p.toUpperCase()}%'
       `);
 
+      const schemaMetadata = this.schemas.get(prefix || 'default');
+
       return {
-        tables: tables.rows,
+        prefix,
         counts,
         totalSizeMB: totalSize.rows[0]?.SIZE_MB || 0,
-        schemaExists: tables.rows.length > 0
+        schemaExists: Object.keys(counts).length > 0,
+        compress: schemaMetadata?.compress || false
       };
     } catch (err) {
       return {
-        tables: [],
+        prefix,
         counts: {},
         totalSizeMB: 0,
         schemaExists: false,
         error: err.message
       };
+    }
+  }
+
+  // Get list of all schemas
+  async listSchemas(db) {
+    try {
+      // Find all schema prefixes by looking for tables ending with _regions
+      const result = await db.execute(`
+        SELECT DISTINCT
+          CASE
+            WHEN table_name = 'REGIONS' THEN ''
+            ELSE SUBSTR(table_name, 1, INSTR(table_name, '_REGIONS') - 1)
+          END as prefix
+        FROM user_tables
+        WHERE table_name LIKE '%REGIONS'
+      `);
+
+      const schemas = [];
+      for (const row of result.rows) {
+        const prefix = row.PREFIX || '';
+        const info = await this.getSchemaInfo(db, prefix);
+        schemas.push(info);
+      }
+
+      return schemas;
+    } catch (err) {
+      return [];
     }
   }
 }
