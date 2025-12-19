@@ -65,6 +65,18 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
     }
   };
 
+  const handleDropAll = async () => {
+    if (existingSchemas.length === 0) return;
+
+    const schemaNames = existingSchemas.map(s => s.prefix || 'default').join(', ');
+    if (window.confirm(`Are you sure you want to drop ALL schemas (${schemaNames})? All data will be lost.`)) {
+      // Drop all schemas in sequence
+      for (const schema of existingSchemas) {
+        await onDropSchema(schema.prefix);
+      }
+    }
+  };
+
   const updateSchemaDefinition = (index, field, value) => {
     setSchemaDefinitions(prev => {
       const updated = [...prev];
@@ -121,9 +133,19 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
         {/* Existing Schemas */}
         {existingSchemas.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ fontSize: '0.875rem', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
-              Existing Schemas
-            </h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 style={{ fontSize: '0.875rem', color: 'var(--text-muted)', margin: 0 }}>
+                Existing Schemas
+              </h3>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={handleDropAll}
+                disabled={isCreatingAny}
+                style={{ fontSize: '0.75rem', padding: '4px 8px' }}
+              >
+                Drop All Schemas
+              </button>
+            </div>
             {existingSchemas.map((schema) => {
               const schemaId = schema.prefix || 'default';
               const schemaProgress = progress[schemaId];
