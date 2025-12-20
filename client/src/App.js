@@ -80,20 +80,27 @@ function App() {
           ];
         }
 
+        // Get first schema for backward-compatible single metrics
+        const firstSchemaId = Object.keys(schemaMetrics)[0];
+        const firstData = firstSchemaId ? schemaMetrics[firstSchemaId] : null;
+
         return {
           ...prev,
           tpsBySchema: newTpsBySchema,
           operationsBySchema: newOpsBySchema,
-          // Also update single-schema metrics for backward compatibility
-          tps: Object.keys(schemaMetrics).length === 1
-            ? [...prev.tps.slice(-59), { time: new Date(), value: schemaMetrics[Object.keys(schemaMetrics)[0]].tps }]
+          // Always update perSecond and total for single-schema MetricsPanel view
+          perSecond: firstData ? firstData.perSecond : prev.perSecond,
+          total: firstData ? firstData.total : prev.total,
+          // Also update single-schema arrays
+          tps: firstData
+            ? [...prev.tps.slice(-59), { time: new Date(), value: firstData.tps }]
             : prev.tps,
-          operations: Object.keys(schemaMetrics).length === 1
+          operations: firstData
             ? [...prev.operations.slice(-59), {
                 time: new Date(),
-                inserts: schemaMetrics[Object.keys(schemaMetrics)[0]].perSecond.inserts,
-                updates: schemaMetrics[Object.keys(schemaMetrics)[0]].perSecond.updates,
-                deletes: schemaMetrics[Object.keys(schemaMetrics)[0]].perSecond.deletes
+                inserts: firstData.perSecond.inserts,
+                updates: firstData.perSecond.updates,
+                deletes: firstData.perSecond.deletes
               }]
             : prev.operations
         };
