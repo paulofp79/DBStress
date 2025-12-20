@@ -356,16 +356,29 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
             </p>
           </div>
 
-          <button
-            className="btn btn-success"
-            onClick={handleCreateAll}
-            disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
-            style={{ width: '100%' }}
-          >
-            {isCreatingAny
-              ? 'Creating...'
-              : `Create ${schemaDefinitions.filter(s => s.enabled).length} Schema(s)`}
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              className="btn btn-success"
+              onClick={handleCreateAll}
+              disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
+              style={{ flex: 1 }}
+            >
+              {isCreatingAny
+                ? 'Creating...'
+                : `Create ${schemaDefinitions.filter(s => s.enabled).length} Schema(s)`}
+            </button>
+
+            {existingSchemas.length > 0 && (
+              <button
+                className="btn btn-danger"
+                onClick={handleDropAll}
+                disabled={isCreatingAny}
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                Drop All ({existingSchemas.length})
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
