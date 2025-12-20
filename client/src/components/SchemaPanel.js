@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 
 function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefreshSchemas, socket }) {
   const [scaleFactor, setScaleFactor] = useState(1);
-  const [parallelism, setParallelism] = useState(10);
+  const parallelism = 10; // Fixed parallelism for batch inserts
   const [creating, setCreating] = useState({});
   const [progress, setProgress] = useState({});
 
