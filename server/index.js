@@ -260,7 +260,7 @@ io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
   // Send current state to newly connected client
-  socket.emit('stress-status', stressTestState);
+  socket.emit('stress-status', getStressStatus());
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
