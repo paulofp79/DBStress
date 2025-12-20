@@ -11,6 +11,9 @@ import OperationsChart from './components/OperationsChart';
 
 const API_BASE = 'http://localhost:3001/api';
 
+// Configure axios defaults
+axios.defaults.timeout = 30000; // 30 second timeout
+
 function App() {
   const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
