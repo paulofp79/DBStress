@@ -267,7 +267,7 @@ class SchemaManager {
     const compressionLabel = COMPRESSION_TYPES[effectiveCompression] || 'no compression';
     progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel})...`, progress: 0 });
 
-    // Create tables in order
+    // Create tables in order (without indexes to avoid overhead during bulk load)
     for (const tableName of tableNames) {
       try {
         await db.execute(tables[tableName]);
@@ -279,8 +279,14 @@ class SchemaManager {
         console.log(`Table ${tableName} already exists`);
       }
       currentStep++;
-      progressCallback({ step: `Creating table ${tableName}...`, progress: Math.floor((currentStep / totalSteps) * 50) });
+      progressCallback({ step: `Creating table ${tableName}...`, progress: Math.floor((currentStep / totalSteps) * 30) });
     }
+  }
+
+  async createIndexes(db, progressCallback = () => {}) {
+    // Create indexes after data population to avoid index build overhead during bulk load
+    let currentStep = 0;
+    const totalSteps = INDEXES.length;
 
     // Create indexes
     for (const indexSql of indexes) {
@@ -292,7 +298,7 @@ class SchemaManager {
         }
       }
       currentStep++;
-      progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
+      progressCallback({ step: 'Creating indexes...', progress: 90 + Math.floor((currentStep / totalSteps) * 10) });
     }
 
     // Store schema metadata

@@ -25,3 +25,6 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# Temporary test files
+test-schema-functions.js
