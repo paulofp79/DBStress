@@ -9,7 +9,8 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "install-all": "npm install && cd client && npm install",
     "build": "cd client && npm run build",
-    "start": "node server/index.js"
+    "start": "npm run build && node server/index.js",
+    "serve": "node server/index.js"
   },
   "keywords": [
     "oracle",
