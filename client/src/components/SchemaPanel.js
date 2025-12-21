@@ -6,10 +6,21 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
   const [creating, setCreating] = useState({});
   const [progress, setProgress] = useState({});
 
+  // Compression type options
+  const COMPRESSION_OPTIONS = [
+    { value: 'none', label: 'No Compression' },
+    { value: 'basic', label: 'ROW STORE COMPRESS BASIC' },
+    { value: 'advanced', label: 'ROW STORE COMPRESS ADVANCED' },
+    { value: 'query_low', label: 'COLUMN STORE FOR QUERY LOW' },
+    { value: 'query_high', label: 'COLUMN STORE FOR QUERY HIGH' },
+    { value: 'archive_low', label: 'COLUMN STORE FOR ARCHIVE LOW' },
+    { value: 'archive_high', label: 'COLUMN STORE FOR ARCHIVE HIGH' }
+  ];
+
   // Batch schema definitions - create multiple schemas at once
   const [schemaDefinitions, setSchemaDefinitions] = useState([
-    { prefix: 'nocomp', compress: false, enabled: true },
-    { prefix: 'comp', compress: true, enabled: true }
+    { prefix: 'nocomp', compressionType: 'none', enabled: true },
+    { prefix: 'rowadv', compressionType: 'advanced', enabled: true }
   ]);
 
   useEffect(() => {
@@ -50,7 +61,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
       return onCreateSchema({
         scaleFactor,
         prefix: schema.prefix,
-        compress: schema.compress,
+        compressionType: schema.compressionType,
         parallelism
       });
     });
@@ -88,7 +99,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
   const addSchemaDefinition = () => {
     setSchemaDefinitions(prev => [
       ...prev,
-      { prefix: `schema${prev.length + 1}`, compress: false, enabled: true }
+      { prefix: `schema${prev.length + 1}`, compressionType: 'none', enabled: true }
     ]);
   };
 
@@ -162,9 +173,9 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                     <span style={{ fontWeight: '500' }}>
                       {schemaId}
-                      {schema.compress && (
-                        <span style={{ marginLeft: '0.5rem', fontSize: '0.7rem', background: 'var(--accent-primary)', padding: '2px 6px', borderRadius: '4px' }}>
-                          COMPRESSED
+                      {schema.compressionType && schema.compressionType !== 'none' && (
+                        <span style={{ marginLeft: '0.5rem', fontSize: '0.65rem', background: 'var(--accent-primary)', padding: '2px 6px', borderRadius: '4px' }}>
+                          {COMPRESSION_OPTIONS.find(o => o.value === schema.compressionType)?.label || schema.compressionType}
                         </span>
                       )}
                     </span>
@@ -309,8 +320,8 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                       </div>
 
                       <select
-                        value={schema.compress ? 'compress' : 'nocompress'}
-                        onChange={(e) => updateSchemaDefinition(index, 'compress', e.target.value === 'compress')}
+                        value={schema.compressionType || 'none'}
+                        onChange={(e) => updateSchemaDefinition(index, 'compressionType', e.target.value)}
                         disabled={isCreatingAny}
                         style={{
                           padding: '0.4rem',
@@ -318,12 +329,13 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                           border: '1px solid var(--border)',
                           borderRadius: '4px',
                           color: 'var(--text-primary)',
-                          fontSize: '0.8rem',
-                          minWidth: '140px'
+                          fontSize: '0.75rem',
+                          minWidth: '220px'
                         }}
                       >
-                        <option value="nocompress">No Compression</option>
-                        <option value="compress">COMPRESS FOR OLTP</option>
+                        {COMPRESSION_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
                       </select>
 
                       {schemaDefinitions.length > 1 && (

@@ -1,10 +1,21 @@
 // Schema Manager for Online Sales Database - Multi-Schema Support
 const oracledb = require('oracledb');
 
+// Compression type mappings
+const COMPRESSION_TYPES = {
+  'none': '',
+  'basic': 'ROW STORE COMPRESS BASIC',
+  'advanced': 'ROW STORE COMPRESS ADVANCED',
+  'query_low': 'COLUMN STORE COMPRESS FOR QUERY LOW',
+  'query_high': 'COLUMN STORE COMPRESS FOR QUERY HIGH',
+  'archive_low': 'COLUMN STORE COMPRESS FOR ARCHIVE LOW',
+  'archive_high': 'COLUMN STORE COMPRESS FOR ARCHIVE HIGH'
+};
+
 // Base table definitions (prefix will be added dynamically)
-const getTableDDL = (prefix, compress = false) => {
+const getTableDDL = (prefix, compressionType = 'none') => {
   const p = prefix ? `${prefix}_` : '';
-  const compressClause = compress ? ' COMPRESS FOR OLTP' : '';
+  const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
 
   return {
     [`${p}regions`]: `
@@ -244,14 +255,17 @@ class SchemaManager {
   }
 
   async createSchema(db, options = {}, progressCallback = () => {}) {
-    const { prefix = '', compress = false } = options;
-    const tables = getTableDDL(prefix, compress);
+    // Support both old boolean 'compress' and new 'compressionType' options
+    const { prefix = '', compress = false, compressionType = null } = options;
+    const effectiveCompression = compressionType || (compress ? 'advanced' : 'none');
+    const tables = getTableDDL(prefix, effectiveCompression);
     const indexes = getIndexes(prefix);
     const tableNames = Object.keys(tables);
     const totalSteps = tableNames.length + indexes.length;
     let currentStep = 0;
 
-    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compress ? 'compressed' : 'standard'})...`, progress: 0 });
+    const compressionLabel = COMPRESSION_TYPES[effectiveCompression] || 'no compression';
+    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel})...`, progress: 0 });
 
     // Create tables in order
     for (const tableName of tableNames) {
@@ -282,7 +296,7 @@ class SchemaManager {
     }
 
     // Store schema metadata
-    this.schemas.set(prefix || 'default', { prefix, compress, createdAt: new Date() });
+    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, createdAt: new Date() });
   }
 
   // Parallel batch insert helper
@@ -663,7 +677,7 @@ class SchemaManager {
         counts,
         totalSizeMB: totalSize.rows[0]?.SIZE_MB || 0,
         schemaExists: Object.keys(counts).length > 0,
-        compress: schemaMetadata?.compress || false
+        compressionType: schemaMetadata?.compressionType || 'none'
       };
     } catch (err) {
       return {
