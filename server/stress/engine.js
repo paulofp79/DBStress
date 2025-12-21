@@ -1,4 +1,5 @@
-// Stress Test Engine for Oracle Database
+// Stress Test Engine for Oracle Database - Multi-Schema Support
+const oracledb = require('oracledb');
 
 class StressEngine {
   constructor() {
@@ -7,23 +8,34 @@ class StressEngine {
     this.workers = [];
     this.pool = null;
     this.io = null;
-    this.stats = {
+    this.schemas = [];  // Array of schema prefixes being tested
+
+    // Stats per schema
+    this.schemaStats = {};  // keyed by schema prefix
+    this.previousSchemaStats = {};
+
+    this.statsInterval = null;
+  }
+
+  initSchemaStats(schemaId) {
+    return {
       inserts: 0,
       updates: 0,
       deletes: 0,
       selects: 0,
       transactions: 0,
       errors: 0,
-      startTime: null
+      startTime: Date.now()
     };
-    this.statsInterval = null;
-    this.previousStats = { ...this.stats };
   }
 
   async start(db, config, io) {
     if (this.isRunning) {
       throw new Error('Stress test already running');
     }
+
+    // Support for multiple schemas
+    this.schemas = config.schemas || [{ prefix: '' }];
 
     this.config = {
       sessions: config.sessions || 10,
@@ -37,35 +49,44 @@ class StressEngine {
 
     this.io = io;
     this.isRunning = true;
-    this.stats = {
-      inserts: 0,
-      updates: 0,
-      deletes: 0,
-      selects: 0,
-      transactions: 0,
-      errors: 0,
-      startTime: Date.now()
-    };
-    this.previousStats = { ...this.stats };
 
-    console.log('Starting stress test with config:', this.config);
+    // Initialize stats for each schema
+    this.schemaStats = {};
+    this.previousSchemaStats = {};
+    for (const schema of this.schemas) {
+      const schemaId = schema.prefix || 'default';
+      this.schemaStats[schemaId] = this.initSchemaStats(schemaId);
+      this.previousSchemaStats[schemaId] = { ...this.schemaStats[schemaId] };
+    }
+
+    console.log('Starting stress test with schemas:', this.schemas.map(s => s.prefix || 'default'));
 
     // Create a dedicated connection pool for stress testing
-    this.pool = await db.createStressPool(this.config.sessions);
+    // Calculate sessions per schema: divide total sessions among schemas
+    const totalSessions = this.config.sessions * this.schemas.length;
+    this.pool = await db.createStressPool(totalSessions);
 
-    // Start worker sessions
-    for (let i = 0; i < this.config.sessions; i++) {
-      this.workers.push(this.runWorker(i));
+    // Start worker sessions for each schema
+    for (const schema of this.schemas) {
+      const schemaId = schema.prefix || 'default';
+      const prefix = schema.prefix || '';
+
+      for (let i = 0; i < this.config.sessions; i++) {
+        this.workers.push(this.runWorker(i, prefix, schemaId));
+      }
     }
 
     // Start stats reporting
     this.statsInterval = setInterval(() => this.reportStats(), 1000);
 
-    console.log(`Started ${this.config.sessions} worker sessions`);
+    console.log(`Started ${this.config.sessions} worker sessions per schema (${this.schemas.length} schemas)`);
   }
 
-  async runWorker(workerId) {
-    while (this.isRunning) {
+  async runWorker(workerId, prefix = '', schemaId = 'default') {
+    const p = prefix ? `${prefix}_` : '';
+    const stats = this.schemaStats[schemaId];
+
+    while (this.isRunning && this.schemaStats[schemaId]) {
       let connection;
       try {
         connection = await this.pool.getConnection();
@@ -75,28 +96,28 @@ class StressEngine {
 
         switch (operation) {
           case 'INSERT':
-            await this.performInsert(connection);
-            this.stats.inserts++;
+            await this.performInsert(connection, p);
+            stats.inserts++;
             break;
           case 'UPDATE':
-            await this.performUpdate(connection);
-            this.stats.updates++;
+            await this.performUpdate(connection, p);
+            stats.updates++;
             break;
           case 'DELETE':
-            await this.performDelete(connection);
-            this.stats.deletes++;
+            await this.performDelete(connection, p);
+            stats.deletes++;
             break;
           case 'SELECT':
-            await this.performSelect(connection);
-            this.stats.selects++;
+            await this.performSelect(connection, p);
+            stats.selects++;
             break;
         }
 
-        this.stats.transactions++;
+        stats.transactions++;
 
         await connection.commit();
       } catch (err) {
-        this.stats.errors++;
+        stats.errors++;
         if (connection) {
           try {
             await connection.rollback();
@@ -107,7 +128,7 @@ class StressEngine {
         // Log errors but continue running
         if (!err.message.includes('pool is terminating') &&
             !err.message.includes('NJS-003')) {
-          console.log(`Worker ${workerId} error:`, err.message);
+          console.log(`Worker ${workerId} [${schemaId}] error:`, err.message);
         }
       } finally {
         if (connection) {
@@ -140,195 +161,199 @@ class StressEngine {
     return 'SELECT';
   }
 
-  async performInsert(connection) {
+  async performInsert(connection, p = '') {
     // Insert operations: create new orders, customers, or reviews
     const type = Math.floor(Math.random() * 3);
 
     if (type === 0) {
       // Insert new order with items
-      const customerId = await this.getRandomId(connection, 'customers', 'customer_id');
-      const warehouseId = await this.getRandomId(connection, 'warehouses', 'warehouse_id');
+      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+      const warehouseId = await this.getRandomId(connection, `${p}warehouses`, 'warehouse_id');
 
       if (!customerId || !warehouseId) return;
 
-      const result = await connection.execute(
-        `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes)
-         VALUES (:custId, 'PENDING', :whId, 'Standard', 'Stress test order')
-         RETURNING order_id INTO :id`,
-        {
-          custId: customerId,
-          whId: warehouseId,
-          id: { type: 2002, dir: 3003 }
-        }
+      // Insert order
+      await connection.execute(
+        `INSERT INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes)
+         VALUES (:1, 'PENDING', :2, 'Standard', 'Stress test order')`,
+        [customerId, warehouseId]
       );
 
-      const orderId = result.outBinds.id[0];
+      // Get the order ID we just created
+      const orderIdResult = await connection.execute(
+        `SELECT MAX(order_id) as order_id FROM ${p}orders WHERE customer_id = :1`,
+        [customerId]
+      );
+      const orderId = orderIdResult.rows[0]?.ORDER_ID;
+
+      if (!orderId) return;
 
       // Add 1-3 order items
       const itemCount = Math.floor(Math.random() * 3) + 1;
       let subtotal = 0;
 
       for (let i = 0; i < itemCount; i++) {
-        const productId = await this.getRandomId(connection, 'products', 'product_id');
+        const productId = await this.getRandomId(connection, `${p}products`, 'product_id');
         if (!productId) continue;
 
         const quantity = Math.floor(Math.random() * 5) + 1;
         const unitPrice = parseFloat((Math.random() * 100 + 10).toFixed(2));
-        const lineTotal = quantity * unitPrice;
+        const lineTotal = parseFloat((quantity * unitPrice).toFixed(2));
         subtotal += lineTotal;
 
         await connection.execute(
-          `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-           VALUES (:orderId, :prodId, :qty, :price, :total)`,
-          { orderId, prodId: productId, qty: quantity, price: unitPrice, total: lineTotal }
+          `INSERT INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total)
+           VALUES (:1, :2, :3, :4, :5)`,
+          [orderId, productId, quantity, unitPrice, lineTotal]
         );
       }
 
       // Update order total
-      const tax = subtotal * 0.08;
-      const shipping = Math.random() * 15 + 5;
+      const tax = parseFloat((subtotal * 0.08).toFixed(2));
+      const shipping = parseFloat((Math.random() * 15 + 5).toFixed(2));
+      const total = parseFloat((subtotal + tax + shipping).toFixed(2));
       await connection.execute(
-        `UPDATE orders SET subtotal = :sub, tax_amount = :tax, shipping_cost = :ship, total_amount = :total
-         WHERE order_id = :id`,
-        { sub: subtotal, tax, ship: shipping, total: subtotal + tax + shipping, id: orderId }
+        `UPDATE ${p}orders SET subtotal = :1, tax_amount = :2, shipping_cost = :3, total_amount = :4
+         WHERE order_id = :5`,
+        [subtotal, tax, shipping, total, orderId]
       );
 
     } else if (type === 1) {
       // Insert product review
-      const productId = await this.getRandomId(connection, 'products', 'product_id');
-      const customerId = await this.getRandomId(connection, 'customers', 'customer_id');
+      const productId = await this.getRandomId(connection, `${p}products`, 'product_id');
+      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
 
       if (!productId || !customerId) return;
 
       await connection.execute(
-        `INSERT INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
-         VALUES (:prodId, :custId, :rating, :title, :text, :verified)`,
-        {
-          prodId: productId,
-          custId: customerId,
-          rating: Math.floor(Math.random() * 5) + 1,
-          title: 'Stress test review',
-          text: 'This is an automated review generated during stress testing.',
-          verified: Math.random() > 0.5 ? 1 : 0
-        }
+        `INSERT INTO ${p}product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
+         VALUES (:1, :2, :3, :4, :5, :6)`,
+        [
+          productId,
+          customerId,
+          Math.floor(Math.random() * 5) + 1,
+          'Stress test review',
+          'This is an automated review generated during stress testing.',
+          Math.random() > 0.5 ? 1 : 0
+        ]
       );
 
     } else {
       // Insert order history entry
-      const orderId = await this.getRandomId(connection, 'orders', 'order_id');
+      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
       if (!orderId) return;
 
       await connection.execute(
-        `INSERT INTO order_history (order_id, old_status, new_status, changed_by, change_reason)
-         VALUES (:orderId, 'PENDING', 'PROCESSING', 'STRESS_TEST', 'Automated status change')`,
-        { orderId }
+        `INSERT INTO ${p}order_history (order_id, old_status, new_status, changed_by, change_reason)
+         VALUES (:1, 'PENDING', 'PROCESSING', 'STRESS_TEST', 'Automated status change')`,
+        [orderId]
       );
     }
   }
 
-  async performUpdate(connection) {
+  async performUpdate(connection, p = '') {
     // Update operations: modify orders, inventory, or customer data
     const type = Math.floor(Math.random() * 4);
 
     if (type === 0) {
       // Update order status
-      const orderId = await this.getRandomId(connection, 'orders', 'order_id');
+      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
       if (!orderId) return;
 
       const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED'];
       const newStatus = statuses[Math.floor(Math.random() * statuses.length)];
 
       await connection.execute(
-        `UPDATE orders SET status = :status, updated_at = CURRENT_TIMESTAMP WHERE order_id = :id`,
-        { status: newStatus, id: orderId }
+        `UPDATE ${p}orders SET status = :1, updated_at = CURRENT_TIMESTAMP WHERE order_id = :2`,
+        [newStatus, orderId]
       );
 
     } else if (type === 1) {
       // Update inventory quantity
-      const inventoryId = await this.getRandomId(connection, 'inventory', 'inventory_id');
+      const inventoryId = await this.getRandomId(connection, `${p}inventory`, 'inventory_id');
       if (!inventoryId) return;
 
       const qtyChange = Math.floor(Math.random() * 50) - 25;
 
       await connection.execute(
-        `UPDATE inventory
-         SET quantity_on_hand = GREATEST(0, quantity_on_hand + :change),
+        `UPDATE ${p}inventory
+         SET quantity_on_hand = GREATEST(0, quantity_on_hand + :1),
              updated_at = CURRENT_TIMESTAMP
-         WHERE inventory_id = :id`,
-        { change: qtyChange, id: inventoryId }
+         WHERE inventory_id = :2`,
+        [qtyChange, inventoryId]
       );
 
     } else if (type === 2) {
       // Update customer balance
-      const customerId = await this.getRandomId(connection, 'customers', 'customer_id');
+      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
       if (!customerId) return;
 
       const balanceChange = parseFloat((Math.random() * 200 - 100).toFixed(2));
 
       await connection.execute(
-        `UPDATE customers
-         SET balance = balance + :change,
+        `UPDATE ${p}customers
+         SET balance = balance + :1,
              updated_at = CURRENT_TIMESTAMP
-         WHERE customer_id = :id`,
-        { change: balanceChange, id: customerId }
+         WHERE customer_id = :2`,
+        [balanceChange, customerId]
       );
 
     } else {
       // Update product price
-      const productId = await this.getRandomId(connection, 'products', 'product_id');
+      const productId = await this.getRandomId(connection, `${p}products`, 'product_id');
       if (!productId) return;
 
       const priceChange = parseFloat((Math.random() * 20 - 10).toFixed(2));
 
       await connection.execute(
-        `UPDATE products
-         SET unit_price = GREATEST(1, unit_price + :change),
+        `UPDATE ${p}products
+         SET unit_price = GREATEST(1, unit_price + :1),
              updated_at = CURRENT_TIMESTAMP
-         WHERE product_id = :id`,
-        { change: priceChange, id: productId }
+         WHERE product_id = :2`,
+        [priceChange, productId]
       );
     }
   }
 
-  async performDelete(connection) {
+  async performDelete(connection, p = '') {
     // Delete operations: remove old reviews, order history, or cancelled orders
     const type = Math.floor(Math.random() * 3);
 
     if (type === 0) {
       // Delete a product review
-      const reviewId = await this.getRandomId(connection, 'product_reviews', 'review_id');
+      const reviewId = await this.getRandomId(connection, `${p}product_reviews`, 'review_id');
       if (!reviewId) return;
 
       await connection.execute(
-        `DELETE FROM product_reviews WHERE review_id = :id`,
-        { id: reviewId }
+        `DELETE FROM ${p}product_reviews WHERE review_id = :1`,
+        [reviewId]
       );
 
     } else if (type === 1) {
       // Delete old order history entry
-      const historyId = await this.getRandomId(connection, 'order_history', 'history_id');
+      const historyId = await this.getRandomId(connection, `${p}order_history`, 'history_id');
       if (!historyId) return;
 
       await connection.execute(
-        `DELETE FROM order_history WHERE history_id = :id`,
-        { id: historyId }
+        `DELETE FROM ${p}order_history WHERE history_id = :1`,
+        [historyId]
       );
 
     } else {
       // Delete cancelled order (and its items first)
       try {
         const result = await connection.execute(
-          `SELECT order_id FROM orders WHERE status = 'CANCELLED' AND ROWNUM = 1`
+          `SELECT order_id FROM ${p}orders WHERE status = 'CANCELLED' AND ROWNUM = 1`
         );
 
         if (result.rows.length > 0) {
           const orderId = result.rows[0].ORDER_ID;
 
           // Delete in correct order due to FK constraints
-          await connection.execute(`DELETE FROM payments WHERE order_id = :id`, { id: orderId });
-          await connection.execute(`DELETE FROM order_history WHERE order_id = :id`, { id: orderId });
-          await connection.execute(`DELETE FROM order_items WHERE order_id = :id`, { id: orderId });
-          await connection.execute(`DELETE FROM orders WHERE order_id = :id`, { id: orderId });
+          await connection.execute(`DELETE FROM ${p}payments WHERE order_id = :1`, [orderId]);
+          await connection.execute(`DELETE FROM ${p}order_history WHERE order_id = :1`, [orderId]);
+          await connection.execute(`DELETE FROM ${p}order_items WHERE order_id = :1`, [orderId]);
+          await connection.execute(`DELETE FROM ${p}orders WHERE order_id = :1`, [orderId]);
         }
       } catch (err) {
         // Ignore - might have concurrent deletes
@@ -336,7 +361,7 @@ class StressEngine {
     }
   }
 
-  async performSelect(connection) {
+  async performSelect(connection, p = '') {
     // Select operations: various read queries
     const type = Math.floor(Math.random() * 6);
 
@@ -344,8 +369,8 @@ class StressEngine {
       // Select orders with customer info
       await connection.execute(
         `SELECT o.order_id, o.status, o.total_amount, c.first_name, c.last_name
-         FROM orders o
-         JOIN customers c ON o.customer_id = c.customer_id
+         FROM ${p}orders o
+         JOIN ${p}customers c ON o.customer_id = c.customer_id
          WHERE ROWNUM <= 100`
       );
 
@@ -353,9 +378,9 @@ class StressEngine {
       // Select product inventory across warehouses
       await connection.execute(
         `SELECT p.product_name, w.warehouse_name, i.quantity_on_hand
-         FROM inventory i
-         JOIN products p ON i.product_id = p.product_id
-         JOIN warehouses w ON i.warehouse_id = w.warehouse_id
+         FROM ${p}inventory i
+         JOIN ${p}products p ON i.product_id = p.product_id
+         JOIN ${p}warehouses w ON i.warehouse_id = w.warehouse_id
          WHERE ROWNUM <= 100`
       );
 
@@ -363,8 +388,8 @@ class StressEngine {
       // Select top selling products
       await connection.execute(
         `SELECT p.product_name, SUM(oi.quantity) as total_sold
-         FROM order_items oi
-         JOIN products p ON oi.product_id = p.product_id
+         FROM ${p}order_items oi
+         JOIN ${p}products p ON oi.product_id = p.product_id
          GROUP BY p.product_id, p.product_name
          ORDER BY total_sold DESC
          FETCH FIRST 20 ROWS ONLY`
@@ -372,30 +397,30 @@ class StressEngine {
 
     } else if (type === 3) {
       // Select customer order history
-      const customerId = await this.getRandomId(connection, 'customers', 'customer_id');
+      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
       if (!customerId) return;
 
       await connection.execute(
         `SELECT o.order_id, o.order_date, o.status, o.total_amount
-         FROM orders o
-         WHERE o.customer_id = :custId
+         FROM ${p}orders o
+         WHERE o.customer_id = :1
          ORDER BY o.order_date DESC
          FETCH FIRST 50 ROWS ONLY`,
-        { custId: customerId }
+        [customerId]
       );
 
     } else if (type === 4) {
       // Select order details with items
-      const orderId = await this.getRandomId(connection, 'orders', 'order_id');
+      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
       if (!orderId) return;
 
       await connection.execute(
         `SELECT o.order_id, oi.quantity, oi.unit_price, oi.line_total, p.product_name
-         FROM orders o
-         JOIN order_items oi ON o.order_id = oi.order_id
-         JOIN products p ON oi.product_id = p.product_id
-         WHERE o.order_id = :orderId`,
-        { orderId }
+         FROM ${p}orders o
+         JOIN ${p}order_items oi ON o.order_id = oi.order_id
+         JOIN ${p}products p ON oi.product_id = p.product_id
+         WHERE o.order_id = :1`,
+        [orderId]
       );
 
     } else {
@@ -403,9 +428,9 @@ class StressEngine {
       await connection.execute(
         `SELECT p.product_name, p.unit_price, c.category_name,
                 COUNT(r.review_id) as review_count, AVG(r.rating) as avg_rating
-         FROM products p
-         JOIN categories c ON p.category_id = c.category_id
-         LEFT JOIN product_reviews r ON p.product_id = r.product_id
+         FROM ${p}products p
+         JOIN ${p}categories c ON p.category_id = c.category_id
+         LEFT JOIN ${p}product_reviews r ON p.product_id = r.product_id
          WHERE ROWNUM <= 50
          GROUP BY p.product_id, p.product_name, p.unit_price, c.category_name`
       );
@@ -425,40 +450,62 @@ class StressEngine {
 
   reportStats() {
     const now = Date.now();
-    const elapsed = (now - this.stats.startTime) / 1000;
 
-    // Calculate per-second rates
-    const currentStats = {
-      timestamp: now,
-      elapsed: Math.floor(elapsed),
-      total: {
-        inserts: this.stats.inserts,
-        updates: this.stats.updates,
-        deletes: this.stats.deletes,
-        selects: this.stats.selects,
-        transactions: this.stats.transactions,
-        errors: this.stats.errors
-      },
-      perSecond: {
-        inserts: this.stats.inserts - this.previousStats.inserts,
-        updates: this.stats.updates - this.previousStats.updates,
-        deletes: this.stats.deletes - this.previousStats.deletes,
-        selects: this.stats.selects - this.previousStats.selects,
-        transactions: this.stats.transactions - this.previousStats.transactions,
-        errors: this.stats.errors - this.previousStats.errors
-      },
-      averagePerSecond: {
-        transactions: elapsed > 0 ? (this.stats.transactions / elapsed).toFixed(2) : 0
-      }
-    };
+    // Calculate stats for each schema
+    const schemaMetrics = {};
+    let totalTps = 0;
+    let totalTransactions = 0;
 
-    // Calculate TPS
-    currentStats.tps = currentStats.perSecond.transactions;
+    for (const schemaId of Object.keys(this.schemaStats)) {
+      const stats = this.schemaStats[schemaId];
+      const prevStats = this.previousSchemaStats[schemaId] || this.initSchemaStats(schemaId);
+      const elapsed = (now - stats.startTime) / 1000;
 
-    this.previousStats = { ...this.stats };
+      const schemaData = {
+        schemaId,
+        timestamp: now,
+        elapsed: Math.floor(elapsed),
+        total: {
+          inserts: stats.inserts,
+          updates: stats.updates,
+          deletes: stats.deletes,
+          selects: stats.selects,
+          transactions: stats.transactions,
+          errors: stats.errors
+        },
+        perSecond: {
+          inserts: stats.inserts - prevStats.inserts,
+          updates: stats.updates - prevStats.updates,
+          deletes: stats.deletes - prevStats.deletes,
+          selects: stats.selects - prevStats.selects,
+          transactions: stats.transactions - prevStats.transactions,
+          errors: stats.errors - prevStats.errors
+        },
+        averagePerSecond: {
+          transactions: elapsed > 0 ? parseFloat((stats.transactions / elapsed).toFixed(2)) : 0
+        }
+      };
 
+      schemaData.tps = schemaData.perSecond.transactions;
+      schemaMetrics[schemaId] = schemaData;
+      totalTps += schemaData.tps;
+      totalTransactions += stats.transactions;
+
+      // Store previous stats for this schema
+      this.previousSchemaStats[schemaId] = { ...stats };
+    }
+
+    // Emit per-schema metrics and combined metrics
     if (this.io) {
-      this.io.emit('stress-metrics', currentStats);
+      // Emit individual schema metrics
+      this.io.emit('stress-metrics-by-schema', schemaMetrics);
+
+      // Emit combined metrics (backward compatible with single-schema clients)
+      const firstSchemaId = Object.keys(schemaMetrics)[0];
+      if (firstSchemaId) {
+        const combinedStats = { ...schemaMetrics[firstSchemaId], schemas: schemaMetrics };
+        this.io.emit('stress-metrics', combinedStats);
+      }
     }
   }
 
@@ -467,8 +514,20 @@ class StressEngine {
     console.log('Updated stress config:', this.config);
   }
 
+  // Stop a specific schema's stress test
+  stopSchema(schemaId) {
+    console.log(`Stopping stress test for schema: ${schemaId}`);
+    delete this.schemaStats[schemaId];
+    delete this.previousSchemaStats[schemaId];
+
+    // Check if all schemas are stopped
+    if (Object.keys(this.schemaStats).length === 0) {
+      this.stop();
+    }
+  }
+
   async stop() {
-    console.log('Stopping stress test...');
+    console.log('Stopping all stress tests...');
     this.isRunning = false;
 
     // Clear stats interval
@@ -493,17 +552,25 @@ class StressEngine {
     // Clear workers
     this.workers = [];
 
-    // Report final stats
-    const finalStats = {
-      ...this.stats,
-      duration: this.stats.startTime ? (Date.now() - this.stats.startTime) / 1000 : 0
-    };
+    // Report final stats per schema
+    const finalStats = {};
+    for (const schemaId of Object.keys(this.schemaStats)) {
+      const stats = this.schemaStats[schemaId];
+      finalStats[schemaId] = {
+        ...stats,
+        duration: stats.startTime ? (Date.now() - stats.startTime) / 1000 : 0
+      };
+    }
 
     console.log('Stress test stopped. Final stats:', finalStats);
 
     if (this.io) {
-      this.io.emit('stress-stopped', finalStats);
+      this.io.emit('stress-stopped', { schemas: finalStats, transactions: Object.values(finalStats).reduce((sum, s) => sum + s.transactions, 0) });
     }
+
+    // Clear schema stats
+    this.schemaStats = {};
+    this.previousSchemaStats = {};
 
     return finalStats;
   }
