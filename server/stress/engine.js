@@ -479,6 +479,7 @@ class StressEngine {
   // by having multiple instances fight over the same blocks
   async performRacContention(connection, p = '', workerId = 0) {
     const intensity = this.config.racIntensity || 'high';
+    const racTableCount = this.config.racTableCount || 1;
 
     // Get current instance number for tracking
     let instanceNum = 1;
@@ -500,6 +501,10 @@ class StressEngine {
     };
     const config = hotZoneConfig[intensity] || hotZoneConfig.high;
 
+    // Randomly select which RAC table pair to target (spreads load across all tables)
+    const tableNum = Math.floor(Math.random() * racTableCount) + 1;
+    const tableSuffix = tableNum > 1 ? `_${tableNum}` : '';
+
     // Choose operation type - heavily weighted towards updates on same blocks
     const opType = Math.random();
 
@@ -511,7 +516,7 @@ class StressEngine {
       const slotId = hotZoneStart + Math.floor(Math.random() * config.blockZone);
 
       await connection.execute(
-        `UPDATE ${p}rac_hotblock
+        `UPDATE ${p}rac_hotblock${tableSuffix}
          SET counter = counter + 1,
              last_instance = :1,
              last_update = SYSTIMESTAMP
@@ -519,11 +524,13 @@ class StressEngine {
         [instanceNum, slotId]
       );
 
-      // Additional updates based on intensity
+      // Additional updates based on intensity - can target different tables for more spread
       for (let i = 0; i < config.updateCount - 1; i++) {
+        const nextTableNum = Math.floor(Math.random() * racTableCount) + 1;
+        const nextSuffix = nextTableNum > 1 ? `_${nextTableNum}` : '';
         const nextSlot = hotZoneStart + Math.floor(Math.random() * config.blockZone);
         await connection.execute(
-          `UPDATE ${p}rac_hotblock
+          `UPDATE ${p}rac_hotblock${nextSuffix}
            SET counter = counter + 1,
                last_instance = :1,
                last_update = SYSTIMESTAMP
@@ -539,7 +546,7 @@ class StressEngine {
       const newBucket = (Math.floor(Math.random() * 5)) + 1;  // Still use buckets 1-5 for index contention
 
       await connection.execute(
-        `UPDATE ${p}rac_hotindex
+        `UPDATE ${p}rac_hotindex${tableSuffix}
          SET bucket = :1,
              value = value + 1,
              updated_at = SYSTIMESTAMP
@@ -547,11 +554,13 @@ class StressEngine {
         [newBucket, id]
       );
 
-      // Additional updates targeting same bucket (hot index leaf)
+      // Additional updates targeting same bucket (hot index leaf) - can target different tables
       for (let i = 0; i < Math.min(config.updateCount - 1, 3); i++) {
+        const nextTableNum = Math.floor(Math.random() * racTableCount) + 1;
+        const nextSuffix = nextTableNum > 1 ? `_${nextTableNum}` : '';
         const nextId = Math.floor(Math.random() * config.indexZone) + 1;
         await connection.execute(
-          `UPDATE ${p}rac_hotindex
+          `UPDATE ${p}rac_hotindex${nextSuffix}
            SET bucket = 1,
                value = value + 1,
                updated_at = SYSTIMESTAMP
@@ -568,7 +577,7 @@ class StressEngine {
       try {
         await connection.execute(
           `SELECT counter, last_instance
-           FROM ${p}rac_hotblock
+           FROM ${p}rac_hotblock${tableSuffix}
            WHERE slot_id = :1
            FOR UPDATE NOWAIT`,
           [slotId]

@@ -10,7 +10,8 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
     thinkTime: 50,
     // RAC Contention Mode
     racMode: false,
-    racIntensity: 'high'
+    racIntensity: 'high',
+    racTableCount: 1  // Number of RAC hot table pairs to target
   });
 
   // Schema selection for stress testing
@@ -294,30 +295,53 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
 
               {config.racMode && (
                 <>
-                  <div className="form-group" style={{ marginBottom: '0.5rem' }}>
-                    <label style={{ fontSize: '0.8rem' }}>Contention Intensity</label>
-                    <select
-                      value={config.racIntensity}
-                      onChange={(e) => handleChange('racIntensity', e.target.value)}
-                      disabled={stressStatus.isRunning}
-                      style={{
-                        width: '100%',
-                        padding: '0.5rem',
-                        background: 'var(--bg-primary)',
-                        border: '1px solid var(--border)',
-                        borderRadius: '4px',
-                        color: 'var(--text-primary)',
-                        marginTop: '0.25rem'
-                      }}
-                    >
-                      <option value="low">Low - Single block updates</option>
-                      <option value="medium">Medium - Multiple block updates</option>
-                      <option value="high">High - Aggressive multi-block + index contention</option>
-                    </select>
+                  <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.5rem' }}>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label style={{ fontSize: '0.8rem' }}>Contention Intensity</label>
+                      <select
+                        value={config.racIntensity}
+                        onChange={(e) => handleChange('racIntensity', e.target.value)}
+                        disabled={stressStatus.isRunning}
+                        style={{
+                          width: '100%',
+                          padding: '0.5rem',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '4px',
+                          color: 'var(--text-primary)',
+                          marginTop: '0.25rem'
+                        }}
+                      >
+                        <option value="low">Low - Single block updates</option>
+                        <option value="medium">Medium - Multiple block updates</option>
+                        <option value="high">High - Aggressive multi-block + index contention</option>
+                      </select>
+                    </div>
+                    <div className="form-group" style={{ width: '100px' }}>
+                      <label style={{ fontSize: '0.8rem' }}>RAC Tables</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={config.racTableCount}
+                        onChange={(e) => handleChange('racTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                        disabled={stressStatus.isRunning}
+                        style={{
+                          width: '100%',
+                          padding: '0.5rem',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '4px',
+                          color: 'var(--text-primary)',
+                          marginTop: '0.25rem',
+                          textAlign: 'center'
+                        }}
+                      />
+                    </div>
                   </div>
                   <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0 }}>
-                    Run this from 2 RAC instances simultaneously to generate gc waits.
-                    Uses rac_hotblock and rac_hotindex tables.
+                    Set RAC Tables to match what you created in schema (e.g., 50 for 50 table pairs).
+                    Run from 2 RAC instances simultaneously to generate gc waits.
                   </p>
                 </>
               )}

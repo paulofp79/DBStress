@@ -168,28 +168,43 @@ const getTableDDL = (prefix, compressionType = 'none') => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )${compressClause} NOLOGGING`,
 
-    // RAC Contention table - designed for maximum block contention
-    // Small PCTFREE, no sequence PK, single block target
-    [`${p}rac_hotblock`]: `
-      CREATE TABLE ${p}rac_hotblock (
+  };
+};
+
+// Generate RAC hot table DDL dynamically (supports multiple tables)
+const getRacTableDDL = (prefix, compressionType = 'none', tableNum = 1) => {
+  const p = prefix ? `${prefix}_` : '';
+  const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
+  const suffix = tableNum > 1 ? `_${tableNum}` : '';
+
+  return {
+    [`${p}rac_hotblock${suffix}`]: `
+      CREATE TABLE ${p}rac_hotblock${suffix} (
         slot_id NUMBER NOT NULL,
         counter NUMBER DEFAULT 0,
         last_instance NUMBER,
         last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         padding VARCHAR2(500) DEFAULT RPAD('X', 500, 'X'),
-        CONSTRAINT ${p}pk_rac_hotblock PRIMARY KEY (slot_id)
+        CONSTRAINT ${p}pk_rac_hotblock${suffix} PRIMARY KEY (slot_id)
       )${compressClause} PCTFREE 5 INITRANS 1 MAXTRANS 255 LOGGING`,
-
-    // RAC contention with index hot spots
-    [`${p}rac_hotindex`]: `
-      CREATE TABLE ${p}rac_hotindex (
+    [`${p}rac_hotindex${suffix}`]: `
+      CREATE TABLE ${p}rac_hotindex${suffix} (
         id NUMBER NOT NULL,
         bucket NUMBER NOT NULL,
         value NUMBER DEFAULT 0,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT ${p}pk_rac_hotindex PRIMARY KEY (id)
+        CONSTRAINT ${p}pk_rac_hotindex${suffix} PRIMARY KEY (id)
       )${compressClause} PCTFREE 5 LOGGING`
   };
+};
+
+// Generate RAC index DDL for a specific table number
+const getRacIndexes = (prefix, tableNum = 1) => {
+  const p = prefix ? `${prefix}_` : '';
+  const suffix = tableNum > 1 ? `_${tableNum}` : '';
+  return [
+    `CREATE INDEX ${p}idx_rac_hotindex${suffix}_bucket ON ${p}rac_hotindex${suffix}(bucket)`
+  ];
 };
 
 const getIndexes = (prefix) => {
@@ -209,9 +224,8 @@ const getIndexes = (prefix) => {
     `CREATE INDEX ${p}idx_payments_order ON ${p}payments(order_id)`,
     `CREATE INDEX ${p}idx_order_history_order ON ${p}order_history(order_id)`,
     `CREATE INDEX ${p}idx_reviews_product ON ${p}product_reviews(product_id)`,
-    `CREATE INDEX ${p}idx_reviews_customer ON ${p}product_reviews(customer_id)`,
-    // RAC contention indexes - non-unique index on bucket creates hot index blocks
-    `CREATE INDEX ${p}idx_rac_hotindex_bucket ON ${p}rac_hotindex(bucket)`
+    `CREATE INDEX ${p}idx_reviews_customer ON ${p}product_reviews(customer_id)`
+    // Note: RAC indexes are created dynamically based on racTableCount
   ];
 };
 
@@ -269,28 +283,45 @@ class SchemaManager {
     this.schemas = new Map(); // Store schema metadata
   }
 
-  getTableNames(prefix) {
+  getTableNames(prefix, racTableCount = 1) {
     const p = prefix ? `${prefix}_` : '';
-    return [
+    const baseNames = [
       `${p}regions`, `${p}countries`, `${p}warehouses`, `${p}categories`,
       `${p}products`, `${p}inventory`, `${p}customers`, `${p}orders`,
-      `${p}order_items`, `${p}payments`, `${p}order_history`, `${p}product_reviews`,
-      `${p}rac_hotblock`, `${p}rac_hotindex`
+      `${p}order_items`, `${p}payments`, `${p}order_history`, `${p}product_reviews`
     ];
+
+    // Add RAC tables dynamically
+    for (let i = 1; i <= racTableCount; i++) {
+      const suffix = i > 1 ? `_${i}` : '';
+      baseNames.push(`${p}rac_hotblock${suffix}`);
+      baseNames.push(`${p}rac_hotindex${suffix}`);
+    }
+
+    return baseNames;
   }
 
   async createSchema(db, options = {}, progressCallback = () => {}) {
     // Support both old boolean 'compress' and new 'compressionType' options
-    const { prefix = '', compress = false, compressionType = null } = options;
+    const { prefix = '', compress = false, compressionType = null, racTableCount = 1 } = options;
     const effectiveCompression = compressionType || (compress ? 'advanced' : 'none');
     const tables = getTableDDL(prefix, effectiveCompression);
     const indexes = getIndexes(prefix);
+
+    // Add RAC tables and indexes dynamically
+    for (let i = 1; i <= racTableCount; i++) {
+      const racTables = getRacTableDDL(prefix, effectiveCompression, i);
+      Object.assign(tables, racTables);
+      indexes.push(...getRacIndexes(prefix, i));
+    }
+
     const tableNames = Object.keys(tables);
     const totalSteps = tableNames.length + indexes.length;
     let currentStep = 0;
 
     const compressionLabel = COMPRESSION_TYPES[effectiveCompression] || 'no compression';
-    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel})...`, progress: 0 });
+    const racLabel = racTableCount > 1 ? `, ${racTableCount} RAC tables` : '';
+    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel}${racLabel})...`, progress: 0 });
 
     // Create tables in order
     for (const tableName of tableNames) {
@@ -320,8 +351,8 @@ class SchemaManager {
       progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
     }
 
-    // Store schema metadata
-    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, createdAt: new Date() });
+    // Store schema metadata including racTableCount
+    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, racTableCount, createdAt: new Date() });
   }
 
   // Parallel batch insert helper - uses executeMany for much better performance
@@ -373,7 +404,8 @@ class SchemaManager {
     const {
       prefix = '',
       scaleFactor = 1,
-      parallelism = 10  // Number of parallel insert streams
+      parallelism = 10,  // Number of parallel insert streams
+      racTableCount = 1  // Number of RAC hot table pairs
     } = options;
 
     const p = prefix ? `${prefix}_` : '';
@@ -650,49 +682,53 @@ class SchemaManager {
       }
 
       // RAC Contention tables - populate with hot block rows
-      progressCallback({ step: 'Populating RAC contention tables...', progress: 98 });
-      console.log('Populating RAC contention tables...');
+      progressCallback({ step: `Populating ${racTableCount} RAC contention table pairs...`, progress: 98 });
+      console.log(`Populating ${racTableCount} RAC contention table pairs...`);
 
-      // rac_hotblock: 1000 slots spread across ~50-100 blocks
-      // Enough rows to avoid constant row lock timeouts, but concentrated enough for gc contention
-      const hotblockData = [];
-      for (let i = 1; i <= 1000; i++) {
-        hotblockData.push([i, 0, 0]);
-      }
-      try {
-        await this.parallelInsert(
-          db,
-          `INSERT INTO ${p}rac_hotblock (slot_id, counter, last_instance) VALUES (:1, :2, :3)`,
-          hotblockData,
-          200
-        );
-        console.log('  rac_hotblock: 1000 rows inserted');
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) {
-          console.log('  rac_hotblock error:', err.message);
-        } else {
-          console.log('  rac_hotblock: rows already exist');
+      // Populate each RAC table pair
+      for (let tableNum = 1; tableNum <= racTableCount; tableNum++) {
+        const suffix = tableNum > 1 ? `_${tableNum}` : '';
+
+        // rac_hotblock: 1000 slots spread across ~50-100 blocks
+        const hotblockData = [];
+        for (let i = 1; i <= 1000; i++) {
+          hotblockData.push([i, 0, 0]);
         }
-      }
+        try {
+          await this.parallelInsert(
+            db,
+            `INSERT INTO ${p}rac_hotblock${suffix} (slot_id, counter, last_instance) VALUES (:1, :2, :3)`,
+            hotblockData,
+            200
+          );
+          console.log(`  rac_hotblock${suffix}: 1000 rows inserted`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) {
+            console.log(`  rac_hotblock${suffix} error:`, err.message);
+          } else {
+            console.log(`  rac_hotblock${suffix}: rows already exist`);
+          }
+        }
 
-      // rac_hotindex: 5000 rows with 20 bucket values (hot index leaf blocks)
-      const hotindexData = [];
-      for (let i = 1; i <= 5000; i++) {
-        hotindexData.push([i, (i % 20) + 1, 0]);  // bucket 1-20
-      }
-      try {
-        await this.parallelInsert(
-          db,
-          `INSERT INTO ${p}rac_hotindex (id, bucket, value) VALUES (:1, :2, :3)`,
-          hotindexData,
-          500
-        );
-        console.log('  rac_hotindex: 5000 rows inserted');
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) {
-          console.log('  rac_hotindex error:', err.message);
-        } else {
-          console.log('  rac_hotindex: rows already exist');
+        // rac_hotindex: 5000 rows with 20 bucket values (hot index leaf blocks)
+        const hotindexData = [];
+        for (let i = 1; i <= 5000; i++) {
+          hotindexData.push([i, (i % 20) + 1, 0]);  // bucket 1-20
+        }
+        try {
+          await this.parallelInsert(
+            db,
+            `INSERT INTO ${p}rac_hotindex${suffix} (id, bucket, value) VALUES (:1, :2, :3)`,
+            hotindexData,
+            500
+          );
+          console.log(`  rac_hotindex${suffix}: 5000 rows inserted`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) {
+            console.log(`  rac_hotindex${suffix} error:`, err.message);
+          } else {
+            console.log(`  rac_hotindex${suffix}: rows already exist`);
+          }
         }
       }
 
@@ -715,8 +751,32 @@ class SchemaManager {
 
   async dropSchema(db, prefix = '') {
     const p = prefix ? `${prefix}_` : '';
+
+    // First, find all RAC tables dynamically (could be any number)
+    try {
+      const racTablesResult = await db.execute(`
+        SELECT table_name FROM user_tables
+        WHERE table_name LIKE '${p.toUpperCase()}RAC_HOT%'
+        ORDER BY table_name DESC
+      `);
+
+      // Drop RAC tables first
+      for (const row of racTablesResult.rows) {
+        try {
+          await db.execute(`DROP TABLE ${row.TABLE_NAME} CASCADE CONSTRAINTS PURGE`);
+          console.log(`Dropped table: ${row.TABLE_NAME}`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00942')) {
+            console.log(`Warning dropping ${row.TABLE_NAME}:`, err.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.log('Warning querying RAC tables:', err.message);
+    }
+
+    // Then drop the base tables in order
     const dropOrder = [
-      'rac_hotblock', 'rac_hotindex',  // RAC contention tables first
       'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
       'customers', 'inventory', 'products', 'categories', 'warehouses',
       'countries', 'regions'
