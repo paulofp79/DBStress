@@ -9,11 +9,18 @@ class OracleDatabase {
   async testConnection(user, password, connectionString) {
     let connection;
     try {
-      connection = await oracledb.getConnection({
+      // Add connection timeout
+      const connectPromise = oracledb.getConnection({
         user,
         password,
         connectionString
       });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Connection timeout after 15 seconds')), 15000)
+      );
+
+      connection = await Promise.race([connectPromise, timeoutPromise]);
 
       const result = await connection.execute(
         `SELECT banner FROM v$version WHERE ROWNUM = 1`
@@ -43,7 +50,8 @@ class OracleDatabase {
 
     this.config = { user, password, connectionString };
 
-    this.pool = await oracledb.createPool({
+    // Add pool creation timeout
+    const poolPromise = oracledb.createPool({
       user,
       password,
       connectionString,
@@ -54,6 +62,12 @@ class OracleDatabase {
       queueTimeout: 60000,
       enableStatistics: true
     });
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Pool creation timeout after 30 seconds')), 30000)
+    );
+
+    this.pool = await Promise.race([poolPromise, timeoutPromise]);
 
     console.log('Oracle connection pool created');
     return this.pool;
