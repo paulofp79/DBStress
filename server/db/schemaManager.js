@@ -178,7 +178,7 @@ const getTableDDL = (prefix, compressionType = 'none') => {
         last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         padding VARCHAR2(500) DEFAULT RPAD('X', 500, 'X'),
         CONSTRAINT ${p}pk_rac_hotblock PRIMARY KEY (slot_id)
-      ) PCTFREE 5 INITRANS 1 MAXTRANS 255 LOGGING`,
+      )${compressClause} PCTFREE 5 INITRANS 1 MAXTRANS 255 LOGGING`,
 
     // RAC contention with index hot spots
     [`${p}rac_hotindex`]: `
@@ -188,7 +188,7 @@ const getTableDDL = (prefix, compressionType = 'none') => {
         value NUMBER DEFAULT 0,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT ${p}pk_rac_hotindex PRIMARY KEY (id)
-      ) PCTFREE 5 LOGGING`
+      )${compressClause} PCTFREE 5 LOGGING`
   };
 };
 
