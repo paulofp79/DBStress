@@ -653,16 +653,20 @@ class SchemaManager {
       progressCallback({ step: 'Populating RAC contention tables...', progress: 98 });
       console.log('Populating RAC contention tables...');
 
-      // rac_hotblock: 10 slots that will be heavily contended
-      // Few rows = all fit in 1-2 blocks = maximum block contention
+      // rac_hotblock: 1000 slots spread across ~50-100 blocks
+      // Enough rows to avoid constant row lock timeouts, but concentrated enough for gc contention
+      const hotblockData = [];
+      for (let i = 1; i <= 1000; i++) {
+        hotblockData.push([i, 0, 0]);
+      }
       try {
-        for (let i = 1; i <= 10; i++) {
-          await db.execute(
-            `INSERT INTO ${p}rac_hotblock (slot_id, counter, last_instance) VALUES (:1, 0, 0)`,
-            [i]
-          );
-        }
-        console.log('  rac_hotblock: 10 rows inserted');
+        await this.parallelInsert(
+          db,
+          `INSERT INTO ${p}rac_hotblock (slot_id, counter, last_instance) VALUES (:1, :2, :3)`,
+          hotblockData,
+          200
+        );
+        console.log('  rac_hotblock: 1000 rows inserted');
       } catch (err) {
         if (!err.message.includes('ORA-00001')) {
           console.log('  rac_hotblock error:', err.message);
@@ -671,15 +675,19 @@ class SchemaManager {
         }
       }
 
-      // rac_hotindex: 100 rows with only 5 bucket values (hot index leaf blocks)
+      // rac_hotindex: 5000 rows with 20 bucket values (hot index leaf blocks)
+      const hotindexData = [];
+      for (let i = 1; i <= 5000; i++) {
+        hotindexData.push([i, (i % 20) + 1, 0]);  // bucket 1-20
+      }
       try {
-        for (let i = 1; i <= 100; i++) {
-          await db.execute(
-            `INSERT INTO ${p}rac_hotindex (id, bucket, value) VALUES (:1, :2, 0)`,
-            [i, (i % 5) + 1]  // bucket 1-5 only
-          );
-        }
-        console.log('  rac_hotindex: 100 rows inserted');
+        await this.parallelInsert(
+          db,
+          `INSERT INTO ${p}rac_hotindex (id, bucket, value) VALUES (:1, :2, :3)`,
+          hotindexData,
+          500
+        );
+        console.log('  rac_hotindex: 5000 rows inserted');
       } catch (err) {
         if (!err.message.includes('ORA-00001')) {
           console.log('  rac_hotindex error:', err.message);

@@ -473,13 +473,24 @@ class StressEngine {
       // Ignore - might not have access to v$instance
     }
 
+    // Define hot zone sizes based on intensity
+    // Low: larger zones = less contention, Medium: moderate, High: smaller zones = more contention
+    const hotZoneConfig = {
+      low: { blockZone: 200, indexZone: 1000, updateCount: 1 },
+      medium: { blockZone: 100, indexZone: 500, updateCount: 3 },
+      high: { blockZone: 50, indexZone: 200, updateCount: 5 }
+    };
+    const config = hotZoneConfig[intensity] || hotZoneConfig.high;
+
     // Choose operation type - heavily weighted towards updates on same blocks
     const opType = Math.random();
 
     if (opType < 0.7) {
       // 70% - Update rac_hotblock (table block contention)
-      // All sessions target the same 10 rows = same 1-2 blocks
-      const slotId = (workerId % 10) + 1;
+      // Target rows within a "hot zone" to create block contention without constant row locks
+      // With 1000 rows and hot zone of 50-200, multiple workers hit same blocks but different rows
+      const hotZoneStart = 1;  // All workers target the first N rows (same blocks)
+      const slotId = hotZoneStart + Math.floor(Math.random() * config.blockZone);
 
       await connection.execute(
         `UPDATE ${p}rac_hotblock
@@ -490,26 +501,24 @@ class StressEngine {
         [instanceNum, slotId]
       );
 
-      // High intensity: do multiple updates in same transaction
-      if (intensity === 'high') {
-        for (let i = 0; i < 5; i++) {
-          const nextSlot = ((slotId + i) % 10) + 1;
-          await connection.execute(
-            `UPDATE ${p}rac_hotblock
-             SET counter = counter + 1,
-                 last_instance = :1,
-                 last_update = SYSTIMESTAMP
-             WHERE slot_id = :2`,
-            [instanceNum, nextSlot]
-          );
-        }
+      // Additional updates based on intensity
+      for (let i = 0; i < config.updateCount - 1; i++) {
+        const nextSlot = hotZoneStart + Math.floor(Math.random() * config.blockZone);
+        await connection.execute(
+          `UPDATE ${p}rac_hotblock
+           SET counter = counter + 1,
+               last_instance = :1,
+               last_update = SYSTIMESTAMP
+           WHERE slot_id = :2`,
+          [instanceNum, nextSlot]
+        );
       }
 
     } else if (opType < 0.9) {
       // 20% - Update rac_hotindex (index block contention)
-      // Updates cause index maintenance on bucket column
-      const id = Math.floor(Math.random() * 100) + 1;
-      const newBucket = (Math.floor(Math.random() * 5)) + 1;
+      // Target rows with bucket values 1-5 (hot index leaf blocks)
+      const id = Math.floor(Math.random() * config.indexZone) + 1;
+      const newBucket = (Math.floor(Math.random() * 5)) + 1;  // Still use buckets 1-5 for index contention
 
       await connection.execute(
         `UPDATE ${p}rac_hotindex
@@ -520,37 +529,44 @@ class StressEngine {
         [newBucket, id]
       );
 
-      // High intensity: update multiple rows to same bucket (hot leaf block)
-      if (intensity === 'high') {
-        for (let i = 0; i < 3; i++) {
-          const nextId = Math.floor(Math.random() * 100) + 1;
-          await connection.execute(
-            `UPDATE ${p}rac_hotindex
-             SET bucket = :1,
-                 value = value + 1,
-                 updated_at = SYSTIMESTAMP
-             WHERE id = :2`,
-            [1, nextId]  // All go to bucket 1 = same index leaf
-          );
-        }
+      // Additional updates targeting same bucket (hot index leaf)
+      for (let i = 0; i < Math.min(config.updateCount - 1, 3); i++) {
+        const nextId = Math.floor(Math.random() * config.indexZone) + 1;
+        await connection.execute(
+          `UPDATE ${p}rac_hotindex
+           SET bucket = 1,
+               value = value + 1,
+               updated_at = SYSTIMESTAMP
+           WHERE id = :2`,
+          [nextId]  // All go to bucket 1 = same index leaf
+        );
       }
 
     } else {
       // 10% - SELECT with FOR UPDATE (lock contention)
       // Holds blocks longer, increases gc waits
-      const slotId = Math.floor(Math.random() * 10) + 1;
+      const slotId = Math.floor(Math.random() * config.blockZone) + 1;
 
-      await connection.execute(
-        `SELECT counter, last_instance
-         FROM ${p}rac_hotblock
-         WHERE slot_id = :1
-         FOR UPDATE NOWAIT`,
-        [slotId]
-      );
+      try {
+        await connection.execute(
+          `SELECT counter, last_instance
+           FROM ${p}rac_hotblock
+           WHERE slot_id = :1
+           FOR UPDATE NOWAIT`,
+          [slotId]
+        );
 
-      // Small delay while holding lock
-      if (intensity === 'high') {
-        await this.sleep(10);
+        // Small delay while holding lock based on intensity
+        if (intensity === 'high') {
+          await this.sleep(10);
+        } else if (intensity === 'medium') {
+          await this.sleep(5);
+        }
+      } catch (err) {
+        // ORA-00054 expected with NOWAIT - just means another session has the row
+        if (!err.message.includes('ORA-00054')) {
+          throw err;
+        }
       }
     }
   }
