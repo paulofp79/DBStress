@@ -324,27 +324,48 @@ class SchemaManager {
     this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, createdAt: new Date() });
   }
 
-  // Parallel batch insert helper
-  async parallelInsert(db, sql, dataArray, batchSize = 100, parallelism = 10) {
+  // Parallel batch insert helper - uses executeMany for much better performance
+  async parallelInsert(db, sql, dataArray, batchSize = 500, parallelism = 4) {
+    if (dataArray.length === 0) return;
+
     const batches = [];
     for (let i = 0; i < dataArray.length; i += batchSize) {
       batches.push(dataArray.slice(i, i + batchSize));
     }
 
-    // Process batches in parallel groups
-    for (let i = 0; i < batches.length; i += parallelism) {
-      const parallelBatches = batches.slice(i, i + parallelism);
-      await Promise.all(parallelBatches.map(async (batch) => {
-        for (const data of batch) {
-          try {
-            await db.execute(sql, data);
-          } catch (err) {
-            if (!err.message.includes('ORA-00001')) {
-              console.log('Insert warning:', err.message);
-            }
-          }
+    console.log(`Inserting ${dataArray.length} rows in ${batches.length} batches (batch size: ${batchSize})`);
+
+    // Process batches sequentially to avoid connection pool exhaustion
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      let connection;
+      try {
+        connection = await db.getConnection();
+
+        // Use executeMany for batch insert - much faster than individual inserts
+        await connection.executeMany(sql, batch, {
+          autoCommit: false,
+          batchErrors: true  // Continue on errors
+        });
+
+        await connection.commit();
+      } catch (err) {
+        if (!err.message.includes('ORA-00001')) {
+          console.log(`Batch ${i + 1}/${batches.length} warning:`, err.message);
         }
-      }));
+        if (connection) {
+          try { await connection.rollback(); } catch (e) {}
+        }
+      } finally {
+        if (connection) {
+          try { await connection.close(); } catch (e) {}
+        }
+      }
+
+      // Progress indication for large inserts
+      if ((i + 1) % 10 === 0 || i === batches.length - 1) {
+        console.log(`  Batch ${i + 1}/${batches.length} completed`);
+      }
     }
   }
 
@@ -476,10 +497,9 @@ class SchemaManager {
 
       await this.parallelInsert(
         db,
-        `INSERT /*+ APPEND */ INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight) VALUES (:1, :2, :3, :4, :5, :6)`,
+        `INSERT INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight) VALUES (:1, :2, :3, :4, :5, :6)`,
         productData,
-        100,
-        parallelism
+        500
       );
       progressCallback({ step: `Products inserted`, progress: 65 });
 
@@ -504,10 +524,9 @@ class SchemaManager {
 
       await this.parallelInsert(
         db,
-        `INSERT /*+ APPEND */ INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level) VALUES (:1, :2, :3, :4, :5)`,
+        `INSERT INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level) VALUES (:1, :2, :3, :4, :5)`,
         inventoryData,
-        100,
-        parallelism
+        500
       );
       progressCallback({ step: 'Inventory inserted', progress: 70 });
 
@@ -534,10 +553,9 @@ class SchemaManager {
 
       await this.parallelInsert(
         db,
-        `INSERT /*+ APPEND */ INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
+        `INSERT INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
         customerData,
-        100,
-        parallelism
+        500
       );
       progressCallback({ step: 'Customers inserted', progress: 80 });
 
@@ -567,10 +585,9 @@ class SchemaManager {
 
         await this.parallelInsert(
           db,
-          `INSERT /*+ APPEND */ INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes) VALUES (:1, :2, :3, :4, :5)`,
+          `INSERT INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes) VALUES (:1, :2, :3, :4, :5)`,
           orderData,
-          100,
-          parallelism
+          1000
         );
         progressCallback({ step: 'Orders inserted', progress: 88 });
 
@@ -599,10 +616,9 @@ class SchemaManager {
 
         await this.parallelInsert(
           db,
-          `INSERT /*+ APPEND */ INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total) VALUES (:1, :2, :3, :4, :5)`,
+          `INSERT INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total) VALUES (:1, :2, :3, :4, :5)`,
           orderItemData,
-          200,
-          parallelism
+          1000  // Larger batches for executeMany
         );
         progressCallback({ step: 'Order items inserted', progress: 95 });
       }
@@ -627,38 +643,48 @@ class SchemaManager {
 
         await this.parallelInsert(
           db,
-          `INSERT /*+ APPEND */ INTO ${p}product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase) VALUES (:1, :2, :3, :4, :5, :6)`,
+          `INSERT INTO ${p}product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase) VALUES (:1, :2, :3, :4, :5, :6)`,
           reviewData,
-          100,
-          parallelism
+          500
         );
       }
 
       // RAC Contention tables - populate with hot block rows
-      progressCallback({ step: 'Creating RAC contention tables...', progress: 98 });
+      progressCallback({ step: 'Populating RAC contention tables...', progress: 98 });
+      console.log('Populating RAC contention tables...');
 
       // rac_hotblock: 10 slots that will be heavily contended
       // Few rows = all fit in 1-2 blocks = maximum block contention
-      for (let i = 1; i <= 10; i++) {
-        try {
+      try {
+        for (let i = 1; i <= 10; i++) {
           await db.execute(
             `INSERT INTO ${p}rac_hotblock (slot_id, counter, last_instance) VALUES (:1, 0, 0)`,
             [i]
           );
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) throw err;
+        }
+        console.log('  rac_hotblock: 10 rows inserted');
+      } catch (err) {
+        if (!err.message.includes('ORA-00001')) {
+          console.log('  rac_hotblock error:', err.message);
+        } else {
+          console.log('  rac_hotblock: rows already exist');
         }
       }
 
       // rac_hotindex: 100 rows with only 5 bucket values (hot index leaf blocks)
-      for (let i = 1; i <= 100; i++) {
-        try {
+      try {
+        for (let i = 1; i <= 100; i++) {
           await db.execute(
             `INSERT INTO ${p}rac_hotindex (id, bucket, value) VALUES (:1, :2, 0)`,
             [i, (i % 5) + 1]  // bucket 1-5 only
           );
-        } catch (err) {
-          if (!err.message.includes('ORA-00001')) throw err;
+        }
+        console.log('  rac_hotindex: 100 rows inserted');
+      } catch (err) {
+        if (!err.message.includes('ORA-00001')) {
+          console.log('  rac_hotindex error:', err.message);
+        } else {
+          console.log('  rac_hotindex: rows already exist');
         }
       }
 
