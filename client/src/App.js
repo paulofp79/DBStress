@@ -8,6 +8,7 @@ import MetricsPanel from './components/MetricsPanel';
 import WaitEventsPanel from './components/WaitEventsPanel';
 import TPSChart from './components/TPSChart';
 import OperationsChart from './components/OperationsChart';
+import GCWaitChart from './components/GCWaitChart';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -24,6 +25,7 @@ function App() {
     tps: [],
     operations: [],
     waitEvents: [],
+    gcWaitEvents: [],
     systemStats: {},
     // Multi-schema metrics
     tpsBySchema: {},
@@ -133,6 +135,7 @@ function App() {
       setMetrics(prev => ({
         ...prev,
         waitEvents: data.waitEvents,
+        gcWaitEvents: data.gcWaitEvents || [],
         systemStats: data.systemStats,
         sessionStats: data.sessionStats
       }));
@@ -351,7 +354,10 @@ function App() {
               />
             </div>
 
-            <WaitEventsPanel waitEvents={metrics.waitEvents} />
+            <div className="grid-2">
+              <WaitEventsPanel waitEvents={metrics.waitEvents} />
+              <GCWaitChart gcWaitEvents={metrics.gcWaitEvents} />
+            </div>
           </>
         )}
       </main>

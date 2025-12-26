@@ -31,11 +31,12 @@ class MetricsCollector {
     if (!this.isRunning || !this.db) return;
 
     try {
-      const [waitEvents, systemStats, sessionStats, sqlStats] = await Promise.all([
+      const [waitEvents, systemStats, sessionStats, sqlStats, gcWaitEvents] = await Promise.all([
         this.getTopWaitEvents(),
         this.getSystemStats(),
         this.getSessionStats(),
-        this.getTopSQL()
+        this.getTopSQL(),
+        this.getGCWaitEvents()
       ]);
 
       const metrics = {
@@ -43,7 +44,8 @@ class MetricsCollector {
         waitEvents,
         systemStats,
         sessionStats,
-        sqlStats
+        sqlStats,
+        gcWaitEvents
       };
 
       if (this.io) {
@@ -200,6 +202,70 @@ class MetricsCollector {
     } catch (err) {
       console.log('Top SQL query error:', err.message);
       return [];
+    }
+  }
+
+  // GC (Global Cache) Wait Events for RAC monitoring
+  async getGCWaitEvents() {
+    try {
+      // Query GC-related wait events from gv$system_event (RAC) or v$system_event
+      const result = await this.db.execute(`
+        SELECT
+          inst_id,
+          event,
+          total_waits,
+          total_timeouts,
+          time_waited_micro / 1000 as time_waited_ms,
+          CASE WHEN total_waits > 0
+               THEN time_waited_micro / total_waits / 1000
+               ELSE 0 END as avg_wait_ms
+        FROM gv$system_event
+        WHERE event LIKE 'gc %'
+          AND total_waits > 0
+        ORDER BY time_waited_micro DESC
+        FETCH FIRST 20 ROWS ONLY
+      `);
+
+      return result.rows.map(row => ({
+        instId: row.INST_ID || 1,
+        event: row.EVENT,
+        totalWaits: row.TOTAL_WAITS || 0,
+        totalTimeouts: row.TOTAL_TIMEOUTS || 0,
+        timeWaitedMs: parseFloat(row.TIME_WAITED_MS?.toFixed(2) || 0),
+        avgWaitMs: parseFloat(row.AVG_WAIT_MS?.toFixed(3) || 0)
+      }));
+    } catch (err) {
+      // Try single-instance view if gv$ not available
+      try {
+        const result = await this.db.execute(`
+          SELECT
+            1 as inst_id,
+            event,
+            total_waits,
+            total_timeouts,
+            time_waited_micro / 1000 as time_waited_ms,
+            CASE WHEN total_waits > 0
+                 THEN time_waited_micro / total_waits / 1000
+                 ELSE 0 END as avg_wait_ms
+          FROM v$system_event
+          WHERE event LIKE 'gc %'
+            AND total_waits > 0
+          ORDER BY time_waited_micro DESC
+          FETCH FIRST 20 ROWS ONLY
+        `);
+
+        return result.rows.map(row => ({
+          instId: 1,
+          event: row.EVENT,
+          totalWaits: row.TOTAL_WAITS || 0,
+          totalTimeouts: row.TOTAL_TIMEOUTS || 0,
+          timeWaitedMs: parseFloat(row.TIME_WAITED_MS?.toFixed(2) || 0),
+          avgWaitMs: parseFloat(row.AVG_WAIT_MS?.toFixed(3) || 0)
+        }));
+      } catch (e) {
+        console.log('GC wait events query error:', e.message);
+        return [];
+      }
     }
   }
 
