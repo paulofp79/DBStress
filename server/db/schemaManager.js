@@ -708,6 +708,7 @@ class SchemaManager {
   async dropSchema(db, prefix = '') {
     const p = prefix ? `${prefix}_` : '';
     const dropOrder = [
+      'rac_hotblock', 'rac_hotindex',  // RAC contention tables first
       'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
       'customers', 'inventory', 'products', 'categories', 'warehouses',
       'countries', 'regions'
