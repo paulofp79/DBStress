@@ -7,7 +7,10 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
     updatesPerSecond: 30,
     deletesPerSecond: 10,
     selectsPerSecond: 100,
-    thinkTime: 50
+    thinkTime: 50,
+    // RAC Contention Mode
+    racMode: false,
+    racIntensity: 'high'
   });
 
   // Schema selection for stress testing
@@ -62,7 +65,13 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
   }, [schemas, selectedSchemas.length]);
 
   const handleChange = (field, value) => {
-    const newConfig = { ...config, [field]: parseInt(value) };
+    // Handle different value types
+    let parsedValue = value;
+    if (typeof value === 'string' && !isNaN(value) && field !== 'racIntensity') {
+      parsedValue = parseInt(value);
+    }
+
+    const newConfig = { ...config, [field]: parsedValue };
     setConfig(newConfig);
 
     // Live update if running
@@ -252,10 +261,78 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
               </p>
             </div>
 
+            {/* RAC Contention Mode */}
+            <div style={{
+              background: config.racMode ? 'rgba(239, 68, 68, 0.1)' : 'var(--surface)',
+              border: config.racMode ? '2px solid var(--accent-danger)' : '1px solid var(--border)',
+              borderRadius: '8px',
+              padding: '1rem',
+              marginBottom: '1rem'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div>
+                  <label style={{ fontWeight: '600', color: config.racMode ? 'var(--accent-danger)' : 'var(--text-primary)' }}>
+                    RAC Contention Mode
+                  </label>
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: '0.25rem 0 0 0' }}>
+                    Simulates "gc current block congested" waits
+                  </p>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={config.racMode}
+                    onChange={(e) => handleChange('racMode', e.target.checked)}
+                    disabled={stressStatus.isRunning}
+                    style={{ width: '18px', height: '18px', marginRight: '0.5rem' }}
+                  />
+                  <span style={{ fontSize: '0.8rem', fontWeight: '500' }}>
+                    {config.racMode ? 'ON' : 'OFF'}
+                  </span>
+                </label>
+              </div>
+
+              {config.racMode && (
+                <>
+                  <div className="form-group" style={{ marginBottom: '0.5rem' }}>
+                    <label style={{ fontSize: '0.8rem' }}>Contention Intensity</label>
+                    <select
+                      value={config.racIntensity}
+                      onChange={(e) => handleChange('racIntensity', e.target.value)}
+                      disabled={stressStatus.isRunning}
+                      style={{
+                        width: '100%',
+                        padding: '0.5rem',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '4px',
+                        color: 'var(--text-primary)',
+                        marginTop: '0.25rem'
+                      }}
+                    >
+                      <option value="low">Low - Single block updates</option>
+                      <option value="medium">Medium - Multiple block updates</option>
+                      <option value="high">High - Aggressive multi-block + index contention</option>
+                    </select>
+                  </div>
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0 }}>
+                    Run this from 2 RAC instances simultaneously to generate gc waits.
+                    Uses rac_hotblock and rac_hotindex tables.
+                  </p>
+                </>
+              )}
+            </div>
+
             <div className="btn-group">
               {canStart && (
-                <button className="btn btn-success" onClick={handleStart}>
-                  Start Stress Test ({selectedSchemas.length} schema{selectedSchemas.length > 1 ? 's' : ''})
+                <button
+                  className={config.racMode ? "btn btn-danger" : "btn btn-success"}
+                  onClick={handleStart}
+                >
+                  {config.racMode
+                    ? `Start RAC Contention Test (${selectedSchemas.length} schema${selectedSchemas.length > 1 ? 's' : ''})`
+                    : `Start Stress Test (${selectedSchemas.length} schema${selectedSchemas.length > 1 ? 's' : ''})`
+                  }
                 </button>
               )}
               {canStop && (

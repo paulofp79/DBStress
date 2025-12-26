@@ -44,6 +44,9 @@ class StressEngine {
       deletesPerSecond: config.deletesPerSecond || 10,
       selectsPerSecond: config.selectsPerSecond || 100,
       thinkTime: config.thinkTime || 100, // ms between operations
+      // RAC Contention Mode settings
+      racMode: config.racMode || false,
+      racIntensity: config.racIntensity || 'high', // low, medium, high
       ...config
     };
 
@@ -91,26 +94,32 @@ class StressEngine {
       try {
         connection = await this.pool.getConnection();
 
-        // Decide which operation to perform based on configured ratios
-        const operation = this.selectOperation();
+        // RAC Mode: Focus on hot block contention
+        if (this.config.racMode) {
+          await this.performRacContention(connection, p, workerId);
+          stats.updates++;
+        } else {
+          // Normal mode: Decide which operation to perform based on configured ratios
+          const operation = this.selectOperation();
 
-        switch (operation) {
-          case 'INSERT':
-            await this.performInsert(connection, p);
-            stats.inserts++;
-            break;
-          case 'UPDATE':
-            await this.performUpdate(connection, p);
-            stats.updates++;
-            break;
-          case 'DELETE':
-            await this.performDelete(connection, p);
-            stats.deletes++;
-            break;
-          case 'SELECT':
-            await this.performSelect(connection, p);
-            stats.selects++;
-            break;
+          switch (operation) {
+            case 'INSERT':
+              await this.performInsert(connection, p);
+              stats.inserts++;
+              break;
+            case 'UPDATE':
+              await this.performUpdate(connection, p);
+              stats.updates++;
+              break;
+            case 'DELETE':
+              await this.performDelete(connection, p);
+              stats.deletes++;
+              break;
+            case 'SELECT':
+              await this.performSelect(connection, p);
+              stats.selects++;
+              break;
+          }
         }
 
         stats.transactions++;
@@ -445,6 +454,104 @@ class StressEngine {
       return result.rows[0]?.[idColumn.toUpperCase()];
     } catch (err) {
       return null;
+    }
+  }
+
+  // RAC Contention Mode - generates gc current block congested waits
+  // by having multiple instances fight over the same blocks
+  async performRacContention(connection, p = '', workerId = 0) {
+    const intensity = this.config.racIntensity || 'high';
+
+    // Get current instance number for tracking
+    let instanceNum = 1;
+    try {
+      const instResult = await connection.execute(
+        `SELECT instance_number FROM v$instance`
+      );
+      instanceNum = instResult.rows[0]?.INSTANCE_NUMBER || 1;
+    } catch (err) {
+      // Ignore - might not have access to v$instance
+    }
+
+    // Choose operation type - heavily weighted towards updates on same blocks
+    const opType = Math.random();
+
+    if (opType < 0.7) {
+      // 70% - Update rac_hotblock (table block contention)
+      // All sessions target the same 10 rows = same 1-2 blocks
+      const slotId = (workerId % 10) + 1;
+
+      await connection.execute(
+        `UPDATE ${p}rac_hotblock
+         SET counter = counter + 1,
+             last_instance = :1,
+             last_update = SYSTIMESTAMP
+         WHERE slot_id = :2`,
+        [instanceNum, slotId]
+      );
+
+      // High intensity: do multiple updates in same transaction
+      if (intensity === 'high') {
+        for (let i = 0; i < 5; i++) {
+          const nextSlot = ((slotId + i) % 10) + 1;
+          await connection.execute(
+            `UPDATE ${p}rac_hotblock
+             SET counter = counter + 1,
+                 last_instance = :1,
+                 last_update = SYSTIMESTAMP
+             WHERE slot_id = :2`,
+            [instanceNum, nextSlot]
+          );
+        }
+      }
+
+    } else if (opType < 0.9) {
+      // 20% - Update rac_hotindex (index block contention)
+      // Updates cause index maintenance on bucket column
+      const id = Math.floor(Math.random() * 100) + 1;
+      const newBucket = (Math.floor(Math.random() * 5)) + 1;
+
+      await connection.execute(
+        `UPDATE ${p}rac_hotindex
+         SET bucket = :1,
+             value = value + 1,
+             updated_at = SYSTIMESTAMP
+         WHERE id = :2`,
+        [newBucket, id]
+      );
+
+      // High intensity: update multiple rows to same bucket (hot leaf block)
+      if (intensity === 'high') {
+        for (let i = 0; i < 3; i++) {
+          const nextId = Math.floor(Math.random() * 100) + 1;
+          await connection.execute(
+            `UPDATE ${p}rac_hotindex
+             SET bucket = :1,
+                 value = value + 1,
+                 updated_at = SYSTIMESTAMP
+             WHERE id = :2`,
+            [1, nextId]  // All go to bucket 1 = same index leaf
+          );
+        }
+      }
+
+    } else {
+      // 10% - SELECT with FOR UPDATE (lock contention)
+      // Holds blocks longer, increases gc waits
+      const slotId = Math.floor(Math.random() * 10) + 1;
+
+      await connection.execute(
+        `SELECT counter, last_instance
+         FROM ${p}rac_hotblock
+         WHERE slot_id = :1
+         FOR UPDATE NOWAIT`,
+        [slotId]
+      );
+
+      // Small delay while holding lock
+      if (intensity === 'high') {
+        await this.sleep(10);
+      }
     }
   }
 

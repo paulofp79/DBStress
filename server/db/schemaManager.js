@@ -166,7 +166,29 @@ const getTableDDL = (prefix, compressionType = 'none') => {
         is_verified_purchase NUMBER(1) DEFAULT 0,
         helpful_votes NUMBER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )${compressClause} NOLOGGING`
+      )${compressClause} NOLOGGING`,
+
+    // RAC Contention table - designed for maximum block contention
+    // Small PCTFREE, no sequence PK, single block target
+    [`${p}rac_hotblock`]: `
+      CREATE TABLE ${p}rac_hotblock (
+        slot_id NUMBER NOT NULL,
+        counter NUMBER DEFAULT 0,
+        last_instance NUMBER,
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        padding VARCHAR2(500) DEFAULT RPAD('X', 500, 'X'),
+        CONSTRAINT ${p}pk_rac_hotblock PRIMARY KEY (slot_id)
+      ) PCTFREE 5 INITRANS 1 MAXTRANS 255 LOGGING`,
+
+    // RAC contention with index hot spots
+    [`${p}rac_hotindex`]: `
+      CREATE TABLE ${p}rac_hotindex (
+        id NUMBER NOT NULL,
+        bucket NUMBER NOT NULL,
+        value NUMBER DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}pk_rac_hotindex PRIMARY KEY (id)
+      ) PCTFREE 5 LOGGING`
   };
 };
 
@@ -187,7 +209,9 @@ const getIndexes = (prefix) => {
     `CREATE INDEX ${p}idx_payments_order ON ${p}payments(order_id)`,
     `CREATE INDEX ${p}idx_order_history_order ON ${p}order_history(order_id)`,
     `CREATE INDEX ${p}idx_reviews_product ON ${p}product_reviews(product_id)`,
-    `CREATE INDEX ${p}idx_reviews_customer ON ${p}product_reviews(customer_id)`
+    `CREATE INDEX ${p}idx_reviews_customer ON ${p}product_reviews(customer_id)`,
+    // RAC contention indexes - non-unique index on bucket creates hot index blocks
+    `CREATE INDEX ${p}idx_rac_hotindex_bucket ON ${p}rac_hotindex(bucket)`
   ];
 };
 
@@ -250,7 +274,8 @@ class SchemaManager {
     return [
       `${p}regions`, `${p}countries`, `${p}warehouses`, `${p}categories`,
       `${p}products`, `${p}inventory`, `${p}customers`, `${p}orders`,
-      `${p}order_items`, `${p}payments`, `${p}order_history`, `${p}product_reviews`
+      `${p}order_items`, `${p}payments`, `${p}order_history`, `${p}product_reviews`,
+      `${p}rac_hotblock`, `${p}rac_hotindex`
     ];
   }
 
@@ -607,6 +632,34 @@ class SchemaManager {
           100,
           parallelism
         );
+      }
+
+      // RAC Contention tables - populate with hot block rows
+      progressCallback({ step: 'Creating RAC contention tables...', progress: 98 });
+
+      // rac_hotblock: 10 slots that will be heavily contended
+      // Few rows = all fit in 1-2 blocks = maximum block contention
+      for (let i = 1; i <= 10; i++) {
+        try {
+          await db.execute(
+            `INSERT INTO ${p}rac_hotblock (slot_id, counter, last_instance) VALUES (:1, 0, 0)`,
+            [i]
+          );
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
+      }
+
+      // rac_hotindex: 100 rows with only 5 bucket values (hot index leaf blocks)
+      for (let i = 1; i <= 100; i++) {
+        try {
+          await db.execute(
+            `INSERT INTO ${p}rac_hotindex (id, bucket, value) VALUES (:1, :2, 0)`,
+            [i, (i % 5) + 1]  // bucket 1-5 only
+          );
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
       }
 
       // Set tables back to LOGGING
