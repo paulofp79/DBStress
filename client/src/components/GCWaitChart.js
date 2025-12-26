@@ -61,7 +61,7 @@ function GCWaitChart({ gcWaitEvents = [] }) {
           backgroundColor: 'rgba(239, 68, 68, 0.7)',
           borderColor: 'rgb(239, 68, 68)',
           borderWidth: 1,
-          yAxisID: 'y'
+          xAxisID: 'x'
         },
         {
           label: 'Time Waited (ms)',
@@ -69,7 +69,7 @@ function GCWaitChart({ gcWaitEvents = [] }) {
           backgroundColor: 'rgba(59, 130, 246, 0.7)',
           borderColor: 'rgb(59, 130, 246)',
           borderWidth: 1,
-          yAxisID: 'y1'
+          xAxisID: 'x1'
         }
       ]
     };
@@ -105,21 +105,34 @@ function GCWaitChart({ gcWaitEvents = [] }) {
     },
     scales: {
       x: {
+        type: 'linear',
+        position: 'bottom',
+        ticks: { color: '#9ca3af', font: { size: 9 } },
+        grid: { color: 'rgba(255,255,255,0.1)' },
+        title: {
+          display: true,
+          text: 'Total Waits',
+          color: '#ef4444',
+          font: { size: 10 }
+        }
+      },
+      x1: {
+        type: 'linear',
         position: 'top',
         ticks: { color: '#9ca3af', font: { size: 9 } },
-        grid: { color: 'rgba(255,255,255,0.1)' }
+        grid: { display: false },
+        title: {
+          display: true,
+          text: 'Time Waited (ms)',
+          color: '#3b82f6',
+          font: { size: 10 }
+        }
       },
       y: {
-        type: 'linear',
+        type: 'category',
         position: 'left',
         ticks: { color: '#9ca3af', font: { size: 9 } },
         grid: { color: 'rgba(255,255,255,0.1)' }
-      },
-      y1: {
-        type: 'linear',
-        position: 'right',
-        ticks: { color: '#9ca3af', font: { size: 9 } },
-        grid: { display: false }
       }
     }
   };
