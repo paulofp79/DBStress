@@ -88,13 +88,13 @@ app.get('/api/db/status', (req, res) => {
 
 // Create schema (with multi-schema support)
 app.post('/api/schema/create', async (req, res) => {
-  const { scaleFactor = 1, prefix = '', compress = false, parallelism = 10 } = req.body;
+  const { scaleFactor = 1, prefix = '', compress = false, compressionType = null, parallelism = 10 } = req.body;
   const schemaId = prefix || 'default';
 
   try {
     io.emit('schema-progress', { schemaId, step: `Starting schema creation${prefix ? ` '${prefix}'` : ''}...`, progress: 0 });
 
-    await schemaManager.createSchema(oracleDb, { prefix, compress }, (progress) => {
+    await schemaManager.createSchema(oracleDb, { prefix, compress, compressionType }, (progress) => {
       io.emit('schema-progress', { schemaId, ...progress });
     });
 
