@@ -20,6 +20,20 @@ ChartJS.register(
 );
 
 function GCWaitChart({ gcWaitEvents = [] }) {
+  // Check if we're in delta mode
+  const isDeltaMode = gcWaitEvents.length > 0 && gcWaitEvents[0]?.isDelta;
+  const baselineAge = gcWaitEvents[0]?.baselineAge || 0;
+
+  // Format elapsed time
+  const formatElapsed = (ms) => {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
+  };
+
   // Group events by instance and aggregate
   const chartData = useMemo(() => {
     if (!gcWaitEvents || gcWaitEvents.length === 0) {
@@ -186,9 +200,23 @@ function GCWaitChart({ gcWaitEvents = [] }) {
     <div className="panel">
       <div className="panel-header">
         <h2>GC Wait Events (RAC)</h2>
-        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-          {gcWaitEvents.length} events
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          {isDeltaMode && (
+            <span style={{
+              fontSize: '0.7rem',
+              color: 'var(--accent-success)',
+              background: 'rgba(34, 197, 94, 0.15)',
+              padding: '0.2rem 0.5rem',
+              borderRadius: '4px',
+              border: '1px solid var(--accent-success)'
+            }}>
+              Since start: {formatElapsed(baselineAge)}
+            </span>
+          )}
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            {gcWaitEvents.length} events
+          </span>
+        </div>
       </div>
       <div className="panel-content">
         {/* Instance Summary */}

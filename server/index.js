@@ -174,6 +174,9 @@ app.post('/api/stress/start', async (req, res) => {
     // Start metrics collection
     metricsCollector.start(oracleDb, io);
 
+    // Reset GC baseline for fresh delta stats
+    await metricsCollector.resetGCBaseline();
+
     res.json({ success: true, message: 'Stress test started', schemas: schemasToTest.map(s => s.prefix || 'default') });
   } catch (error) {
     // Reset states on error
@@ -231,6 +234,16 @@ app.get('/api/stress/status', (req, res) => {
       ? stressTestStates[status.activeSchemas[0]].uptime
       : 0
   });
+});
+
+// Reset GC wait events baseline (for fresh delta stats)
+app.post('/api/metrics/reset-gc-baseline', async (req, res) => {
+  try {
+    await metricsCollector.resetGCBaseline();
+    res.json({ success: true, message: 'GC baseline reset' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 // Update stress test config on the fly

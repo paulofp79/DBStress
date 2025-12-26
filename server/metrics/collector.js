@@ -7,6 +7,8 @@ class MetricsCollector {
     this.io = null;
     this.collectInterval = null;
     this.collectionFrequency = 2000; // 2 seconds
+    this.gcBaseline = null;  // Baseline for GC wait events delta calculation
+    this.gcBaselineTime = null;
   }
 
   start(db, io) {
@@ -25,6 +27,35 @@ class MetricsCollector {
 
     // Collect immediately
     this.collectMetrics();
+  }
+
+  // Reset GC baseline - captures current values as the starting point
+  async resetGCBaseline() {
+    if (!this.db) return;
+
+    try {
+      const rawEvents = await this.getRawGCWaitEvents();
+      this.gcBaseline = new Map();
+      rawEvents.forEach(e => {
+        const key = `${e.instId}:${e.event}`;
+        this.gcBaseline.set(key, {
+          totalWaits: e.totalWaits,
+          totalTimeouts: e.totalTimeouts,
+          timeWaitedMs: e.timeWaitedMs
+        });
+      });
+      this.gcBaselineTime = Date.now();
+      console.log(`GC baseline captured: ${this.gcBaseline.size} events`);
+    } catch (err) {
+      console.log('Error capturing GC baseline:', err.message);
+    }
+  }
+
+  // Clear the baseline (show cumulative stats again)
+  clearGCBaseline() {
+    this.gcBaseline = null;
+    this.gcBaselineTime = null;
+    console.log('GC baseline cleared');
   }
 
   async collectMetrics() {
@@ -205,8 +236,8 @@ class MetricsCollector {
     }
   }
 
-  // GC (Global Cache) Wait Events for RAC monitoring
-  async getGCWaitEvents() {
+  // Raw GC wait events query (no delta calculation)
+  async getRawGCWaitEvents() {
     try {
       // Query GC-related wait events from gv$system_event (RAC) or v$system_event
       const result = await this.db.execute(`
@@ -223,7 +254,7 @@ class MetricsCollector {
         WHERE event LIKE 'gc %'
           AND total_waits > 0
         ORDER BY time_waited_micro DESC
-        FETCH FIRST 20 ROWS ONLY
+        FETCH FIRST 30 ROWS ONLY
       `);
 
       return result.rows.map(row => ({
@@ -251,7 +282,7 @@ class MetricsCollector {
           WHERE event LIKE 'gc %'
             AND total_waits > 0
           ORDER BY time_waited_micro DESC
-          FETCH FIRST 20 ROWS ONLY
+          FETCH FIRST 30 ROWS ONLY
         `);
 
         return result.rows.map(row => ({
@@ -267,6 +298,40 @@ class MetricsCollector {
         return [];
       }
     }
+  }
+
+  // GC (Global Cache) Wait Events for RAC monitoring - with delta calculation
+  async getGCWaitEvents() {
+    const rawEvents = await this.getRawGCWaitEvents();
+
+    // If no baseline, return raw cumulative values
+    if (!this.gcBaseline) {
+      return rawEvents.map(e => ({ ...e, isDelta: false }));
+    }
+
+    // Calculate deltas from baseline
+    const deltaEvents = rawEvents.map(e => {
+      const key = `${e.instId}:${e.event}`;
+      const baseline = this.gcBaseline.get(key) || { totalWaits: 0, totalTimeouts: 0, timeWaitedMs: 0 };
+
+      const deltaWaits = Math.max(0, e.totalWaits - baseline.totalWaits);
+      const deltaTimeouts = Math.max(0, e.totalTimeouts - baseline.totalTimeouts);
+      const deltaTimeMs = Math.max(0, e.timeWaitedMs - baseline.timeWaitedMs);
+      const avgWaitMs = deltaWaits > 0 ? deltaTimeMs / deltaWaits : 0;
+
+      return {
+        instId: e.instId,
+        event: e.event,
+        totalWaits: deltaWaits,
+        totalTimeouts: deltaTimeouts,
+        timeWaitedMs: parseFloat(deltaTimeMs.toFixed(2)),
+        avgWaitMs: parseFloat(avgWaitMs.toFixed(3)),
+        isDelta: true,
+        baselineAge: Date.now() - this.gcBaselineTime
+      };
+    }).filter(e => e.totalWaits > 0);  // Only show events with activity since baseline
+
+    return deltaEvents;
   }
 
   stop() {
