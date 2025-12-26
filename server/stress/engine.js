@@ -6,6 +6,7 @@ class StressEngine {
     this.isRunning = false;
     this.config = null;
     this.workers = [];
+    this.activeWorkers = 0;  // Track active worker count
     this.pool = null;
     this.io = null;
     this.schemas = [];  // Array of schema prefixes being tested
@@ -89,7 +90,10 @@ class StressEngine {
     const p = prefix ? `${prefix}_` : '';
     const stats = this.schemaStats[schemaId];
 
-    while (this.isRunning && this.schemaStats[schemaId]) {
+    this.activeWorkers++;
+
+    try {
+      while (this.isRunning && this.schemaStats[schemaId] && this.pool) {
       let connection;
       try {
         connection = await this.pool.getConnection();
@@ -152,6 +156,20 @@ class StressEngine {
       // Think time between operations
       if (this.isRunning && this.config.thinkTime > 0) {
         await this.sleep(this.config.thinkTime);
+      }
+      }
+    } finally {
+      // Worker exiting - decrement active count
+      this.activeWorkers--;
+
+      // If all workers have exited and we think we're still running, auto-stop
+      if (this.activeWorkers <= 0 && this.isRunning) {
+        console.log('All workers exited, auto-stopping stress test');
+        this.isRunning = false;
+        if (this.statsInterval) {
+          clearInterval(this.statsInterval);
+          this.statsInterval = null;
+        }
       }
     }
   }
@@ -674,6 +692,7 @@ class StressEngine {
 
     // Clear workers
     this.workers = [];
+    this.activeWorkers = 0;
 
     // Report final stats per schema
     const finalStats = {};
