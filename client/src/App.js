@@ -232,7 +232,15 @@ function App() {
   const handleCreateSchema = async (options) => {
     try {
       setError(null);
-      await axios.post(`${API_BASE}/schema/create`, options);
+      // Calculate timeout based on schema size: base 2 min + 30s per RAC table pair + 1 min per scale factor
+      const racTableCount = options.racTableCount || 1;
+      const scaleFactor = options.scaleFactor || 1;
+      const timeoutMs = (120 + (racTableCount * 30) + (scaleFactor * 60)) * 1000; // in ms
+      const maxTimeout = 600000; // 10 minutes max
+
+      await axios.post(`${API_BASE}/schema/create`, options, {
+        timeout: Math.min(timeoutMs, maxTimeout)
+      });
       showSuccess(`Schema${options.prefix ? ` '${options.prefix}'` : ''} created successfully`);
       fetchSchemas();
     } catch (err) {
@@ -242,7 +250,10 @@ function App() {
 
   const handleDropSchema = async (prefix) => {
     try {
-      await axios.post(`${API_BASE}/schema/drop`, { prefix });
+      // Longer timeout for drop (could have many RAC tables)
+      await axios.post(`${API_BASE}/schema/drop`, { prefix }, {
+        timeout: 300000  // 5 minutes
+      });
       showSuccess(`Schema${prefix ? ` '${prefix}'` : ''} dropped successfully`);
       fetchSchemas();
     } catch (err) {
