@@ -172,6 +172,11 @@ const getTableDDL = (prefix, compressionType = 'none') => {
 };
 
 // Generate RAC hot table DDL dynamically (supports multiple tables)
+// Optimized for GC contention (not TX contention):
+// - INITRANS 100: Eliminates "enq: TX - allocate ITL entry" waits
+// - Small rows (no padding): Packs many rows per block for high concurrency
+// - PCTFREE 1: Maximizes rows per block
+// - Many rows per block = same block accessed by different instances = gc current block congested
 const getRacTableDDL = (prefix, compressionType = 'none', tableNum = 1) => {
   const p = prefix ? `${prefix}_` : '';
   const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
@@ -184,9 +189,8 @@ const getRacTableDDL = (prefix, compressionType = 'none', tableNum = 1) => {
         counter NUMBER DEFAULT 0,
         last_instance NUMBER,
         last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        padding VARCHAR2(500) DEFAULT RPAD('X', 500, 'X'),
         CONSTRAINT ${p}pk_rac_hotblock${suffix} PRIMARY KEY (slot_id)
-      )${compressClause} PCTFREE 5 INITRANS 1 MAXTRANS 255 LOGGING`,
+      )${compressClause} PCTFREE 1 INITRANS 100 MAXTRANS 255 LOGGING`,
     [`${p}rac_hotindex${suffix}`]: `
       CREATE TABLE ${p}rac_hotindex${suffix} (
         id NUMBER NOT NULL,
@@ -194,7 +198,7 @@ const getRacTableDDL = (prefix, compressionType = 'none', tableNum = 1) => {
         value NUMBER DEFAULT 0,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT ${p}pk_rac_hotindex${suffix} PRIMARY KEY (id)
-      )${compressClause} PCTFREE 5 LOGGING`
+      )${compressClause} PCTFREE 1 INITRANS 100 MAXTRANS 255 LOGGING`
   };
 };
 

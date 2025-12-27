@@ -533,11 +533,13 @@ class StressEngine {
     }
 
     // Define hot zone sizes based on intensity
-    // Low: larger zones = less contention, Medium: moderate, High: smaller zones = more contention
+    // With small rows (~60 bytes), ~130 rows fit per 8K block
+    // Target enough rows to avoid row lock contention but few blocks for GC contention
+    // Low: 500 rows = ~4 blocks, Medium: 300 rows = ~2-3 blocks, High: 200 rows = ~1.5 blocks
     const hotZoneConfig = {
-      low: { blockZone: 200, indexZone: 1000, updateCount: 1 },
-      medium: { blockZone: 100, indexZone: 500, updateCount: 3 },
-      high: { blockZone: 50, indexZone: 200, updateCount: 5 }
+      low: { blockZone: 500, indexZone: 2000, updateCount: 2 },
+      medium: { blockZone: 300, indexZone: 1000, updateCount: 4 },
+      high: { blockZone: 200, indexZone: 500, updateCount: 6 }
     };
     const config = hotZoneConfig[intensity] || hotZoneConfig.high;
 
@@ -550,8 +552,8 @@ class StressEngine {
 
     if (opType < 0.7) {
       // 70% - Update rac_hotblock (table block contention)
-      // Target rows within a "hot zone" to create block contention without constant row locks
-      // With 1000 rows and hot zone of 50-200, multiple workers hit same blocks but different rows
+      // With small rows (~60 bytes) and ~130 rows/block, hot zone of 200-500 rows spans 2-4 blocks
+      // Many workers update same blocks but different rows = gc current block congested, not row locks
       const hotZoneStart = 1;  // All workers target the first N rows (same blocks)
       const slotId = hotZoneStart + Math.floor(Math.random() * config.blockZone);
 
@@ -610,31 +612,30 @@ class StressEngine {
       }
 
     } else {
-      // 10% - SELECT with FOR UPDATE (lock contention)
-      // Holds blocks longer, increases gc waits
-      const slotId = Math.floor(Math.random() * config.blockZone) + 1;
+      // 10% - Concurrent reads across hot blocks (gc cr block congested)
+      // Read multiple rows from the same hot blocks being updated by other sessions
+      // This causes gc cr (consistent read) block transfers
+      const readTableNum = Math.floor(Math.random() * racTableCount) + 1;
+      const readSuffix = readTableNum > 1 ? `_${readTableNum}` : '';
 
-      try {
-        await connection.execute(
-          `SELECT counter, last_instance
-           FROM ${p}rac_hotblock${tableSuffix}
-           WHERE slot_id = :1
-           FOR UPDATE NOWAIT`,
-          [slotId]
-        );
+      // Read a range of rows from the hot zone - forces block reads
+      const startSlot = Math.floor(Math.random() * (config.blockZone - 20)) + 1;
+      await connection.execute(
+        `SELECT SUM(counter), MAX(last_instance), COUNT(*)
+         FROM ${p}rac_hotblock${readSuffix}
+         WHERE slot_id BETWEEN :1 AND :2`,
+        [startSlot, startSlot + 20]
+      );
 
-        // Small delay while holding lock based on intensity
-        if (intensity === 'high') {
-          await this.sleep(10);
-        } else if (intensity === 'medium') {
-          await this.sleep(5);
-        }
-      } catch (err) {
-        // ORA-00054 expected with NOWAIT - just means another session has the row
-        if (!err.message.includes('ORA-00054')) {
-          throw err;
-        }
-      }
+      // Also read from rac_hotindex to cause index block transfers
+      const startId = Math.floor(Math.random() * (config.indexZone - 50)) + 1;
+      await connection.execute(
+        `SELECT bucket, SUM(value)
+         FROM ${p}rac_hotindex${readSuffix}
+         WHERE id BETWEEN :1 AND :2
+         GROUP BY bucket`,
+        [startId, startId + 50]
+      );
     }
   }
 
