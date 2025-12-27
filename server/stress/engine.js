@@ -91,84 +91,124 @@ class StressEngine {
     const stats = this.schemaStats[schemaId];
 
     this.activeWorkers++;
+    let consecutiveErrors = 0;
+    const maxConsecutiveErrors = 10;
 
     try {
-      while (this.isRunning && this.schemaStats[schemaId] && this.pool) {
-      let connection;
-      try {
-        connection = await this.pool.getConnection();
+      while (this.isRunning && this.schemaStats[schemaId]) {
+        // Check if pool is available
+        if (!this.pool) {
+          await this.sleep(1000); // Wait and retry
+          continue;
+        }
 
-        // RAC Mode: Focus on hot block contention
-        if (this.config.racMode) {
-          await this.performRacContention(connection, p, workerId);
-          stats.updates++;
-        } else {
-          // Normal mode: Decide which operation to perform based on configured ratios
-          const operation = this.selectOperation();
+        let connection;
+        try {
+          connection = await this.pool.getConnection();
+          consecutiveErrors = 0; // Reset on successful connection
 
-          switch (operation) {
-            case 'INSERT':
-              await this.performInsert(connection, p);
-              stats.inserts++;
-              break;
-            case 'UPDATE':
-              await this.performUpdate(connection, p);
-              stats.updates++;
-              break;
-            case 'DELETE':
-              await this.performDelete(connection, p);
-              stats.deletes++;
-              break;
-            case 'SELECT':
-              await this.performSelect(connection, p);
-              stats.selects++;
-              break;
+          // RAC Mode: Focus on hot block contention
+          if (this.config.racMode) {
+            await this.performRacContention(connection, p, workerId);
+            stats.updates++;
+          } else {
+            // Normal mode: Decide which operation to perform based on configured ratios
+            const operation = this.selectOperation();
+
+            switch (operation) {
+              case 'INSERT':
+                await this.performInsert(connection, p);
+                stats.inserts++;
+                break;
+              case 'UPDATE':
+                await this.performUpdate(connection, p);
+                stats.updates++;
+                break;
+              case 'DELETE':
+                await this.performDelete(connection, p);
+                stats.deletes++;
+                break;
+              case 'SELECT':
+                await this.performSelect(connection, p);
+                stats.selects++;
+                break;
+            }
+          }
+
+          stats.transactions++;
+
+          await connection.commit();
+        } catch (err) {
+          stats.errors++;
+          consecutiveErrors++;
+
+          if (connection) {
+            try {
+              await connection.rollback();
+            } catch (e) {
+              // Ignore rollback errors
+            }
+          }
+
+          // Log errors but continue running
+          if (!err.message.includes('pool is terminating') &&
+              !err.message.includes('NJS-003') &&
+              !err.message.includes('NJS-500')) {
+            console.log(`Worker ${workerId} [${schemaId}] error:`, err.message);
+          }
+
+          // If too many consecutive errors, pause before retrying
+          if (consecutiveErrors >= maxConsecutiveErrors) {
+            console.log(`Worker ${workerId} [${schemaId}] too many errors, pausing...`);
+            await this.sleep(5000);
+            consecutiveErrors = 0;
+          }
+        } finally {
+          if (connection) {
+            try {
+              await connection.close();
+            } catch (e) {
+              // Ignore close errors
+            }
           }
         }
 
-        stats.transactions++;
-
-        await connection.commit();
-      } catch (err) {
-        stats.errors++;
-        if (connection) {
-          try {
-            await connection.rollback();
-          } catch (e) {
-            // Ignore rollback errors
-          }
+        // Think time between operations
+        if (this.isRunning && this.config.thinkTime > 0) {
+          await this.sleep(this.config.thinkTime);
         }
-        // Log errors but continue running
-        if (!err.message.includes('pool is terminating') &&
-            !err.message.includes('NJS-003')) {
-          console.log(`Worker ${workerId} [${schemaId}] error:`, err.message);
-        }
-      } finally {
-        if (connection) {
-          try {
-            await connection.close();
-          } catch (e) {
-            // Ignore close errors
-          }
-        }
-      }
-
-      // Think time between operations
-      if (this.isRunning && this.config.thinkTime > 0) {
-        await this.sleep(this.config.thinkTime);
-      }
       }
     } finally {
       // Worker exiting - decrement active count
       this.activeWorkers--;
+      console.log(`Worker ${workerId} [${schemaId}] exited. Active workers: ${this.activeWorkers}`);
 
-      // If all workers have exited and we think we're still running, auto-stop
+      // Only auto-stop if isRunning is still true (unexpected exit)
+      // and all workers have exited
       if (this.activeWorkers <= 0 && this.isRunning) {
-        console.log('All workers exited, auto-stopping stress test');
-        this.isRunning = false;
-        if (this.statsInterval) {
-          clearInterval(this.statsInterval);
-          this.statsInterval = null;
+        // Check if this was intentional (pool closed) vs unexpected
+        if (!this.pool) {
+          console.log('Pool closed, stopping stress test');
+          this.isRunning = false;
+          if (this.statsInterval) {
+            clearInterval(this.statsInterval);
+            this.statsInterval = null;
+          }
+        } else {
+          console.log('All workers exited unexpectedly, attempting restart...');
+          // Try to restart workers after a short delay
+          setTimeout(() => {
+            if (this.isRunning && this.pool) {
+              console.log('Restarting workers...');
+              for (const schema of this.schemas) {
+                const sid = schema.prefix || 'default';
+                const pre = schema.prefix || '';
+                for (let i = 0; i < this.config.sessions; i++) {
+                  this.workers.push(this.runWorker(i, pre, sid));
+                }
+              }
+            }
+          }, 2000);
         }
       }
     }
