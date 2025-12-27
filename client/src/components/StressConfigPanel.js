@@ -58,12 +58,26 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
     }
   }, [stressStatus.config]);
 
-  // Auto-select all schemas when schemas list changes
+  // Auto-select all schemas when schemas list changes, and clean up stale selections
   useEffect(() => {
-    if (schemas && schemas.length > 0 && selectedSchemas.length === 0) {
-      setSelectedSchemas(schemas.map(s => s.prefix || ''));
+    if (schemas && schemas.length > 0) {
+      const validPrefixes = schemas.map(s => s.prefix || '');
+
+      if (selectedSchemas.length === 0) {
+        // No selection yet - select all
+        setSelectedSchemas(validPrefixes);
+      } else {
+        // Clean up any stale selections that no longer exist
+        const cleanedSelections = selectedSchemas.filter(prefix => validPrefixes.includes(prefix));
+        if (cleanedSelections.length !== selectedSchemas.length) {
+          setSelectedSchemas(cleanedSelections.length > 0 ? cleanedSelections : validPrefixes);
+        }
+      }
+    } else if (schemas && schemas.length === 0) {
+      // No schemas exist - clear selections
+      setSelectedSchemas([]);
     }
-  }, [schemas, selectedSchemas.length]);
+  }, [schemas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleChange = (field, value) => {
     // Handle different value types
