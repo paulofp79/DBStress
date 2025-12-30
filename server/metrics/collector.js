@@ -7,6 +7,8 @@ class MetricsCollector {
     this.io = null;
     this.collectInterval = null;
     this.collectionFrequency = 2000; // 2 seconds
+    this.gcBaseline = null;  // Baseline for GC wait events delta calculation
+    this.gcBaselineTime = null;
   }
 
   start(db, io) {
@@ -27,15 +29,45 @@ class MetricsCollector {
     this.collectMetrics();
   }
 
+  // Reset GC baseline - captures current values as the starting point
+  async resetGCBaseline() {
+    if (!this.db) return;
+
+    try {
+      const rawEvents = await this.getRawGCWaitEvents();
+      this.gcBaseline = new Map();
+      rawEvents.forEach(e => {
+        const key = `${e.instId}:${e.event}`;
+        this.gcBaseline.set(key, {
+          totalWaits: e.totalWaits,
+          totalTimeouts: e.totalTimeouts,
+          timeWaitedMs: e.timeWaitedMs
+        });
+      });
+      this.gcBaselineTime = Date.now();
+      console.log(`GC baseline captured: ${this.gcBaseline.size} events`);
+    } catch (err) {
+      console.log('Error capturing GC baseline:', err.message);
+    }
+  }
+
+  // Clear the baseline (show cumulative stats again)
+  clearGCBaseline() {
+    this.gcBaseline = null;
+    this.gcBaselineTime = null;
+    console.log('GC baseline cleared');
+  }
+
   async collectMetrics() {
     if (!this.isRunning || !this.db) return;
 
     try {
-      const [waitEvents, systemStats, sessionStats, sqlStats] = await Promise.all([
+      const [waitEvents, systemStats, sessionStats, sqlStats, gcWaitEvents] = await Promise.all([
         this.getTopWaitEvents(),
         this.getSystemStats(),
         this.getSessionStats(),
-        this.getTopSQL()
+        this.getTopSQL(),
+        this.getGCWaitEvents()
       ]);
 
       const metrics = {
@@ -43,7 +75,8 @@ class MetricsCollector {
         waitEvents,
         systemStats,
         sessionStats,
-        sqlStats
+        sqlStats,
+        gcWaitEvents
       };
 
       if (this.io) {
@@ -201,6 +234,104 @@ class MetricsCollector {
       console.log('Top SQL query error:', err.message);
       return [];
     }
+  }
+
+  // Raw GC wait events query (no delta calculation)
+  async getRawGCWaitEvents() {
+    try {
+      // Query GC-related wait events from gv$system_event (RAC) or v$system_event
+      const result = await this.db.execute(`
+        SELECT
+          inst_id,
+          event,
+          total_waits,
+          total_timeouts,
+          time_waited_micro / 1000 as time_waited_ms,
+          CASE WHEN total_waits > 0
+               THEN time_waited_micro / total_waits / 1000
+               ELSE 0 END as avg_wait_ms
+        FROM gv$system_event
+        WHERE event LIKE 'gc %'
+          AND total_waits > 0
+        ORDER BY time_waited_micro DESC
+        FETCH FIRST 30 ROWS ONLY
+      `);
+
+      return result.rows.map(row => ({
+        instId: row.INST_ID || 1,
+        event: row.EVENT,
+        totalWaits: row.TOTAL_WAITS || 0,
+        totalTimeouts: row.TOTAL_TIMEOUTS || 0,
+        timeWaitedMs: parseFloat(row.TIME_WAITED_MS?.toFixed(2) || 0),
+        avgWaitMs: parseFloat(row.AVG_WAIT_MS?.toFixed(3) || 0)
+      }));
+    } catch (err) {
+      // Try single-instance view if gv$ not available
+      try {
+        const result = await this.db.execute(`
+          SELECT
+            1 as inst_id,
+            event,
+            total_waits,
+            total_timeouts,
+            time_waited_micro / 1000 as time_waited_ms,
+            CASE WHEN total_waits > 0
+                 THEN time_waited_micro / total_waits / 1000
+                 ELSE 0 END as avg_wait_ms
+          FROM v$system_event
+          WHERE event LIKE 'gc %'
+            AND total_waits > 0
+          ORDER BY time_waited_micro DESC
+          FETCH FIRST 30 ROWS ONLY
+        `);
+
+        return result.rows.map(row => ({
+          instId: 1,
+          event: row.EVENT,
+          totalWaits: row.TOTAL_WAITS || 0,
+          totalTimeouts: row.TOTAL_TIMEOUTS || 0,
+          timeWaitedMs: parseFloat(row.TIME_WAITED_MS?.toFixed(2) || 0),
+          avgWaitMs: parseFloat(row.AVG_WAIT_MS?.toFixed(3) || 0)
+        }));
+      } catch (e) {
+        console.log('GC wait events query error:', e.message);
+        return [];
+      }
+    }
+  }
+
+  // GC (Global Cache) Wait Events for RAC monitoring - with delta calculation
+  async getGCWaitEvents() {
+    const rawEvents = await this.getRawGCWaitEvents();
+
+    // If no baseline, return raw cumulative values
+    if (!this.gcBaseline) {
+      return rawEvents.map(e => ({ ...e, isDelta: false }));
+    }
+
+    // Calculate deltas from baseline
+    const deltaEvents = rawEvents.map(e => {
+      const key = `${e.instId}:${e.event}`;
+      const baseline = this.gcBaseline.get(key) || { totalWaits: 0, totalTimeouts: 0, timeWaitedMs: 0 };
+
+      const deltaWaits = Math.max(0, e.totalWaits - baseline.totalWaits);
+      const deltaTimeouts = Math.max(0, e.totalTimeouts - baseline.totalTimeouts);
+      const deltaTimeMs = Math.max(0, e.timeWaitedMs - baseline.timeWaitedMs);
+      const avgWaitMs = deltaWaits > 0 ? deltaTimeMs / deltaWaits : 0;
+
+      return {
+        instId: e.instId,
+        event: e.event,
+        totalWaits: deltaWaits,
+        totalTimeouts: deltaTimeouts,
+        timeWaitedMs: parseFloat(deltaTimeMs.toFixed(2)),
+        avgWaitMs: parseFloat(avgWaitMs.toFixed(3)),
+        isDelta: true,
+        baselineAge: Date.now() - this.gcBaselineTime
+      };
+    }).filter(e => e.totalWaits > 0);  // Only show events with activity since baseline
+
+    return deltaEvents;
   }
 
   stop() {

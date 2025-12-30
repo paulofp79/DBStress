@@ -6,6 +6,7 @@ class StressEngine {
     this.isRunning = false;
     this.config = null;
     this.workers = [];
+    this.activeWorkers = 0;  // Track active worker count
     this.pool = null;
     this.io = null;
     this.schemas = [];  // Array of schema prefixes being tested
@@ -44,6 +45,9 @@ class StressEngine {
       deletesPerSecond: config.deletesPerSecond || 10,
       selectsPerSecond: config.selectsPerSecond || 100,
       thinkTime: config.thinkTime || 100, // ms between operations
+      // RAC Contention Mode settings
+      racMode: config.racMode || false,
+      racIntensity: config.racIntensity || 'high', // low, medium, high
       ...config
     };
 
@@ -86,63 +90,126 @@ class StressEngine {
     const p = prefix ? `${prefix}_` : '';
     const stats = this.schemaStats[schemaId];
 
-    while (this.isRunning && this.schemaStats[schemaId]) {
-      let connection;
-      try {
-        connection = await this.pool.getConnection();
+    this.activeWorkers++;
+    let consecutiveErrors = 0;
+    const maxConsecutiveErrors = 10;
 
-        // Decide which operation to perform based on configured ratios
-        const operation = this.selectOperation();
+    try {
+      while (this.isRunning && this.schemaStats[schemaId]) {
+        // Check if pool is available
+        if (!this.pool) {
+          await this.sleep(1000); // Wait and retry
+          continue;
+        }
 
-        switch (operation) {
-          case 'INSERT':
-            await this.performInsert(connection, p);
-            stats.inserts++;
-            break;
-          case 'UPDATE':
-            await this.performUpdate(connection, p);
+        let connection;
+        try {
+          connection = await this.pool.getConnection();
+          consecutiveErrors = 0; // Reset on successful connection
+
+          // RAC Mode: Focus on hot block contention
+          if (this.config.racMode) {
+            await this.performRacContention(connection, p, workerId);
             stats.updates++;
-            break;
-          case 'DELETE':
-            await this.performDelete(connection, p);
-            stats.deletes++;
-            break;
-          case 'SELECT':
-            await this.performSelect(connection, p);
-            stats.selects++;
-            break;
-        }
+          } else {
+            // Normal mode: Decide which operation to perform based on configured ratios
+            const operation = this.selectOperation();
 
-        stats.transactions++;
+            switch (operation) {
+              case 'INSERT':
+                await this.performInsert(connection, p);
+                stats.inserts++;
+                break;
+              case 'UPDATE':
+                await this.performUpdate(connection, p);
+                stats.updates++;
+                break;
+              case 'DELETE':
+                await this.performDelete(connection, p);
+                stats.deletes++;
+                break;
+              case 'SELECT':
+                await this.performSelect(connection, p);
+                stats.selects++;
+                break;
+            }
+          }
 
-        await connection.commit();
-      } catch (err) {
-        stats.errors++;
-        if (connection) {
-          try {
-            await connection.rollback();
-          } catch (e) {
-            // Ignore rollback errors
+          stats.transactions++;
+
+          await connection.commit();
+        } catch (err) {
+          stats.errors++;
+          consecutiveErrors++;
+
+          if (connection) {
+            try {
+              await connection.rollback();
+            } catch (e) {
+              // Ignore rollback errors
+            }
+          }
+
+          // Log errors but continue running
+          if (!err.message.includes('pool is terminating') &&
+              !err.message.includes('NJS-003') &&
+              !err.message.includes('NJS-500')) {
+            console.log(`Worker ${workerId} [${schemaId}] error:`, err.message);
+          }
+
+          // If too many consecutive errors, pause before retrying
+          if (consecutiveErrors >= maxConsecutiveErrors) {
+            console.log(`Worker ${workerId} [${schemaId}] too many errors, pausing...`);
+            await this.sleep(5000);
+            consecutiveErrors = 0;
+          }
+        } finally {
+          if (connection) {
+            try {
+              await connection.close();
+            } catch (e) {
+              // Ignore close errors
+            }
           }
         }
-        // Log errors but continue running
-        if (!err.message.includes('pool is terminating') &&
-            !err.message.includes('NJS-003')) {
-          console.log(`Worker ${workerId} [${schemaId}] error:`, err.message);
-        }
-      } finally {
-        if (connection) {
-          try {
-            await connection.close();
-          } catch (e) {
-            // Ignore close errors
-          }
+
+        // Think time between operations
+        if (this.isRunning && this.config.thinkTime > 0) {
+          await this.sleep(this.config.thinkTime);
         }
       }
+    } finally {
+      // Worker exiting - decrement active count
+      this.activeWorkers--;
+      console.log(`Worker ${workerId} [${schemaId}] exited. Active workers: ${this.activeWorkers}`);
 
-      // Think time between operations
-      if (this.isRunning && this.config.thinkTime > 0) {
-        await this.sleep(this.config.thinkTime);
+      // Only auto-stop if isRunning is still true (unexpected exit)
+      // and all workers have exited
+      if (this.activeWorkers <= 0 && this.isRunning) {
+        // Check if this was intentional (pool closed) vs unexpected
+        if (!this.pool) {
+          console.log('Pool closed, stopping stress test');
+          this.isRunning = false;
+          if (this.statsInterval) {
+            clearInterval(this.statsInterval);
+            this.statsInterval = null;
+          }
+        } else {
+          console.log('All workers exited unexpectedly, attempting restart...');
+          // Try to restart workers after a short delay
+          setTimeout(() => {
+            if (this.isRunning && this.pool) {
+              console.log('Restarting workers...');
+              for (const schema of this.schemas) {
+                const sid = schema.prefix || 'default';
+                const pre = schema.prefix || '';
+                for (let i = 0; i < this.config.sessions; i++) {
+                  this.workers.push(this.runWorker(i, pre, sid));
+                }
+              }
+            }
+          }, 2000);
+        }
       }
     }
   }
@@ -448,6 +515,130 @@ class StressEngine {
     }
   }
 
+  // RAC Contention Mode - generates gc current block congested waits
+  // by having multiple instances fight over the same blocks
+  async performRacContention(connection, p = '', workerId = 0) {
+    const intensity = this.config.racIntensity || 'high';
+    const racTableCount = this.config.racTableCount || 1;
+
+    // Get current instance number for tracking
+    let instanceNum = 1;
+    try {
+      const instResult = await connection.execute(
+        `SELECT instance_number FROM v$instance`
+      );
+      instanceNum = instResult.rows[0]?.INSTANCE_NUMBER || 1;
+    } catch (err) {
+      // Ignore - might not have access to v$instance
+    }
+
+    // Define hot zone sizes based on intensity
+    // With small rows (~60 bytes), ~130 rows fit per 8K block
+    // Target enough rows to avoid row lock contention but few blocks for GC contention
+    // Low: 500 rows = ~4 blocks, Medium: 300 rows = ~2-3 blocks, High: 200 rows = ~1.5 blocks
+    const hotZoneConfig = {
+      low: { blockZone: 500, indexZone: 2000, updateCount: 2 },
+      medium: { blockZone: 300, indexZone: 1000, updateCount: 4 },
+      high: { blockZone: 200, indexZone: 500, updateCount: 6 }
+    };
+    const config = hotZoneConfig[intensity] || hotZoneConfig.high;
+
+    // Randomly select which RAC table pair to target (spreads load across all tables)
+    const tableNum = Math.floor(Math.random() * racTableCount) + 1;
+    const tableSuffix = tableNum > 1 ? `_${tableNum}` : '';
+
+    // Choose operation type - heavily weighted towards updates on same blocks
+    const opType = Math.random();
+
+    if (opType < 0.7) {
+      // 70% - Update rac_hotblock (table block contention)
+      // With small rows (~60 bytes) and ~130 rows/block, hot zone of 200-500 rows spans 2-4 blocks
+      // Many workers update same blocks but different rows = gc current block congested, not row locks
+      const hotZoneStart = 1;  // All workers target the first N rows (same blocks)
+      const slotId = hotZoneStart + Math.floor(Math.random() * config.blockZone);
+
+      await connection.execute(
+        `UPDATE ${p}rac_hotblock${tableSuffix}
+         SET counter = counter + 1,
+             last_instance = :1,
+             last_update = SYSTIMESTAMP
+         WHERE slot_id = :2`,
+        [instanceNum, slotId]
+      );
+
+      // Additional updates based on intensity - can target different tables for more spread
+      for (let i = 0; i < config.updateCount - 1; i++) {
+        const nextTableNum = Math.floor(Math.random() * racTableCount) + 1;
+        const nextSuffix = nextTableNum > 1 ? `_${nextTableNum}` : '';
+        const nextSlot = hotZoneStart + Math.floor(Math.random() * config.blockZone);
+        await connection.execute(
+          `UPDATE ${p}rac_hotblock${nextSuffix}
+           SET counter = counter + 1,
+               last_instance = :1,
+               last_update = SYSTIMESTAMP
+           WHERE slot_id = :2`,
+          [instanceNum, nextSlot]
+        );
+      }
+
+    } else if (opType < 0.9) {
+      // 20% - Update rac_hotindex (index block contention)
+      // Target rows with bucket values 1-5 (hot index leaf blocks)
+      const id = Math.floor(Math.random() * config.indexZone) + 1;
+      const newBucket = (Math.floor(Math.random() * 5)) + 1;  // Still use buckets 1-5 for index contention
+
+      await connection.execute(
+        `UPDATE ${p}rac_hotindex${tableSuffix}
+         SET bucket = :1,
+             value = value + 1,
+             updated_at = SYSTIMESTAMP
+         WHERE id = :2`,
+        [newBucket, id]
+      );
+
+      // Additional updates targeting same bucket (hot index leaf) - can target different tables
+      for (let i = 0; i < Math.min(config.updateCount - 1, 3); i++) {
+        const nextTableNum = Math.floor(Math.random() * racTableCount) + 1;
+        const nextSuffix = nextTableNum > 1 ? `_${nextTableNum}` : '';
+        const nextId = Math.floor(Math.random() * config.indexZone) + 1;
+        await connection.execute(
+          `UPDATE ${p}rac_hotindex${nextSuffix}
+           SET bucket = 1,
+               value = value + 1,
+               updated_at = SYSTIMESTAMP
+           WHERE id = :2`,
+          [nextId]  // All go to bucket 1 = same index leaf
+        );
+      }
+
+    } else {
+      // 10% - Concurrent reads across hot blocks (gc cr block congested)
+      // Read multiple rows from the same hot blocks being updated by other sessions
+      // This causes gc cr (consistent read) block transfers
+      const readTableNum = Math.floor(Math.random() * racTableCount) + 1;
+      const readSuffix = readTableNum > 1 ? `_${readTableNum}` : '';
+
+      // Read a range of rows from the hot zone - forces block reads
+      const startSlot = Math.floor(Math.random() * (config.blockZone - 20)) + 1;
+      await connection.execute(
+        `SELECT SUM(counter), MAX(last_instance), COUNT(*)
+         FROM ${p}rac_hotblock${readSuffix}
+         WHERE slot_id BETWEEN :1 AND :2`,
+        [startSlot, startSlot + 20]
+      );
+
+      // Also read from rac_hotindex to cause index block transfers
+      const startId = Math.floor(Math.random() * (config.indexZone - 50)) + 1;
+      await connection.execute(
+        `SELECT bucket, SUM(value)
+         FROM ${p}rac_hotindex${readSuffix}
+         WHERE id BETWEEN :1 AND :2
+         GROUP BY bucket`,
+        [startId, startId + 50]
+      );
+    }
+  }
+
   reportStats() {
     const now = Date.now();
 
@@ -551,6 +742,7 @@ class StressEngine {
 
     // Clear workers
     this.workers = [];
+    this.activeWorkers = 0;
 
     // Report final stats per schema
     const finalStats = {};

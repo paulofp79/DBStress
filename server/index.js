@@ -25,11 +25,18 @@ app.use(express.json());
 // Serve static files from React build in production
 app.use(express.static(path.join(__dirname, '../client/build')));
 
-// Store active stress test state
-let stressTestState = {
-  isRunning: false,
-  config: null,
-  startTime: null
+// Store active stress test state - now supports multiple schemas
+let stressTestStates = {};  // keyed by schema prefix
+
+// Helper to get combined stress status
+const getStressStatus = () => {
+  const schemas = Object.keys(stressTestStates);
+  const anyRunning = schemas.some(s => stressTestStates[s].isRunning);
+  return {
+    isRunning: anyRunning,
+    schemas: stressTestStates,
+    activeSchemas: schemas.filter(s => stressTestStates[s].isRunning)
+  };
 };
 
 // API Routes
@@ -79,45 +86,59 @@ app.get('/api/db/status', (req, res) => {
 
 // Schema Management
 
-// Create schema
+// Create schema (with multi-schema support)
 app.post('/api/schema/create', async (req, res) => {
-  const { scaleFactor = 1 } = req.body;
+  const { scaleFactor = 1, prefix = '', compress = false, compressionType = null, parallelism = 10, racTableCount = 1 } = req.body;
+  const schemaId = prefix || 'default';
+
   try {
-    io.emit('schema-progress', { step: 'Starting schema creation...', progress: 0 });
-    await schemaManager.createSchema(oracleDb, (progress) => {
-      io.emit('schema-progress', progress);
+    io.emit('schema-progress', { schemaId, step: `Starting schema creation${prefix ? ` '${prefix}'` : ''}...`, progress: 0 });
+
+    await schemaManager.createSchema(oracleDb, { prefix, compress, compressionType, racTableCount }, (progress) => {
+      io.emit('schema-progress', { schemaId, ...progress });
     });
-    io.emit('schema-progress', { step: 'Populating data...', progress: 30 });
-    await schemaManager.populateData(oracleDb, scaleFactor, (progress) => {
-      io.emit('schema-progress', progress);
+
+    io.emit('schema-progress', { schemaId, step: 'Populating data...', progress: 50 });
+
+    await schemaManager.populateData(oracleDb, { prefix, scaleFactor, parallelism, racTableCount }, (progress) => {
+      io.emit('schema-progress', { schemaId, ...progress });
     });
-    io.emit('schema-progress', { step: 'Creating indexes...', progress: 90 });
-    await schemaManager.createIndexes(oracleDb, (progress) => {
-      io.emit('schema-progress', progress);
-    });
-    io.emit('schema-progress', { step: 'Schema created successfully!', progress: 100 });
-    res.json({ success: true, message: 'Schema created and populated successfully' });
+
+    io.emit('schema-progress', { schemaId, step: 'Schema created successfully!', progress: 100 });
+    res.json({ success: true, message: `Schema${prefix ? ` '${prefix}'` : ''} created and populated successfully`, schemaId });
   } catch (error) {
-    io.emit('schema-progress', { step: `Error: ${error.message}`, progress: -1 });
+    io.emit('schema-progress', { schemaId, step: `Error: ${error.message}`, progress: -1 });
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
 // Drop schema
 app.post('/api/schema/drop', async (req, res) => {
+  const { prefix = '' } = req.body;
   try {
-    await schemaManager.dropSchema(oracleDb);
-    res.json({ success: true, message: 'Schema dropped successfully' });
+    await schemaManager.dropSchema(oracleDb, prefix);
+    res.json({ success: true, message: `Schema${prefix ? ` '${prefix}'` : ''} dropped successfully` });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// Get schema info
+// Get schema info (for a specific schema)
 app.get('/api/schema/info', async (req, res) => {
+  const { prefix = '' } = req.query;
   try {
-    const info = await schemaManager.getSchemaInfo(oracleDb);
+    const info = await schemaManager.getSchemaInfo(oracleDb, prefix);
     res.json({ success: true, ...info });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// List all schemas
+app.get('/api/schemas/list', async (req, res) => {
+  try {
+    const schemas = await schemaManager.listSchemas(oracleDb);
+    res.json({ success: true, schemas });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -125,45 +146,71 @@ app.get('/api/schema/info', async (req, res) => {
 
 // Stress Test Management
 
-// Start stress test
+// Start stress test (supports multiple schemas)
 app.post('/api/stress/start', async (req, res) => {
   const config = req.body;
-
-  if (stressTestState.isRunning) {
-    return res.status(400).json({ success: false, message: 'Stress test already running' });
-  }
+  const schemasToTest = config.schemas || [{ prefix: '' }]; // Array of { prefix: '', ... }
 
   try {
-    stressTestState = {
-      isRunning: true,
-      config,
-      startTime: new Date()
-    };
+    // Start stress engine for each schema
+    for (const schemaConfig of schemasToTest) {
+      const schemaId = schemaConfig.prefix || 'default';
 
-    // Start the stress engine
-    stressEngine.start(oracleDb, config, io);
+      if (stressTestStates[schemaId]?.isRunning) {
+        continue; // Skip if already running
+      }
+
+      stressTestStates[schemaId] = {
+        isRunning: true,
+        config: { ...config, ...schemaConfig },
+        startTime: new Date(),
+        prefix: schemaConfig.prefix
+      };
+    }
+
+    // Start the stress engine with multi-schema support
+    stressEngine.start(oracleDb, { ...config, schemas: schemasToTest }, io);
 
     // Start metrics collection
     metricsCollector.start(oracleDb, io);
 
-    res.json({ success: true, message: 'Stress test started' });
+    // Reset GC baseline for fresh delta stats
+    await metricsCollector.resetGCBaseline();
+
+    res.json({ success: true, message: 'Stress test started', schemas: schemasToTest.map(s => s.prefix || 'default') });
   } catch (error) {
-    stressTestState.isRunning = false;
+    // Reset states on error
+    for (const schemaConfig of schemasToTest) {
+      const schemaId = schemaConfig.prefix || 'default';
+      if (stressTestStates[schemaId]) {
+        stressTestStates[schemaId].isRunning = false;
+      }
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
 // Stop stress test
 app.post('/api/stress/stop', async (req, res) => {
-  try {
-    stressEngine.stop();
-    metricsCollector.stop();
+  const { prefix } = req.body; // Optional: stop specific schema only
 
-    stressTestState = {
-      isRunning: false,
-      config: null,
-      startTime: null
-    };
+  try {
+    if (prefix !== undefined) {
+      // Stop specific schema
+      const schemaId = prefix || 'default';
+      stressEngine.stopSchema(schemaId);
+      if (stressTestStates[schemaId]) {
+        stressTestStates[schemaId].isRunning = false;
+      }
+    } else {
+      // Stop all
+      stressEngine.stop();
+      metricsCollector.stop();
+
+      for (const schemaId of Object.keys(stressTestStates)) {
+        stressTestStates[schemaId].isRunning = false;
+      }
+    }
 
     res.json({ success: true, message: 'Stress test stopped' });
   } catch (error) {
@@ -173,25 +220,48 @@ app.post('/api/stress/stop', async (req, res) => {
 
 // Get stress test status
 app.get('/api/stress/status', (req, res) => {
+  const status = getStressStatus();
+
+  // Calculate uptime for each schema
+  for (const schemaId of Object.keys(stressTestStates)) {
+    const state = stressTestStates[schemaId];
+    state.uptime = state.startTime ? Math.floor((new Date() - state.startTime) / 1000) : 0;
+  }
+
   res.json({
-    ...stressTestState,
-    uptime: stressTestState.startTime
-      ? Math.floor((new Date() - stressTestState.startTime) / 1000)
+    ...status,
+    uptime: status.activeSchemas.length > 0 && stressTestStates[status.activeSchemas[0]]
+      ? stressTestStates[status.activeSchemas[0]].uptime
       : 0
   });
+});
+
+// Reset GC wait events baseline (for fresh delta stats)
+app.post('/api/metrics/reset-gc-baseline', async (req, res) => {
+  try {
+    await metricsCollector.resetGCBaseline();
+    res.json({ success: true, message: 'GC baseline reset' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 // Update stress test config on the fly
 app.put('/api/stress/config', async (req, res) => {
   const newConfig = req.body;
+  const status = getStressStatus();
 
-  if (!stressTestState.isRunning) {
+  if (!status.isRunning) {
     return res.status(400).json({ success: false, message: 'No stress test running' });
   }
 
   try {
     stressEngine.updateConfig(newConfig);
-    stressTestState.config = { ...stressTestState.config, ...newConfig };
+
+    for (const schemaId of status.activeSchemas) {
+      stressTestStates[schemaId].config = { ...stressTestStates[schemaId].config, ...newConfig };
+    }
+
     res.json({ success: true, message: 'Configuration updated' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -203,7 +273,7 @@ io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
   // Send current state to newly connected client
-  socket.emit('stress-status', stressTestState);
+  socket.emit('stress-status', getStressStatus());
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);

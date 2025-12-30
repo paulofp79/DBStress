@@ -8,6 +8,7 @@ import MetricsPanel from './components/MetricsPanel';
 import WaitEventsPanel from './components/WaitEventsPanel';
 import TPSChart from './components/TPSChart';
 import OperationsChart from './components/OperationsChart';
+import GCWaitChart from './components/GCWaitChart';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -24,6 +25,7 @@ function App() {
     tps: [],
     operations: [],
     waitEvents: [],
+    gcWaitEvents: [],
     systemStats: {},
     // Multi-schema metrics
     tpsBySchema: {},
@@ -133,6 +135,7 @@ function App() {
       setMetrics(prev => ({
         ...prev,
         waitEvents: data.waitEvents,
+        gcWaitEvents: data.gcWaitEvents || [],
         systemStats: data.systemStats,
         sessionStats: data.sessionStats
       }));
@@ -229,7 +232,15 @@ function App() {
   const handleCreateSchema = async (options) => {
     try {
       setError(null);
-      await axios.post(`${API_BASE}/schema/create`, options);
+      // Calculate timeout based on schema size: base 2 min + 30s per RAC table pair + 1 min per scale factor
+      const racTableCount = options.racTableCount || 1;
+      const scaleFactor = options.scaleFactor || 1;
+      const timeoutMs = (120 + (racTableCount * 30) + (scaleFactor * 60)) * 1000; // in ms
+      const maxTimeout = 600000; // 10 minutes max
+
+      await axios.post(`${API_BASE}/schema/create`, options, {
+        timeout: Math.min(timeoutMs, maxTimeout)
+      });
       showSuccess(`Schema${options.prefix ? ` '${options.prefix}'` : ''} created successfully`);
       fetchSchemas();
     } catch (err) {
@@ -239,7 +250,10 @@ function App() {
 
   const handleDropSchema = async (prefix) => {
     try {
-      await axios.post(`${API_BASE}/schema/drop`, { prefix });
+      // Longer timeout for drop (could have many RAC tables)
+      await axios.post(`${API_BASE}/schema/drop`, { prefix }, {
+        timeout: 300000  // 5 minutes
+      });
       showSuccess(`Schema${prefix ? ` '${prefix}'` : ''} dropped successfully`);
       fetchSchemas();
     } catch (err) {
@@ -351,7 +365,10 @@ function App() {
               />
             </div>
 
-            <WaitEventsPanel waitEvents={metrics.waitEvents} />
+            <div className="grid-2">
+              <WaitEventsPanel waitEvents={metrics.waitEvents} />
+              <GCWaitChart gcWaitEvents={metrics.gcWaitEvents} />
+            </div>
           </>
         )}
       </main>

@@ -19,8 +19,8 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
 
   // Batch schema definitions - create multiple schemas at once
   const [schemaDefinitions, setSchemaDefinitions] = useState([
-    { prefix: 'nocomp', compressionType: 'none', enabled: true },
-    { prefix: 'rowadv', compressionType: 'advanced', enabled: true }
+    { prefix: 'nocomp', compressionType: 'none', racTableCount: 1, enabled: true },
+    { prefix: 'rowadv', compressionType: 'advanced', racTableCount: 1, enabled: true }
   ]);
 
   useEffect(() => {
@@ -62,6 +62,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
         scaleFactor,
         prefix: schema.prefix,
         compressionType: schema.compressionType,
+        racTableCount: schema.racTableCount || 1,
         parallelism
       });
     });
@@ -99,7 +100,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
   const addSchemaDefinition = () => {
     setSchemaDefinitions(prev => [
       ...prev,
-      { prefix: `schema${prev.length + 1}`, compressionType: 'none', enabled: true }
+      { prefix: `schema${prev.length + 1}`, compressionType: 'none', racTableCount: 1, enabled: true }
     ]);
   };
 
@@ -330,13 +331,37 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                           borderRadius: '4px',
                           color: 'var(--text-primary)',
                           fontSize: '0.75rem',
-                          minWidth: '220px'
+                          minWidth: '180px'
                         }}
                       >
                         {COMPRESSION_OPTIONS.map(opt => (
                           <option key={opt.value} value={opt.value}>{opt.label}</option>
                         ))}
                       </select>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                          RAC Tables:
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={schema.racTableCount || 1}
+                          onChange={(e) => updateSchemaDefinition(index, 'racTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                          disabled={isCreatingAny}
+                          style={{
+                            width: '50px',
+                            padding: '0.4rem',
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border)',
+                            borderRadius: '4px',
+                            color: 'var(--text-primary)',
+                            fontSize: '0.75rem',
+                            textAlign: 'center'
+                          }}
+                        />
+                      </div>
 
                       {schemaDefinitions.length > 1 && (
                         <button

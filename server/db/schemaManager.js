@@ -1,180 +1,237 @@
-// Schema Manager for Online Sales Database
+// Schema Manager for Online Sales Database - Multi-Schema Support
+const oracledb = require('oracledb');
 
-const TABLES = {
-  REGIONS: `
-    CREATE TABLE regions (
-      region_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      region_name VARCHAR2(100) NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  COUNTRIES: `
-    CREATE TABLE countries (
-      country_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      country_name VARCHAR2(100) NOT NULL,
-      country_code VARCHAR2(3) NOT NULL,
-      region_id NUMBER REFERENCES regions(region_id),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  WAREHOUSES: `
-    CREATE TABLE warehouses (
-      warehouse_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      warehouse_name VARCHAR2(100) NOT NULL,
-      location VARCHAR2(200),
-      country_id NUMBER REFERENCES countries(country_id),
-      capacity NUMBER DEFAULT 10000,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  CATEGORIES: `
-    CREATE TABLE categories (
-      category_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      category_name VARCHAR2(100) NOT NULL,
-      parent_category_id NUMBER REFERENCES categories(category_id),
-      description VARCHAR2(500),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  PRODUCTS: `
-    CREATE TABLE products (
-      product_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      product_name VARCHAR2(200) NOT NULL,
-      description VARCHAR2(2000),
-      category_id NUMBER REFERENCES categories(category_id),
-      unit_price NUMBER(10,2) NOT NULL,
-      unit_cost NUMBER(10,2),
-      weight NUMBER(10,2),
-      status VARCHAR2(20) DEFAULT 'ACTIVE',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  INVENTORY: `
-    CREATE TABLE inventory (
-      inventory_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      product_id NUMBER NOT NULL REFERENCES products(product_id),
-      warehouse_id NUMBER NOT NULL REFERENCES warehouses(warehouse_id),
-      quantity_on_hand NUMBER DEFAULT 0,
-      quantity_reserved NUMBER DEFAULT 0,
-      reorder_level NUMBER DEFAULT 10,
-      last_restock_date TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT uk_inventory UNIQUE (product_id, warehouse_id)
-    )`,
-
-  CUSTOMERS: `
-    CREATE TABLE customers (
-      customer_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      first_name VARCHAR2(100) NOT NULL,
-      last_name VARCHAR2(100) NOT NULL,
-      email VARCHAR2(200) UNIQUE NOT NULL,
-      phone VARCHAR2(20),
-      address_line1 VARCHAR2(200),
-      address_line2 VARCHAR2(200),
-      city VARCHAR2(100),
-      state_province VARCHAR2(100),
-      postal_code VARCHAR2(20),
-      country_id NUMBER REFERENCES countries(country_id),
-      customer_type VARCHAR2(20) DEFAULT 'REGULAR',
-      credit_limit NUMBER(10,2) DEFAULT 1000,
-      balance NUMBER(10,2) DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  ORDERS: `
-    CREATE TABLE orders (
-      order_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      customer_id NUMBER NOT NULL REFERENCES customers(customer_id),
-      order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      status VARCHAR2(20) DEFAULT 'PENDING',
-      shipping_address VARCHAR2(500),
-      shipping_method VARCHAR2(50),
-      subtotal NUMBER(12,2) DEFAULT 0,
-      tax_amount NUMBER(12,2) DEFAULT 0,
-      shipping_cost NUMBER(10,2) DEFAULT 0,
-      total_amount NUMBER(12,2) DEFAULT 0,
-      notes VARCHAR2(1000),
-      warehouse_id NUMBER REFERENCES warehouses(warehouse_id),
-      shipped_date TIMESTAMP,
-      delivered_date TIMESTAMP,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  ORDER_ITEMS: `
-    CREATE TABLE order_items (
-      order_item_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      order_id NUMBER NOT NULL REFERENCES orders(order_id),
-      product_id NUMBER NOT NULL REFERENCES products(product_id),
-      quantity NUMBER NOT NULL,
-      unit_price NUMBER(10,2) NOT NULL,
-      discount_percent NUMBER(5,2) DEFAULT 0,
-      line_total NUMBER(12,2),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  PAYMENTS: `
-    CREATE TABLE payments (
-      payment_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      order_id NUMBER NOT NULL REFERENCES orders(order_id),
-      payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      amount NUMBER(12,2) NOT NULL,
-      payment_method VARCHAR2(50) NOT NULL,
-      transaction_ref VARCHAR2(100),
-      status VARCHAR2(20) DEFAULT 'COMPLETED',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  ORDER_HISTORY: `
-    CREATE TABLE order_history (
-      history_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      order_id NUMBER NOT NULL REFERENCES orders(order_id),
-      old_status VARCHAR2(20),
-      new_status VARCHAR2(20),
-      changed_by VARCHAR2(100),
-      change_reason VARCHAR2(500),
-      changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-  PRODUCT_REVIEWS: `
-    CREATE TABLE product_reviews (
-      review_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      product_id NUMBER NOT NULL REFERENCES products(product_id),
-      customer_id NUMBER NOT NULL REFERENCES customers(customer_id),
-      rating NUMBER(1) CHECK (rating BETWEEN 1 AND 5),
-      review_title VARCHAR2(200),
-      review_text VARCHAR2(4000),
-      is_verified_purchase NUMBER(1) DEFAULT 0,
-      helpful_votes NUMBER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`
+// Compression type mappings
+const COMPRESSION_TYPES = {
+  'none': '',
+  'basic': 'ROW STORE COMPRESS BASIC',
+  'advanced': 'ROW STORE COMPRESS ADVANCED',
+  'query_low': 'COLUMN STORE COMPRESS FOR QUERY LOW',
+  'query_high': 'COLUMN STORE COMPRESS FOR QUERY HIGH',
+  'archive_low': 'COLUMN STORE COMPRESS FOR ARCHIVE LOW',
+  'archive_high': 'COLUMN STORE COMPRESS FOR ARCHIVE HIGH'
 };
 
-const INDEXES = [
-  'CREATE INDEX idx_products_category ON products(category_id)',
-  'CREATE INDEX idx_products_status ON products(status)',
-  'CREATE INDEX idx_inventory_product ON inventory(product_id)',
-  'CREATE INDEX idx_inventory_warehouse ON inventory(warehouse_id)',
-  'CREATE INDEX idx_customers_email ON customers(email)',
-  'CREATE INDEX idx_customers_country ON customers(country_id)',
-  'CREATE INDEX idx_orders_customer ON orders(customer_id)',
-  'CREATE INDEX idx_orders_status ON orders(status)',
-  'CREATE INDEX idx_orders_date ON orders(order_date)',
-  'CREATE INDEX idx_orders_warehouse ON orders(warehouse_id)',
-  'CREATE INDEX idx_order_items_order ON order_items(order_id)',
-  'CREATE INDEX idx_order_items_product ON order_items(product_id)',
-  'CREATE INDEX idx_payments_order ON payments(order_id)',
-  'CREATE INDEX idx_order_history_order ON order_history(order_id)',
-  'CREATE INDEX idx_reviews_product ON product_reviews(product_id)',
-  'CREATE INDEX idx_reviews_customer ON product_reviews(customer_id)'
-];
+// Base table definitions (prefix will be added dynamically)
+const getTableDDL = (prefix, compressionType = 'none') => {
+  const p = prefix ? `${prefix}_` : '';
+  const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
 
-const SEQUENCES = [
-  'CREATE SEQUENCE order_seq START WITH 100000 INCREMENT BY 1 CACHE 1000',
-  'CREATE SEQUENCE customer_seq START WITH 100000 INCREMENT BY 1 CACHE 1000'
-];
+  return {
+    [`${p}regions`]: `
+      CREATE TABLE ${p}regions (
+        region_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        region_name VARCHAR2(100) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}countries`]: `
+      CREATE TABLE ${p}countries (
+        country_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        country_name VARCHAR2(100) NOT NULL,
+        country_code VARCHAR2(3) NOT NULL,
+        region_id NUMBER REFERENCES ${p}regions(region_id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}warehouses`]: `
+      CREATE TABLE ${p}warehouses (
+        warehouse_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        warehouse_name VARCHAR2(100) NOT NULL,
+        location VARCHAR2(200),
+        country_id NUMBER REFERENCES ${p}countries(country_id),
+        capacity NUMBER DEFAULT 10000,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}categories`]: `
+      CREATE TABLE ${p}categories (
+        category_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        category_name VARCHAR2(100) NOT NULL,
+        parent_category_id NUMBER REFERENCES ${p}categories(category_id),
+        description VARCHAR2(500),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}products`]: `
+      CREATE TABLE ${p}products (
+        product_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_name VARCHAR2(200) NOT NULL,
+        description VARCHAR2(2000),
+        category_id NUMBER REFERENCES ${p}categories(category_id),
+        unit_price NUMBER(10,2) NOT NULL,
+        unit_cost NUMBER(10,2),
+        weight NUMBER(10,2),
+        status VARCHAR2(20) DEFAULT 'ACTIVE',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}inventory`]: `
+      CREATE TABLE ${p}inventory (
+        inventory_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_id NUMBER NOT NULL REFERENCES ${p}products(product_id),
+        warehouse_id NUMBER NOT NULL REFERENCES ${p}warehouses(warehouse_id),
+        quantity_on_hand NUMBER DEFAULT 0,
+        quantity_reserved NUMBER DEFAULT 0,
+        reorder_level NUMBER DEFAULT 10,
+        last_restock_date TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}uk_inventory UNIQUE (product_id, warehouse_id)
+      )${compressClause} NOLOGGING`,
+
+    [`${p}customers`]: `
+      CREATE TABLE ${p}customers (
+        customer_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        first_name VARCHAR2(100) NOT NULL,
+        last_name VARCHAR2(100) NOT NULL,
+        email VARCHAR2(200) NOT NULL,
+        phone VARCHAR2(20),
+        address_line1 VARCHAR2(200),
+        address_line2 VARCHAR2(200),
+        city VARCHAR2(100),
+        state_province VARCHAR2(100),
+        postal_code VARCHAR2(20),
+        country_id NUMBER REFERENCES ${p}countries(country_id),
+        customer_type VARCHAR2(20) DEFAULT 'REGULAR',
+        credit_limit NUMBER(10,2) DEFAULT 1000,
+        balance NUMBER(10,2) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}orders`]: `
+      CREATE TABLE ${p}orders (
+        order_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        customer_id NUMBER NOT NULL REFERENCES ${p}customers(customer_id),
+        order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status VARCHAR2(20) DEFAULT 'PENDING',
+        shipping_address VARCHAR2(500),
+        shipping_method VARCHAR2(50),
+        subtotal NUMBER(12,2) DEFAULT 0,
+        tax_amount NUMBER(12,2) DEFAULT 0,
+        shipping_cost NUMBER(10,2) DEFAULT 0,
+        total_amount NUMBER(12,2) DEFAULT 0,
+        notes VARCHAR2(1000),
+        warehouse_id NUMBER REFERENCES ${p}warehouses(warehouse_id),
+        shipped_date TIMESTAMP,
+        delivered_date TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}order_items`]: `
+      CREATE TABLE ${p}order_items (
+        order_item_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_id NUMBER NOT NULL REFERENCES ${p}orders(order_id),
+        product_id NUMBER NOT NULL REFERENCES ${p}products(product_id),
+        quantity NUMBER NOT NULL,
+        unit_price NUMBER(10,2) NOT NULL,
+        discount_percent NUMBER(5,2) DEFAULT 0,
+        line_total NUMBER(12,2),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}payments`]: `
+      CREATE TABLE ${p}payments (
+        payment_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_id NUMBER NOT NULL REFERENCES ${p}orders(order_id),
+        payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        amount NUMBER(12,2) NOT NULL,
+        payment_method VARCHAR2(50) NOT NULL,
+        transaction_ref VARCHAR2(100),
+        status VARCHAR2(20) DEFAULT 'COMPLETED',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}order_history`]: `
+      CREATE TABLE ${p}order_history (
+        history_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_id NUMBER NOT NULL REFERENCES ${p}orders(order_id),
+        old_status VARCHAR2(20),
+        new_status VARCHAR2(20),
+        changed_by VARCHAR2(100),
+        change_reason VARCHAR2(500),
+        changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+    [`${p}product_reviews`]: `
+      CREATE TABLE ${p}product_reviews (
+        review_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        product_id NUMBER NOT NULL REFERENCES ${p}products(product_id),
+        customer_id NUMBER NOT NULL REFERENCES ${p}customers(customer_id),
+        rating NUMBER(1) CHECK (rating BETWEEN 1 AND 5),
+        review_title VARCHAR2(200),
+        review_text VARCHAR2(4000),
+        is_verified_purchase NUMBER(1) DEFAULT 0,
+        helpful_votes NUMBER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )${compressClause} NOLOGGING`,
+
+  };
+};
+
+// Generate RAC hot table DDL dynamically (supports multiple tables)
+// Optimized for GC contention (not TX contention):
+// - INITRANS 100: Eliminates "enq: TX - allocate ITL entry" waits
+// - Small rows (no padding): Packs many rows per block for high concurrency
+// - PCTFREE 1: Maximizes rows per block
+// - Many rows per block = same block accessed by different instances = gc current block congested
+const getRacTableDDL = (prefix, compressionType = 'none', tableNum = 1) => {
+  const p = prefix ? `${prefix}_` : '';
+  const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
+  const suffix = tableNum > 1 ? `_${tableNum}` : '';
+
+  return {
+    [`${p}rac_hotblock${suffix}`]: `
+      CREATE TABLE ${p}rac_hotblock${suffix} (
+        slot_id NUMBER NOT NULL,
+        counter NUMBER DEFAULT 0,
+        last_instance NUMBER,
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}pk_rac_hotblock${suffix} PRIMARY KEY (slot_id)
+      )${compressClause} PCTFREE 1 INITRANS 100 MAXTRANS 255 LOGGING`,
+    [`${p}rac_hotindex${suffix}`]: `
+      CREATE TABLE ${p}rac_hotindex${suffix} (
+        id NUMBER NOT NULL,
+        bucket NUMBER NOT NULL,
+        value NUMBER DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}pk_rac_hotindex${suffix} PRIMARY KEY (id)
+      )${compressClause} PCTFREE 1 INITRANS 100 MAXTRANS 255 LOGGING`
+  };
+};
+
+// Generate RAC index DDL for a specific table number
+const getRacIndexes = (prefix, tableNum = 1) => {
+  const p = prefix ? `${prefix}_` : '';
+  const suffix = tableNum > 1 ? `_${tableNum}` : '';
+  return [
+    `CREATE INDEX ${p}idx_rac_hotindex${suffix}_bucket ON ${p}rac_hotindex${suffix}(bucket)`
+  ];
+};
+
+const getIndexes = (prefix) => {
+  const p = prefix ? `${prefix}_` : '';
+  return [
+    `CREATE INDEX ${p}idx_products_category ON ${p}products(category_id)`,
+    `CREATE INDEX ${p}idx_products_status ON ${p}products(status)`,
+    `CREATE INDEX ${p}idx_inventory_product ON ${p}inventory(product_id)`,
+    `CREATE INDEX ${p}idx_inventory_warehouse ON ${p}inventory(warehouse_id)`,
+    `CREATE INDEX ${p}idx_customers_country ON ${p}customers(country_id)`,
+    `CREATE INDEX ${p}idx_orders_customer ON ${p}orders(customer_id)`,
+    `CREATE INDEX ${p}idx_orders_status ON ${p}orders(status)`,
+    `CREATE INDEX ${p}idx_orders_date ON ${p}orders(order_date)`,
+    `CREATE INDEX ${p}idx_orders_warehouse ON ${p}orders(warehouse_id)`,
+    `CREATE INDEX ${p}idx_order_items_order ON ${p}order_items(order_id)`,
+    `CREATE INDEX ${p}idx_order_items_product ON ${p}order_items(product_id)`,
+    `CREATE INDEX ${p}idx_payments_order ON ${p}payments(order_id)`,
+    `CREATE INDEX ${p}idx_order_history_order ON ${p}order_history(order_id)`,
+    `CREATE INDEX ${p}idx_reviews_product ON ${p}product_reviews(product_id)`,
+    `CREATE INDEX ${p}idx_reviews_customer ON ${p}product_reviews(customer_id)`
+    // Note: RAC indexes are created dynamically based on racTableCount
+  ];
+};
 
 // Sample data generators
 const REGIONS_DATA = [
@@ -222,64 +279,71 @@ const CATEGORIES_DATA = [
 const FIRST_NAMES = ['James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph', 'Thomas', 'Charles', 'Mary', 'Patricia', 'Jennifer', 'Linda', 'Elizabeth', 'Barbara', 'Susan', 'Jessica', 'Sarah', 'Karen', 'Emma', 'Olivia', 'Ava', 'Isabella', 'Sophia', 'Mia', 'Charlotte', 'Amelia', 'Harper', 'Evelyn'];
 const LAST_NAMES = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson', 'White', 'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson'];
 const CITIES = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose', 'Austin', 'Jacksonville', 'Fort Worth', 'Columbus', 'Charlotte', 'Seattle', 'Denver', 'Boston', 'Detroit', 'Portland'];
-
 const PRODUCT_ADJECTIVES = ['Premium', 'Professional', 'Ultra', 'Advanced', 'Classic', 'Modern', 'Deluxe', 'Essential', 'Elite', 'Pro'];
 const PRODUCT_NOUNS = ['Laptop', 'Phone', 'Tablet', 'Headphones', 'Speaker', 'Camera', 'Watch', 'Keyboard', 'Mouse', 'Monitor', 'Shirt', 'Pants', 'Jacket', 'Shoes', 'Bag', 'Chair', 'Desk', 'Lamp', 'Sofa', 'Bed'];
 
 class SchemaManager {
-  // Helper function to handle executeMany with consistent commit logic
-  async executeManyWithCommit(db, sql, binds, batchCommitSize) {
-    const shouldAutoCommit = batchCommitSize >= binds.length;
-    await db.executeMany(sql, binds, {
-      autoCommit: shouldAutoCommit,
-      batchErrors: true
-    });
-    // Manual commit if we didn't auto-commit
-    if (!shouldAutoCommit) {
-      await db.execute('COMMIT');
-    }
+  constructor() {
+    this.schemas = new Map(); // Store schema metadata
   }
 
-  async createSchema(db, progressCallback = () => {}) {
-    const tableNames = Object.keys(TABLES);
-    const totalSteps = tableNames.length + SEQUENCES.length;
-    let currentStep = 0;
+  getTableNames(prefix, racTableCount = 1) {
+    const p = prefix ? `${prefix}_` : '';
+    const baseNames = [
+      `${p}regions`, `${p}countries`, `${p}warehouses`, `${p}categories`,
+      `${p}products`, `${p}inventory`, `${p}customers`, `${p}orders`,
+      `${p}order_items`, `${p}payments`, `${p}order_history`, `${p}product_reviews`
+    ];
 
-    // Create sequences first
-    for (const seqSql of SEQUENCES) {
-      try {
-        await db.execute(seqSql);
-      } catch (err) {
-        if (!err.message.includes('ORA-00955')) { // Ignore "name already used"
-          console.log('Sequence warning:', err.message);
-        }
-      }
-      currentStep++;
-      progressCallback({ step: 'Creating sequences...', progress: Math.floor((currentStep / totalSteps) * 30) });
+    // Add RAC tables dynamically
+    for (let i = 1; i <= racTableCount; i++) {
+      const suffix = i > 1 ? `_${i}` : '';
+      baseNames.push(`${p}rac_hotblock${suffix}`);
+      baseNames.push(`${p}rac_hotindex${suffix}`);
     }
 
-    // Create tables in order (without indexes to avoid overhead during bulk load)
+    return baseNames;
+  }
+
+  async createSchema(db, options = {}, progressCallback = () => {}) {
+    // Support both old boolean 'compress' and new 'compressionType' options
+    const { prefix = '', compress = false, compressionType = null, racTableCount = 1 } = options;
+    const effectiveCompression = compressionType || (compress ? 'advanced' : 'none');
+    const tables = getTableDDL(prefix, effectiveCompression);
+    const indexes = getIndexes(prefix);
+
+    // Add RAC tables and indexes dynamically
+    for (let i = 1; i <= racTableCount; i++) {
+      const racTables = getRacTableDDL(prefix, effectiveCompression, i);
+      Object.assign(tables, racTables);
+      indexes.push(...getRacIndexes(prefix, i));
+    }
+
+    const tableNames = Object.keys(tables);
+    const totalSteps = tableNames.length + indexes.length;
+    let currentStep = 0;
+
+    const compressionLabel = COMPRESSION_TYPES[effectiveCompression] || 'no compression';
+    const racLabel = racTableCount > 1 ? `, ${racTableCount} RAC tables` : '';
+    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel}${racLabel})...`, progress: 0 });
+
+    // Create tables in order
     for (const tableName of tableNames) {
       try {
-        await db.execute(TABLES[tableName]);
+        await db.execute(tables[tableName]);
         console.log(`Created table: ${tableName}`);
       } catch (err) {
-        if (!err.message.includes('ORA-00955')) { // Ignore "name already used"
+        if (!err.message.includes('ORA-00955')) {
           throw err;
         }
         console.log(`Table ${tableName} already exists`);
       }
       currentStep++;
-      progressCallback({ step: `Creating table ${tableName}...`, progress: Math.floor((currentStep / totalSteps) * 30) });
+      progressCallback({ step: `Creating table ${tableName}...`, progress: Math.floor((currentStep / totalSteps) * 50) });
     }
-  }
 
-  async createIndexes(db, progressCallback = () => {}) {
-    // Create indexes after data population to avoid index build overhead during bulk load
-    let currentStep = 0;
-    const totalSteps = INDEXES.length;
-
-    for (const indexSql of INDEXES) {
+    // Create indexes
+    for (const indexSql of indexes) {
       try {
         await db.execute(indexSql);
       } catch (err) {
@@ -288,397 +352,434 @@ class SchemaManager {
         }
       }
       currentStep++;
-      progressCallback({ step: 'Creating indexes...', progress: 90 + Math.floor((currentStep / totalSteps) * 10) });
+      progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
+    }
+
+    // Store schema metadata including racTableCount
+    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, racTableCount, createdAt: new Date() });
+  }
+
+  // Parallel batch insert helper - uses executeMany for much better performance
+  async parallelInsert(db, sql, dataArray, batchSize = 500, parallelism = 4) {
+    if (dataArray.length === 0) return;
+
+    const batches = [];
+    for (let i = 0; i < dataArray.length; i += batchSize) {
+      batches.push(dataArray.slice(i, i + batchSize));
+    }
+
+    console.log(`Inserting ${dataArray.length} rows in ${batches.length} batches (batch size: ${batchSize})`);
+
+    // Process batches sequentially to avoid connection pool exhaustion
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      let connection;
+      try {
+        connection = await db.getConnection();
+
+        // Use executeMany for batch insert - much faster than individual inserts
+        await connection.executeMany(sql, batch, {
+          autoCommit: false,
+          batchErrors: true  // Continue on errors
+        });
+
+        await connection.commit();
+      } catch (err) {
+        if (!err.message.includes('ORA-00001')) {
+          console.log(`Batch ${i + 1}/${batches.length} warning:`, err.message);
+        }
+        if (connection) {
+          try { await connection.rollback(); } catch (e) {}
+        }
+      } finally {
+        if (connection) {
+          try { await connection.close(); } catch (e) {}
+        }
+      }
+
+      // Progress indication for large inserts
+      if ((i + 1) % 10 === 0 || i === batches.length - 1) {
+        console.log(`  Batch ${i + 1}/${batches.length} completed`);
+      }
     }
   }
 
-  async populateData(db, scaleFactor = 1, progressCallback = () => {}, options = {}) {
+  async populateData(db, options = {}, progressCallback = () => {}) {
+    const {
+      prefix = '',
+      scaleFactor = 1,
+      parallelism = 10,  // Number of parallel insert streams
+      racTableCount = 1  // Number of RAC hot table pairs
+    } = options;
+
+    const p = prefix ? `${prefix}_` : '';
     const baseCustomers = 1000 * scaleFactor;
     const baseProducts = 500 * scaleFactor;
     const baseOrders = 5000 * scaleFactor;
 
-    // Options for performance optimization
-    const { useDirectPath = false, batchCommitSize = 1000 } = options;
+    let progress = 50;
+    progressCallback({ step: 'Starting data population...', progress });
 
-    let progress = 30;
-
-    // Insert regions
-    progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
-    for (const region of REGIONS_DATA) {
-      try {
-        await db.execute(
-          `INSERT INTO regions (region_name) VALUES (:name)`,
-          [region]
-        );
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) throw err;
+    try {
+      // Insert regions
+      progressCallback({ step: 'Inserting regions...', progress: progress += 2 });
+      for (const region of REGIONS_DATA) {
+        try {
+          await db.execute(`INSERT /*+ APPEND */ INTO ${p}regions (region_name) VALUES (:1)`, [region]);
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
       }
-    }
 
-    // Get region IDs
-    const regionsResult = await db.execute('SELECT region_id, region_name FROM regions');
-    const regionMap = {};
-    regionsResult.rows.forEach(r => regionMap[r.REGION_NAME] = r.REGION_ID);
+      // Get region IDs
+      const regionsResult = await db.execute(`SELECT region_id, region_name FROM ${p}regions`);
+      const regionMap = {};
+      regionsResult.rows.forEach(r => regionMap[r.REGION_NAME] = r.REGION_ID);
 
-    // Insert countries
-    progressCallback({ step: 'Inserting countries...', progress: progress += 2 });
-    for (const country of COUNTRIES_DATA) {
-      try {
-        await db.execute(
-          `INSERT INTO countries (country_name, country_code, region_id) VALUES (:name, :code, :regionId)`,
-          [country.name, country.code, regionMap[country.region]]
-        );
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) throw err;
+      // Insert countries
+      progressCallback({ step: 'Inserting countries...', progress: progress += 2 });
+      for (const country of COUNTRIES_DATA) {
+        try {
+          await db.execute(
+            `INSERT /*+ APPEND */ INTO ${p}countries (country_name, country_code, region_id) VALUES (:1, :2, :3)`,
+            [country.name, country.code, regionMap[country.region]]
+          );
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
       }
-    }
 
-    // Get country IDs
-    const countriesResult = await db.execute('SELECT country_id, country_name FROM countries');
-    const countryMap = {};
-    countriesResult.rows.forEach(c => countryMap[c.COUNTRY_NAME] = c.COUNTRY_ID);
-    const countryIds = Object.values(countryMap);
+      // Get country IDs
+      const countriesResult = await db.execute(`SELECT country_id FROM ${p}countries`);
+      const countryIds = countriesResult.rows.map(c => c.COUNTRY_ID);
 
-    // Insert warehouses
-    progressCallback({ step: 'Inserting warehouses...', progress: progress += 2 });
-    const warehouseLocations = ['East Coast DC', 'West Coast DC', 'Central DC', 'European DC', 'Asian DC'];
-    for (let i = 0; i < warehouseLocations.length; i++) {
-      try {
-        await db.execute(
-          `INSERT INTO warehouses (warehouse_name, location, country_id, capacity) VALUES (:name, :loc, :countryId, :cap)`,
-          [warehouseLocations[i], `Warehouse ${i + 1}`, countryIds[i % countryIds.length], 50000 * scaleFactor]
-        );
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) throw err;
+      if (countryIds.length === 0) {
+        throw new Error('No countries available.');
       }
-    }
 
-    // Get warehouse IDs
-    const warehousesResult = await db.execute('SELECT warehouse_id FROM warehouses');
-    const warehouseIds = warehousesResult.rows.map(w => w.WAREHOUSE_ID);
+      // Insert warehouses
+      progressCallback({ step: 'Inserting warehouses...', progress: progress += 2 });
+      const warehouseLocations = ['East Coast DC', 'West Coast DC', 'Central DC', 'European DC', 'Asian DC'];
+      for (let i = 0; i < warehouseLocations.length; i++) {
+        try {
+          await db.execute(
+            `INSERT /*+ APPEND */ INTO ${p}warehouses (warehouse_name, location, country_id, capacity) VALUES (:1, :2, :3, :4)`,
+            [warehouseLocations[i], `Warehouse ${i + 1}`, countryIds[i % countryIds.length], 50000 * scaleFactor]
+          );
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) throw err;
+        }
+      }
 
-    // Insert categories
-    progressCallback({ step: 'Inserting categories...', progress: progress += 2 });
-    const categoryMap = {};
-    for (const cat of CATEGORIES_DATA) {
-      try {
-        const parentId = cat.parent ? categoryMap[cat.parent] : null;
-        const result = await db.execute(
-          `INSERT INTO categories (category_name, parent_category_id, description) VALUES (:name, :parentId, :desc) RETURNING category_id INTO :id`,
-          {
-            name: cat.name,
-            parentId: parentId,
-            desc: `${cat.name} category`,
-            id: { type: 2002, dir: 3003 } // NUMBER, BIND_OUT
-          }
-        );
-        categoryMap[cat.name] = result.outBinds.id[0];
-      } catch (err) {
-        if (!err.message.includes('ORA-00001')) {
-          // Try to get existing category ID
-          const existing = await db.execute('SELECT category_id FROM categories WHERE category_name = :name', [cat.name]);
-          if (existing.rows.length > 0) {
-            categoryMap[cat.name] = existing.rows[0].CATEGORY_ID;
+      // Get warehouse IDs
+      const warehousesResult = await db.execute(`SELECT warehouse_id FROM ${p}warehouses`);
+      const warehouseIds = warehousesResult.rows.map(w => w.WAREHOUSE_ID);
+
+      // Insert categories
+      progressCallback({ step: 'Inserting categories...', progress: progress += 2 });
+      for (const cat of CATEGORIES_DATA) {
+        if (!cat.parent) {
+          try {
+            await db.execute(
+              `INSERT /*+ APPEND */ INTO ${p}categories (category_name, description) VALUES (:1, :2)`,
+              [cat.name, `${cat.name} category`]
+            );
+          } catch (err) {
+            if (!err.message.includes('ORA-00001')) throw err;
           }
         }
       }
-    }
-    const categoryIds = Object.values(categoryMap);
 
-    // Insert products in batches using executeMany
-    progressCallback({ step: `Inserting ${baseProducts} products...`, progress: progress = 40 });
-    const productBinds = [];
-    
-    for (let i = 0; i < baseProducts; i++) {
-      const adj = PRODUCT_ADJECTIVES[Math.floor(Math.random() * PRODUCT_ADJECTIVES.length)];
-      const noun = PRODUCT_NOUNS[Math.floor(Math.random() * PRODUCT_NOUNS.length)];
-      const price = (Math.random() * 500 + 10).toFixed(2);
-      productBinds.push({
-        name: `${adj} ${noun} ${i + 1}`,
-        desc: `High quality ${noun.toLowerCase()} with premium features`,
-        categoryId: categoryIds[Math.floor(Math.random() * categoryIds.length)],
-        price: parseFloat(price),
-        cost: parseFloat((price * 0.6).toFixed(2)),
-        weight: parseFloat((Math.random() * 10 + 0.5).toFixed(2))
-      });
-    }
+      const parentCatResult = await db.execute(`SELECT category_id, category_name FROM ${p}categories`);
+      const categoryMap = {};
+      parentCatResult.rows.forEach(c => categoryMap[c.CATEGORY_NAME] = c.CATEGORY_ID);
 
-    // Use executeMany for bulk insert with optional direct-path hints
-    const productSql = useDirectPath 
-      ? `INSERT /*+ APPEND */ INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
-         VALUES (:name, :desc, :categoryId, :price, :cost, :weight)`
-      : `INSERT INTO products (product_name, description, category_id, unit_price, unit_cost, weight)
-         VALUES (:name, :desc, :categoryId, :price, :cost, :weight)`;
-    
-    try {
-      await this.executeManyWithCommit(db, productSql, productBinds, batchCommitSize);
-      progressCallback({ step: `Inserted ${baseProducts} products`, progress: progress = 45 });
-    } catch (err) {
-      console.log('Product bulk insert warning:', err.message);
-    }
-
-    // Get all product IDs via SELECT
-    const prodsResult = await db.execute('SELECT product_id FROM products ORDER BY product_id');
-    const productIds = prodsResult.rows.map(p => p.PRODUCT_ID);
-
-    // Insert inventory for each product in each warehouse using executeMany
-    progressCallback({ step: 'Inserting inventory...', progress: progress = 50 });
-    const inventoryBinds = [];
-    
-    for (const productId of productIds) {
-      for (const warehouseId of warehouseIds) {
-        inventoryBinds.push({
-          prodId: productId,
-          whId: warehouseId,
-          qty: Math.floor(Math.random() * 1000) + 100,
-          reserved: Math.floor(Math.random() * 50),
-          reorder: Math.floor(Math.random() * 20) + 10
-        });
-      }
-    }
-
-    const inventorySql = useDirectPath
-      ? `INSERT /*+ APPEND */ INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
-         VALUES (:prodId, :whId, :qty, :reserved, :reorder)`
-      : `INSERT INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
-         VALUES (:prodId, :whId, :qty, :reserved, :reorder)`;
-
-    try {
-      await this.executeManyWithCommit(db, inventorySql, inventoryBinds, batchCommitSize);
-      progressCallback({ step: `Inserted ${inventoryBinds.length} inventory records`, progress: progress = 55 });
-    } catch (err) {
-      console.log('Inventory bulk insert warning:', err.message);
-    }
-
-    // Insert customers in batches using executeMany
-    progressCallback({ step: `Inserting ${baseCustomers} customers...`, progress: progress = 60 });
-    const customerBinds = [];
-
-    for (let i = 0; i < baseCustomers; i++) {
-      const firstName = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
-      const lastName = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
-      const city = CITIES[Math.floor(Math.random() * CITIES.length)];
-
-      customerBinds.push({
-        firstName,
-        lastName,
-        email: `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${i}@example.com`,
-        phone: `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
-        addr: `${Math.floor(Math.random() * 9999) + 1} Main Street`,
-        city,
-        state: 'State',
-        postal: String(Math.floor(Math.random() * 90000) + 10000),
-        countryId: countryIds[Math.floor(Math.random() * countryIds.length)],
-        credit: Math.floor(Math.random() * 10000) + 1000
-      });
-    }
-
-    const customerSql = useDirectPath
-      ? `INSERT /*+ APPEND */ INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
-         VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit)`
-      : `INSERT INTO customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
-         VALUES (:firstName, :lastName, :email, :phone, :addr, :city, :state, :postal, :countryId, :credit)`;
-
-    try {
-      await this.executeManyWithCommit(db, customerSql, customerBinds, batchCommitSize);
-      progressCallback({ step: `Inserted ${baseCustomers} customers`, progress: progress = 65 });
-    } catch (err) {
-      console.log('Customer bulk insert warning:', err.message);
-    }
-
-    // Get all customer IDs via SELECT
-    const custResult = await db.execute('SELECT customer_id FROM customers ORDER BY customer_id');
-    const customerIds = custResult.rows.map(c => c.CUSTOMER_ID);
-
-    // Insert orders and order items using executeMany
-    progressCallback({ step: `Inserting ${baseOrders} orders...`, progress: progress = 70 });
-    const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
-    const paymentMethods = ['CREDIT_CARD', 'DEBIT_CARD', 'PAYPAL', 'BANK_TRANSFER', 'CRYPTO'];
-
-    // Prepare order data
-    const orderBinds = [];
-    const orderItemsData = [];
-    const paymentsData = [];
-
-    for (let i = 0; i < baseOrders; i++) {
-      const customerId = customerIds[Math.floor(Math.random() * customerIds.length)];
-      const warehouseId = warehouseIds[Math.floor(Math.random() * warehouseIds.length)];
-      const status = statuses[Math.floor(Math.random() * statuses.length)];
-      const itemCount = Math.floor(Math.random() * 5) + 1;
-      const shippingMethod = ['Standard', 'Express', 'Overnight'][Math.floor(Math.random() * 3)];
-
-      // Calculate order totals
-      let subtotal = 0;
-      const items = [];
-      for (let k = 0; k < itemCount; k++) {
-        const productId = productIds[Math.floor(Math.random() * productIds.length)];
-        const quantity = Math.floor(Math.random() * 5) + 1;
-        const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
-        const lineTotal = quantity * unitPrice;
-        subtotal += lineTotal;
-        items.push({ productId, quantity, unitPrice, lineTotal });
-      }
-
-      const tax = subtotal * 0.08;
-      const shipping = Math.random() * 20 + 5;
-      const total = subtotal + tax + shipping;
-
-      orderBinds.push({
-        custId: customerId,
-        status,
-        whId: warehouseId,
-        ship: shippingMethod,
-        notes: `Order ${i + 1}`,
-        subtotal,
-        tax,
-        shippingCost: shipping,
-        total
-      });
-
-      // Store order items for this order (we'll need the order ID later)
-      orderItemsData.push({ orderIndex: i, items });
-
-      // Store payment data for non-pending orders
-      if (status !== 'PENDING' && status !== 'CANCELLED') {
-        paymentsData.push({
-          orderIndex: i,
-          amount: total,
-          method: paymentMethods[Math.floor(Math.random() * paymentMethods.length)],
-          ref: `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`
-        });
-      }
-    }
-
-    // Insert orders using executeMany
-    const orderSql = useDirectPath
-      ? `INSERT /*+ APPEND */ INTO orders (customer_id, status, warehouse_id, shipping_method, notes, subtotal, tax_amount, shipping_cost, total_amount)
-         VALUES (:custId, :status, :whId, :ship, :notes, :subtotal, :tax, :shippingCost, :total)`
-      : `INSERT INTO orders (customer_id, status, warehouse_id, shipping_method, notes, subtotal, tax_amount, shipping_cost, total_amount)
-         VALUES (:custId, :status, :whId, :ship, :notes, :subtotal, :tax, :shippingCost, :total)`;
-
-    try {
-      await this.executeManyWithCommit(db, orderSql, orderBinds, batchCommitSize);
-      progressCallback({ step: `Inserted ${baseOrders} orders`, progress: progress = 75 });
-    } catch (err) {
-      console.log('Order bulk insert warning:', err.message);
-    }
-
-    // Get all order IDs via SELECT (get the most recent baseOrders orders)
-    // Since we're in the schema creation process, we expect minimal concurrent activity
-    // Note: Using string interpolation with validated integer to avoid FETCH FIRST bind parameter limitation
-    // Validate baseOrders is a safe integer to prevent SQL injection
-    const safeBaseOrders = Math.max(1, Math.floor(Number(baseOrders)));
-    if (safeBaseOrders !== baseOrders) {
-      throw new Error(`Invalid baseOrders value: ${baseOrders}`);
-    }
-    
-    const ordersResult = await db.execute(
-      `SELECT order_id FROM orders ORDER BY created_at DESC, order_id DESC FETCH FIRST ${safeBaseOrders} ROWS ONLY`
-    );
-    const orderIds = ordersResult.rows.map(o => o.ORDER_ID).reverse();
-    
-    // Validate we got the expected number of orders
-    if (orderIds.length !== safeBaseOrders) {
-      const message = `Warning: Expected ${safeBaseOrders} orders but found ${orderIds.length}. Some order items and payments may be skipped.`;
-      console.log(message);
-      progressCallback({ step: message, progress: progress });
-    }
-
-    // Insert order items using executeMany
-    progressCallback({ step: 'Inserting order items...', progress: progress = 78 });
-    const orderItemBinds = [];
-    
-    for (let i = 0; i < Math.min(orderItemsData.length, orderIds.length); i++) {
-      const orderId = orderIds[i];
-      if (!orderId) continue;
-      
-      for (const item of orderItemsData[i].items) {
-        orderItemBinds.push({
-          orderId,
-          prodId: item.productId,
-          qty: item.quantity,
-          price: item.unitPrice,
-          total: item.lineTotal
-        });
-      }
-    }
-
-    const orderItemSql = useDirectPath
-      ? `INSERT /*+ APPEND */ INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-         VALUES (:orderId, :prodId, :qty, :price, :total)`
-      : `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-         VALUES (:orderId, :prodId, :qty, :price, :total)`;
-
-    try {
-      await this.executeManyWithCommit(db, orderItemSql, orderItemBinds, batchCommitSize);
-      progressCallback({ step: `Inserted ${orderItemBinds.length} order items`, progress: progress = 82 });
-    } catch (err) {
-      console.log('Order items bulk insert warning:', err.message);
-    }
-
-    // Insert payments using executeMany
-    progressCallback({ step: 'Inserting payments...', progress: progress = 85 });
-    
-    // Create a map for O(1) lookup of payment data by order index
-    const paymentsMap = new Map(paymentsData.map(p => [p.orderIndex, p]));
-    
-    const paymentBinds = [];
-    for (let i = 0; i < Math.min(orderIds.length, safeBaseOrders); i++) {
-      const payment = paymentsMap.get(i);
-      if (!payment) continue;
-      
-      const orderId = orderIds[i];
-      if (!orderId) continue;
-      
-      paymentBinds.push({
-        orderId,
-        amount: payment.amount,
-        method: payment.method,
-        ref: payment.ref
-      });
-    }
-
-    const paymentSql = useDirectPath
-      ? `INSERT /*+ APPEND */ INTO payments (order_id, amount, payment_method, transaction_ref, status)
-         VALUES (:orderId, :amount, :method, :ref, 'COMPLETED')`
-      : `INSERT INTO payments (order_id, amount, payment_method, transaction_ref, status)
-         VALUES (:orderId, :amount, :method, :ref, 'COMPLETED')`;
-
-    if (paymentBinds.length > 0) {
-      try {
-        await this.executeManyWithCommit(db, paymentSql, paymentBinds, batchCommitSize);
-        progressCallback({ step: `Inserted ${paymentBinds.length} payments`, progress: progress = 88 });
-      } catch (err) {
-        console.log('Payment bulk insert warning:', err.message);
-      }
-    }
-
-    // Add some product reviews
-    progressCallback({ step: 'Adding product reviews...', progress: 90 });
-    const reviewCount = Math.min(baseCustomers, baseProducts) * 0.5;
-    for (let i = 0; i < reviewCount; i++) {
-      try {
-        await db.execute(
-          `INSERT INTO product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase)
-           VALUES (:prodId, :custId, :rating, :title, :text, :verified)`,
-          {
-            prodId: productIds[Math.floor(Math.random() * productIds.length)],
-            custId: customerIds[Math.floor(Math.random() * customerIds.length)],
-            rating: Math.floor(Math.random() * 5) + 1,
-            title: ['Great product!', 'Good value', 'As expected', 'Could be better', 'Excellent quality'][Math.floor(Math.random() * 5)],
-            text: 'This is a sample review for the product.',
-            verified: Math.random() > 0.3 ? 1 : 0
+      for (const cat of CATEGORIES_DATA) {
+        if (cat.parent && categoryMap[cat.parent]) {
+          try {
+            await db.execute(
+              `INSERT /*+ APPEND */ INTO ${p}categories (category_name, parent_category_id, description) VALUES (:1, :2, :3)`,
+              [cat.name, categoryMap[cat.parent], `${cat.name} category`]
+            );
+          } catch (err) {
+            if (!err.message.includes('ORA-00001')) throw err;
           }
-        );
-      } catch (err) {
-        // Ignore duplicate reviews
+        }
       }
-    }
 
-    progressCallback({ step: 'Data population complete!', progress: 90 });
+      const catResult = await db.execute(`SELECT category_id FROM ${p}categories`);
+      const categoryIds = catResult.rows.map(c => c.CATEGORY_ID);
+
+      if (categoryIds.length === 0) {
+        throw new Error('No categories available.');
+      }
+
+      // PARALLEL INSERT: Products
+      progressCallback({ step: `Inserting ${baseProducts} products (parallel)...`, progress: progress += 2 });
+      const productData = [];
+      for (let i = 0; i < baseProducts; i++) {
+        const adj = PRODUCT_ADJECTIVES[Math.floor(Math.random() * PRODUCT_ADJECTIVES.length)];
+        const noun = PRODUCT_NOUNS[Math.floor(Math.random() * PRODUCT_NOUNS.length)];
+        const price = parseFloat((Math.random() * 500 + 10).toFixed(2));
+        productData.push([
+          `${adj} ${noun} ${i + 1}`,
+          `High quality ${noun.toLowerCase()} with premium features`,
+          categoryIds[Math.floor(Math.random() * categoryIds.length)],
+          price,
+          parseFloat((price * 0.6).toFixed(2)),
+          parseFloat((Math.random() * 10 + 0.5).toFixed(2))
+        ]);
+      }
+
+      await this.parallelInsert(
+        db,
+        `INSERT INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight) VALUES (:1, :2, :3, :4, :5, :6)`,
+        productData,
+        500
+      );
+      progressCallback({ step: `Products inserted`, progress: 65 });
+
+      // Get product IDs
+      const prodsResult = await db.execute(`SELECT product_id FROM ${p}products`);
+      const productIds = prodsResult.rows.map(r => r.PRODUCT_ID);
+
+      // PARALLEL INSERT: Inventory
+      progressCallback({ step: 'Inserting inventory (parallel)...', progress: 67 });
+      const inventoryData = [];
+      for (const productId of productIds) {
+        for (const warehouseId of warehouseIds) {
+          inventoryData.push([
+            productId,
+            warehouseId,
+            Math.floor(Math.random() * 1000) + 100,
+            Math.floor(Math.random() * 50),
+            Math.floor(Math.random() * 20) + 10
+          ]);
+        }
+      }
+
+      await this.parallelInsert(
+        db,
+        `INSERT INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level) VALUES (:1, :2, :3, :4, :5)`,
+        inventoryData,
+        500
+      );
+      progressCallback({ step: 'Inventory inserted', progress: 70 });
+
+      // PARALLEL INSERT: Customers
+      progressCallback({ step: `Inserting ${baseCustomers} customers (parallel)...`, progress: 72 });
+      const customerData = [];
+      for (let i = 0; i < baseCustomers; i++) {
+        const firstName = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
+        const lastName = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
+        const city = CITIES[Math.floor(Math.random() * CITIES.length)];
+        customerData.push([
+          firstName,
+          lastName,
+          `${firstName.toLowerCase()}.${lastName.toLowerCase()}.${prefix || 'def'}.${i}@example.com`,
+          `+1-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 900 + 100)}-${Math.floor(Math.random() * 9000 + 1000)}`,
+          `${Math.floor(Math.random() * 9999) + 1} Main Street`,
+          city,
+          'State',
+          String(Math.floor(Math.random() * 90000) + 10000),
+          countryIds[Math.floor(Math.random() * countryIds.length)],
+          Math.floor(Math.random() * 10000) + 1000
+        ]);
+      }
+
+      await this.parallelInsert(
+        db,
+        `INSERT INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)`,
+        customerData,
+        500
+      );
+      progressCallback({ step: 'Customers inserted', progress: 80 });
+
+      // Get customer IDs
+      const custResult = await db.execute(`SELECT customer_id FROM ${p}customers`);
+      const customerIds = custResult.rows.map(c => c.CUSTOMER_ID);
+
+      if (customerIds.length === 0 || productIds.length === 0) {
+        progressCallback({ step: 'Skipping orders - missing data', progress: 95 });
+      } else {
+        // PARALLEL INSERT: Orders
+        progressCallback({ step: `Inserting ${baseOrders} orders (parallel)...`, progress: 82 });
+        const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+        const shippingMethods = ['Standard', 'Express', 'Overnight'];
+
+        // Prepare all order data
+        const orderData = [];
+        for (let i = 0; i < baseOrders; i++) {
+          orderData.push([
+            customerIds[Math.floor(Math.random() * customerIds.length)],
+            statuses[Math.floor(Math.random() * statuses.length)],
+            warehouseIds[Math.floor(Math.random() * warehouseIds.length)],
+            shippingMethods[Math.floor(Math.random() * 3)],
+            `Order ${i + 1}`
+          ]);
+        }
+
+        await this.parallelInsert(
+          db,
+          `INSERT INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes) VALUES (:1, :2, :3, :4, :5)`,
+          orderData,
+          1000
+        );
+        progressCallback({ step: 'Orders inserted', progress: 88 });
+
+        // Get order IDs
+        const ordersResult = await db.execute(`SELECT order_id FROM ${p}orders`);
+        const orderIds = ordersResult.rows.map(o => o.ORDER_ID);
+
+        // PARALLEL INSERT: Order Items
+        progressCallback({ step: 'Inserting order items (parallel)...', progress: 90 });
+        const orderItemData = [];
+        for (const orderId of orderIds) {
+          const itemCount = Math.floor(Math.random() * 3) + 1;
+          for (let k = 0; k < itemCount; k++) {
+            const quantity = Math.floor(Math.random() * 5) + 1;
+            const unitPrice = parseFloat((Math.random() * 200 + 10).toFixed(2));
+            const lineTotal = parseFloat((quantity * unitPrice).toFixed(2));
+            orderItemData.push([
+              orderId,
+              productIds[Math.floor(Math.random() * productIds.length)],
+              quantity,
+              unitPrice,
+              lineTotal
+            ]);
+          }
+        }
+
+        await this.parallelInsert(
+          db,
+          `INSERT INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total) VALUES (:1, :2, :3, :4, :5)`,
+          orderItemData,
+          1000  // Larger batches for executeMany
+        );
+        progressCallback({ step: 'Order items inserted', progress: 95 });
+      }
+
+      // Product reviews
+      progressCallback({ step: 'Adding product reviews...', progress: 97 });
+      if (productIds.length > 0 && customerIds.length > 0) {
+        const reviewCount = Math.floor(Math.min(baseCustomers, baseProducts) * 0.3);
+        const reviewTitles = ['Great product!', 'Good value', 'As expected', 'Could be better', 'Excellent quality'];
+        const reviewData = [];
+
+        for (let i = 0; i < reviewCount; i++) {
+          reviewData.push([
+            productIds[Math.floor(Math.random() * productIds.length)],
+            customerIds[Math.floor(Math.random() * customerIds.length)],
+            Math.floor(Math.random() * 5) + 1,
+            reviewTitles[Math.floor(Math.random() * reviewTitles.length)],
+            'This is a sample review for the product.',
+            Math.random() > 0.3 ? 1 : 0
+          ]);
+        }
+
+        await this.parallelInsert(
+          db,
+          `INSERT INTO ${p}product_reviews (product_id, customer_id, rating, review_title, review_text, is_verified_purchase) VALUES (:1, :2, :3, :4, :5, :6)`,
+          reviewData,
+          500
+        );
+      }
+
+      // RAC Contention tables - populate with hot block rows
+      progressCallback({ step: `Populating ${racTableCount} RAC contention table pairs...`, progress: 98 });
+      console.log(`Populating ${racTableCount} RAC contention table pairs...`);
+
+      // Populate each RAC table pair
+      for (let tableNum = 1; tableNum <= racTableCount; tableNum++) {
+        const suffix = tableNum > 1 ? `_${tableNum}` : '';
+
+        // rac_hotblock: 1000 slots spread across ~50-100 blocks
+        const hotblockData = [];
+        for (let i = 1; i <= 1000; i++) {
+          hotblockData.push([i, 0, 0]);
+        }
+        try {
+          await this.parallelInsert(
+            db,
+            `INSERT INTO ${p}rac_hotblock${suffix} (slot_id, counter, last_instance) VALUES (:1, :2, :3)`,
+            hotblockData,
+            200
+          );
+          console.log(`  rac_hotblock${suffix}: 1000 rows inserted`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) {
+            console.log(`  rac_hotblock${suffix} error:`, err.message);
+          } else {
+            console.log(`  rac_hotblock${suffix}: rows already exist`);
+          }
+        }
+
+        // rac_hotindex: 5000 rows with 20 bucket values (hot index leaf blocks)
+        const hotindexData = [];
+        for (let i = 1; i <= 5000; i++) {
+          hotindexData.push([i, (i % 20) + 1, 0]);  // bucket 1-20
+        }
+        try {
+          await this.parallelInsert(
+            db,
+            `INSERT INTO ${p}rac_hotindex${suffix} (id, bucket, value) VALUES (:1, :2, :3)`,
+            hotindexData,
+            500
+          );
+          console.log(`  rac_hotindex${suffix}: 5000 rows inserted`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00001')) {
+            console.log(`  rac_hotindex${suffix} error:`, err.message);
+          } else {
+            console.log(`  rac_hotindex${suffix}: rows already exist`);
+          }
+        }
+      }
+
+      // Set tables back to LOGGING
+      progressCallback({ step: 'Setting tables to LOGGING mode...', progress: 99 });
+      for (const tableName of this.getTableNames(prefix)) {
+        try {
+          await db.execute(`ALTER TABLE ${tableName} LOGGING`);
+        } catch (err) {
+          // Ignore
+        }
+      }
+
+      progressCallback({ step: 'Data population complete!', progress: 100 });
+    } catch (error) {
+      console.error('Error during data population:', error);
+      throw error;
+    }
   }
 
-  async dropSchema(db) {
+  async dropSchema(db, prefix = '') {
+    const p = prefix ? `${prefix}_` : '';
+
+    // First, find all RAC tables dynamically (could be any number)
+    try {
+      const racTablesResult = await db.execute(`
+        SELECT table_name FROM user_tables
+        WHERE table_name LIKE '${p.toUpperCase()}RAC_HOT%'
+        ORDER BY table_name DESC
+      `);
+
+      // Drop RAC tables first
+      for (const row of racTablesResult.rows) {
+        try {
+          await db.execute(`DROP TABLE ${row.TABLE_NAME} CASCADE CONSTRAINTS PURGE`);
+          console.log(`Dropped table: ${row.TABLE_NAME}`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00942')) {
+            console.log(`Warning dropping ${row.TABLE_NAME}:`, err.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.log('Warning querying RAC tables:', err.message);
+    }
+
+    // Then drop the base tables in order
     const dropOrder = [
       'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
       'customers', 'inventory', 'products', 'categories', 'warehouses',
@@ -687,69 +788,84 @@ class SchemaManager {
 
     for (const table of dropOrder) {
       try {
-        await db.execute(`DROP TABLE ${table} CASCADE CONSTRAINTS PURGE`);
-        console.log(`Dropped table: ${table}`);
+        await db.execute(`DROP TABLE ${p}${table} CASCADE CONSTRAINTS PURGE`);
+        console.log(`Dropped table: ${p}${table}`);
       } catch (err) {
-        if (!err.message.includes('ORA-00942')) { // Table doesn't exist
-          console.log(`Warning dropping ${table}:`, err.message);
+        if (!err.message.includes('ORA-00942')) {
+          console.log(`Warning dropping ${p}${table}:`, err.message);
         }
       }
     }
 
-    // Drop sequences
-    for (const seq of ['order_seq', 'customer_seq']) {
-      try {
-        await db.execute(`DROP SEQUENCE ${seq}`);
-      } catch (err) {
-        // Ignore
-      }
-    }
+    this.schemas.delete(prefix || 'default');
   }
 
-  async getSchemaInfo(db) {
+  async getSchemaInfo(db, prefix = '') {
+    const p = prefix ? `${prefix}_` : '';
     try {
-      const tables = await db.execute(`
-        SELECT table_name, num_rows, blocks, avg_row_len
-        FROM user_tables
-        WHERE table_name IN ('REGIONS', 'COUNTRIES', 'WAREHOUSES', 'CATEGORIES', 'PRODUCTS',
-                             'INVENTORY', 'CUSTOMERS', 'ORDERS', 'ORDER_ITEMS', 'PAYMENTS',
-                             'ORDER_HISTORY', 'PRODUCT_REVIEWS')
-        ORDER BY table_name
-      `);
-
+      const tableNames = this.getTableNames(prefix);
       const counts = {};
-      for (const table of ['regions', 'countries', 'warehouses', 'categories', 'products',
-                           'inventory', 'customers', 'orders', 'order_items', 'payments']) {
+
+      for (const tableName of tableNames) {
         try {
-          const result = await db.execute(`SELECT COUNT(*) as cnt FROM ${table}`);
-          counts[table] = result.rows[0].CNT;
+          const shortName = tableName.replace(p, '');
+          const result = await db.execute(`SELECT COUNT(*) as cnt FROM ${tableName}`);
+          counts[shortName] = result.rows[0].CNT;
         } catch (err) {
-          counts[table] = 0;
+          // Table doesn't exist
         }
       }
 
       const totalSize = await db.execute(`
-        SELECT SUM(bytes)/1024/1024 as size_mb
+        SELECT NVL(SUM(bytes)/1024/1024, 0) as size_mb
         FROM user_segments
-        WHERE segment_name IN ('REGIONS', 'COUNTRIES', 'WAREHOUSES', 'CATEGORIES', 'PRODUCTS',
-                               'INVENTORY', 'CUSTOMERS', 'ORDERS', 'ORDER_ITEMS', 'PAYMENTS',
-                               'ORDER_HISTORY', 'PRODUCT_REVIEWS')
+        WHERE segment_name LIKE '${p.toUpperCase()}%'
       `);
 
+      const schemaMetadata = this.schemas.get(prefix || 'default');
+
       return {
-        tables: tables.rows,
+        prefix,
         counts,
         totalSizeMB: totalSize.rows[0]?.SIZE_MB || 0,
-        schemaExists: tables.rows.length > 0
+        schemaExists: Object.keys(counts).length > 0,
+        compressionType: schemaMetadata?.compressionType || 'none'
       };
     } catch (err) {
       return {
-        tables: [],
+        prefix,
         counts: {},
         totalSizeMB: 0,
         schemaExists: false,
         error: err.message
       };
+    }
+  }
+
+  // Get list of all schemas
+  async listSchemas(db) {
+    try {
+      // Find all schema prefixes by looking for tables ending with _regions
+      const result = await db.execute(`
+        SELECT DISTINCT
+          CASE
+            WHEN table_name = 'REGIONS' THEN ''
+            ELSE SUBSTR(table_name, 1, INSTR(table_name, '_REGIONS') - 1)
+          END as prefix
+        FROM user_tables
+        WHERE table_name LIKE '%REGIONS'
+      `);
+
+      const schemas = [];
+      for (const row of result.rows) {
+        const prefix = row.PREFIX || '';
+        const info = await this.getSchemaInfo(db, prefix);
+        schemas.push(info);
+      }
+
+      return schemas;
+    } catch (err) {
+      return [];
     }
   }
 }
