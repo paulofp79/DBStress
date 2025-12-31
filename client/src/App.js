@@ -10,7 +10,18 @@ import TPSChart from './components/TPSChart';
 import OperationsChart from './components/OperationsChart';
 import GCWaitChart from './components/GCWaitChart';
 
-const API_BASE = 'http://localhost:3001/api';
+// Auto-detect server URL based on where the page is loaded from
+const getServerUrl = () => {
+  // In production, use the same host as the page
+  if (window.location.hostname !== 'localhost') {
+    return `http://${window.location.host}`;
+  }
+  // In development, use localhost:3001
+  return 'http://localhost:3001';
+};
+
+const SERVER_URL = getServerUrl();
+const API_BASE = `${SERVER_URL}/api`;
 
 // Configure axios defaults
 axios.defaults.timeout = 30000; // 30 second timeout
@@ -36,7 +47,7 @@ function App() {
 
   // Initialize socket connection
   useEffect(() => {
-    const newSocket = io('http://localhost:3001');
+    const newSocket = io(SERVER_URL);
 
     newSocket.on('connect', () => {
       console.log('Socket connected');

@@ -1,5 +1,13 @@
 import React, { useState } from 'react';
 
+// Auto-detect server URL
+const getServerUrl = () => {
+  if (window.location.hostname !== 'localhost') {
+    return `http://${window.location.host}`;
+  }
+  return 'http://localhost:3001';
+};
+
 function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
   const [credentials, setCredentials] = useState({
     user: '',
@@ -30,7 +38,7 @@ function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
   const handleTest = async () => {
     setTesting(true);
     try {
-      const response = await fetch('http://localhost:3001/api/db/test-connection', {
+      const response = await fetch(`${getServerUrl()}/api/db/test-connection`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(credentials)
