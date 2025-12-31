@@ -906,6 +906,7 @@ class SchemaManager {
 SET ECHO ON
 SET TIMING ON
 SET SERVEROUTPUT ON SIZE UNLIMITED
+SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
 
 -- ============================================
