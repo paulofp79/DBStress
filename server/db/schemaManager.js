@@ -933,22 +933,13 @@ WHENEVER SQLERROR CONTINUE
     }
 
     script += `\n-- ============================================
--- CREATE TABLES
+-- CREATE TABLES (indexes created after data load for performance)
 -- ============================================\n`;
 
     // Create tables
     for (const [tableName, ddl] of Object.entries(tables)) {
       script += `\n-- Table: ${tableName}\n`;
       script += ddl.trim() + ';\n';
-    }
-
-    script += `\n-- ============================================
--- CREATE INDEXES
--- ============================================\n`;
-
-    // Create indexes
-    for (const indexSql of indexes) {
-      script += indexSql + ';\n';
     }
 
     script += `\n-- ============================================
@@ -1308,6 +1299,16 @@ BEGIN
 END;
 /
 `;
+    }
+
+    // Create indexes AFTER data load for much better performance
+    script += `
+-- ============================================
+-- CREATE INDEXES (after data load for performance)
+-- ============================================
+`;
+    for (const indexSql of indexes) {
+      script += indexSql + ';\n';
     }
 
     script += `
