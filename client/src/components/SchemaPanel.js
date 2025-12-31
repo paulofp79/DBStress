@@ -278,14 +278,54 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
               <input
                 type="range"
                 min="1"
-                max="100"
+                max="1000"
                 value={scaleFactor}
                 onChange={(e) => setScaleFactor(parseInt(e.target.value))}
                 disabled={isCreatingAny}
               />
-              <span className="slider-value">{scaleFactor}x</span>
+              <input
+                type="number"
+                min="1"
+                max="1000"
+                value={scaleFactor}
+                onChange={(e) => setScaleFactor(Math.max(1, Math.min(1000, parseInt(e.target.value) || 1)))}
+                disabled={isCreatingAny}
+                style={{
+                  width: '70px',
+                  padding: '0.25rem',
+                  background: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '4px',
+                  color: 'var(--text-primary)',
+                  fontSize: '0.875rem',
+                  textAlign: 'center',
+                  marginLeft: '0.5rem'
+                }}
+              />
+              <span className="slider-value">x</span>
             </div>
-            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            <div style={{ display: 'flex', gap: '0.25rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+              {[1, 10, 50, 100, 250, 500, 1000].map(val => (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => setScaleFactor(val)}
+                  disabled={isCreatingAny}
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: '0.7rem',
+                    background: scaleFactor === val ? 'var(--accent-primary)' : 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '4px',
+                    color: scaleFactor === val ? 'white' : 'var(--text-primary)',
+                    cursor: isCreatingAny ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {val}x
+                </button>
+              ))}
+            </div>
+            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
               {scaleFactor}x = ~{formatNumber(1000 * scaleFactor)} customers,
               ~{formatNumber(500 * scaleFactor)} products,
               ~{formatNumber(5000 * scaleFactor)} orders
