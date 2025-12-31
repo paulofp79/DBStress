@@ -868,6 +868,389 @@ class SchemaManager {
       return [];
     }
   }
+
+  // Generate SQL script for schema creation (can be run from SQL*Plus)
+  generateScript(options = {}) {
+    const {
+      prefix = '',
+      compressionType = 'none',
+      scaleFactor = 1,
+      racTableCount = 1
+    } = options;
+
+    const p = prefix ? `${prefix}_` : '';
+    const tables = getTableDDL(prefix, compressionType);
+    const indexes = getIndexes(prefix);
+
+    // Add RAC tables
+    for (let i = 1; i <= racTableCount; i++) {
+      const racTables = getRacTableDDL(prefix, compressionType, i);
+      Object.assign(tables, racTables);
+      indexes.push(...getRacIndexes(prefix, i));
+    }
+
+    // Calculate data sizes
+    const baseCustomers = 1000 * scaleFactor;
+    const baseProducts = 500 * scaleFactor;
+    const baseOrders = 5000 * scaleFactor;
+
+    let script = `-- ============================================
+-- DBStress Schema Creation Script
+-- Generated: ${new Date().toISOString()}
+-- Schema Prefix: ${prefix || '(none)'}
+-- Compression: ${COMPRESSION_TYPES[compressionType] || 'none'}
+-- Scale Factor: ${scaleFactor} (${baseOrders} orders, ${baseCustomers} customers, ${baseProducts} products)
+-- RAC Tables: ${racTableCount}
+-- ============================================
+
+SET ECHO ON
+SET TIMING ON
+SET SERVEROUTPUT ON SIZE UNLIMITED
+WHENEVER SQLERROR CONTINUE
+
+-- ============================================
+-- DROP EXISTING TABLES (if any)
+-- ============================================
+`;
+
+    // Drop tables in reverse order
+    const dropOrder = [
+      'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
+      'customers', 'inventory', 'products', 'categories', 'warehouses',
+      'countries', 'regions'
+    ];
+
+    // Add RAC tables to drop
+    for (let i = racTableCount; i >= 1; i--) {
+      const suffix = i > 1 ? `_${i}` : '';
+      script += `DROP TABLE ${p}rac_hotindex${suffix} CASCADE CONSTRAINTS PURGE;\n`;
+      script += `DROP TABLE ${p}rac_hotblock${suffix} CASCADE CONSTRAINTS PURGE;\n`;
+    }
+
+    for (const table of dropOrder) {
+      script += `DROP TABLE ${p}${table} CASCADE CONSTRAINTS PURGE;\n`;
+    }
+
+    script += `\n-- ============================================
+-- CREATE TABLES
+-- ============================================\n`;
+
+    // Create tables
+    for (const [tableName, ddl] of Object.entries(tables)) {
+      script += `\n-- Table: ${tableName}\n`;
+      script += ddl.trim() + ';\n';
+    }
+
+    script += `\n-- ============================================
+-- CREATE INDEXES
+-- ============================================\n`;
+
+    // Create indexes
+    for (const indexSql of indexes) {
+      script += indexSql + ';\n';
+    }
+
+    script += `\n-- ============================================
+-- POPULATE REFERENCE DATA
+-- ============================================\n`;
+
+    // Regions
+    script += `\n-- Regions\n`;
+    for (const region of REGIONS_DATA) {
+      script += `INSERT INTO ${p}regions (region_name) VALUES ('${region}');\n`;
+    }
+    script += `COMMIT;\n`;
+
+    // Countries
+    script += `\n-- Countries\n`;
+    for (const country of COUNTRIES_DATA) {
+      script += `INSERT INTO ${p}countries (country_name, country_code, region_id)
+  SELECT '${country.name}', '${country.code}', region_id FROM ${p}regions WHERE region_name = '${country.region}';\n`;
+    }
+    script += `COMMIT;\n`;
+
+    // Warehouses
+    script += `\n-- Warehouses\n`;
+    const warehouseLocations = ['East Coast DC', 'West Coast DC', 'Central DC', 'European DC', 'Asian DC'];
+    for (let i = 0; i < warehouseLocations.length; i++) {
+      script += `INSERT INTO ${p}warehouses (warehouse_name, location, country_id, capacity)
+  SELECT '${warehouseLocations[i]}', 'Warehouse ${i + 1}', country_id, ${50000 * scaleFactor}
+  FROM ${p}countries WHERE ROWNUM = 1;\n`;
+    }
+    script += `COMMIT;\n`;
+
+    // Categories
+    script += `\n-- Categories\n`;
+    for (const cat of CATEGORIES_DATA) {
+      if (!cat.parent) {
+        script += `INSERT INTO ${p}categories (category_name, description) VALUES ('${cat.name.replace(/'/g, "''")}', '${cat.name} category');\n`;
+      }
+    }
+    script += `COMMIT;\n`;
+
+    for (const cat of CATEGORIES_DATA) {
+      if (cat.parent) {
+        script += `INSERT INTO ${p}categories (category_name, parent_category_id, description)
+  SELECT '${cat.name.replace(/'/g, "''")}', category_id, '${cat.name} category' FROM ${p}categories WHERE category_name = '${cat.parent}';\n`;
+      }
+    }
+    script += `COMMIT;\n`;
+
+    // Generate bulk data using PL/SQL for performance
+    script += `\n-- ============================================
+-- POPULATE BULK DATA (using PL/SQL for performance)
+-- ============================================
+
+-- Products (${baseProducts} rows)
+DECLARE
+  TYPE t_product IS RECORD (
+    product_name VARCHAR2(200),
+    description VARCHAR2(2000),
+    category_id NUMBER,
+    unit_price NUMBER,
+    unit_cost NUMBER,
+    weight NUMBER
+  );
+  TYPE t_products IS TABLE OF t_product;
+  l_products t_products := t_products();
+  l_category_ids DBMS_SQL.NUMBER_TABLE;
+  l_adjectives DBMS_SQL.VARCHAR2_TABLE;
+  l_nouns DBMS_SQL.VARCHAR2_TABLE;
+  l_idx NUMBER;
+BEGIN
+  -- Get category IDs
+  SELECT category_id BULK COLLECT INTO l_category_ids FROM ${p}categories;
+
+  -- Adjectives
+  l_adjectives(1) := 'Premium'; l_adjectives(2) := 'Professional'; l_adjectives(3) := 'Ultra';
+  l_adjectives(4) := 'Advanced'; l_adjectives(5) := 'Classic'; l_adjectives(6) := 'Modern';
+  l_adjectives(7) := 'Deluxe'; l_adjectives(8) := 'Essential'; l_adjectives(9) := 'Elite';
+  l_adjectives(10) := 'Pro';
+
+  -- Nouns
+  l_nouns(1) := 'Laptop'; l_nouns(2) := 'Phone'; l_nouns(3) := 'Tablet';
+  l_nouns(4) := 'Headphones'; l_nouns(5) := 'Speaker'; l_nouns(6) := 'Camera';
+  l_nouns(7) := 'Watch'; l_nouns(8) := 'Keyboard'; l_nouns(9) := 'Mouse';
+  l_nouns(10) := 'Monitor';
+
+  FOR i IN 1..${baseProducts} LOOP
+    INSERT INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight)
+    VALUES (
+      l_adjectives(MOD(i, 10) + 1) || ' ' || l_nouns(MOD(i, 10) + 1) || ' ' || i,
+      'High quality product with premium features',
+      l_category_ids(MOD(i, l_category_ids.COUNT) + 1),
+      ROUND(DBMS_RANDOM.VALUE(10, 500), 2),
+      ROUND(DBMS_RANDOM.VALUE(5, 300), 2),
+      ROUND(DBMS_RANDOM.VALUE(0.5, 10), 2)
+    );
+    IF MOD(i, 1000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Products inserted: ' || i);
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Products complete: ${baseProducts} rows');
+END;
+/
+
+-- Customers (${baseCustomers} rows)
+DECLARE
+  TYPE t_names IS TABLE OF VARCHAR2(100);
+  l_first_names t_names := t_names('James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph', 'Thomas', 'Charles', 'Mary', 'Patricia', 'Jennifer', 'Linda', 'Elizabeth', 'Barbara', 'Susan', 'Jessica', 'Sarah', 'Karen');
+  l_last_names t_names := t_names('Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin');
+  l_cities t_names := t_names('New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose');
+  l_country_ids DBMS_SQL.NUMBER_TABLE;
+  l_fn VARCHAR2(100);
+  l_ln VARCHAR2(100);
+BEGIN
+  SELECT country_id BULK COLLECT INTO l_country_ids FROM ${p}countries;
+
+  FOR i IN 1..${baseCustomers} LOOP
+    l_fn := l_first_names(MOD(i, l_first_names.COUNT) + 1);
+    l_ln := l_last_names(MOD(i, l_last_names.COUNT) + 1);
+
+    INSERT INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
+    VALUES (
+      l_fn, l_ln,
+      LOWER(l_fn) || '.' || LOWER(l_ln) || '.' || i || '@example.com',
+      '+1-' || LPAD(FLOOR(DBMS_RANDOM.VALUE(100, 999)), 3, '0') || '-' || LPAD(FLOOR(DBMS_RANDOM.VALUE(1000, 9999)), 4, '0'),
+      FLOOR(DBMS_RANDOM.VALUE(1, 9999)) || ' Main Street',
+      l_cities(MOD(i, l_cities.COUNT) + 1),
+      'State',
+      LPAD(FLOOR(DBMS_RANDOM.VALUE(10000, 99999)), 5, '0'),
+      l_country_ids(MOD(i, l_country_ids.COUNT) + 1),
+      ROUND(DBMS_RANDOM.VALUE(1000, 10000), 2)
+    );
+    IF MOD(i, 1000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Customers inserted: ' || i);
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Customers complete: ${baseCustomers} rows');
+END;
+/
+
+-- Inventory
+DECLARE
+  l_product_ids DBMS_SQL.NUMBER_TABLE;
+  l_warehouse_ids DBMS_SQL.NUMBER_TABLE;
+BEGIN
+  SELECT product_id BULK COLLECT INTO l_product_ids FROM ${p}products;
+  SELECT warehouse_id BULK COLLECT INTO l_warehouse_ids FROM ${p}warehouses;
+
+  FOR p_idx IN 1..l_product_ids.COUNT LOOP
+    FOR w_idx IN 1..l_warehouse_ids.COUNT LOOP
+      INSERT INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
+      VALUES (
+        l_product_ids(p_idx),
+        l_warehouse_ids(w_idx),
+        FLOOR(DBMS_RANDOM.VALUE(100, 1000)),
+        FLOOR(DBMS_RANDOM.VALUE(0, 50)),
+        FLOOR(DBMS_RANDOM.VALUE(10, 30))
+      );
+    END LOOP;
+    IF MOD(p_idx, 100) = 0 THEN
+      COMMIT;
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Inventory complete');
+END;
+/
+
+-- Orders (${baseOrders} rows)
+DECLARE
+  l_customer_ids DBMS_SQL.NUMBER_TABLE;
+  l_warehouse_ids DBMS_SQL.NUMBER_TABLE;
+  TYPE t_status IS TABLE OF VARCHAR2(20);
+  l_statuses t_status := t_status('PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED');
+  TYPE t_shipping IS TABLE OF VARCHAR2(50);
+  l_shipping t_shipping := t_shipping('Standard', 'Express', 'Overnight');
+BEGIN
+  SELECT customer_id BULK COLLECT INTO l_customer_ids FROM ${p}customers;
+  SELECT warehouse_id BULK COLLECT INTO l_warehouse_ids FROM ${p}warehouses;
+
+  FOR i IN 1..${baseOrders} LOOP
+    INSERT INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes)
+    VALUES (
+      l_customer_ids(MOD(i, l_customer_ids.COUNT) + 1),
+      l_statuses(MOD(i, 5) + 1),
+      l_warehouse_ids(MOD(i, l_warehouse_ids.COUNT) + 1),
+      l_shipping(MOD(i, 3) + 1),
+      'Order ' || i
+    );
+    IF MOD(i, 5000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Orders inserted: ' || i);
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Orders complete: ${baseOrders} rows');
+END;
+/
+
+-- Order Items (1-3 per order)
+DECLARE
+  l_order_ids DBMS_SQL.NUMBER_TABLE;
+  l_product_ids DBMS_SQL.NUMBER_TABLE;
+  l_item_count NUMBER;
+  l_quantity NUMBER;
+  l_unit_price NUMBER;
+  l_counter NUMBER := 0;
+BEGIN
+  SELECT order_id BULK COLLECT INTO l_order_ids FROM ${p}orders;
+  SELECT product_id BULK COLLECT INTO l_product_ids FROM ${p}products;
+
+  FOR o_idx IN 1..l_order_ids.COUNT LOOP
+    l_item_count := FLOOR(DBMS_RANDOM.VALUE(1, 4));
+    FOR j IN 1..l_item_count LOOP
+      l_quantity := FLOOR(DBMS_RANDOM.VALUE(1, 6));
+      l_unit_price := ROUND(DBMS_RANDOM.VALUE(10, 200), 2);
+
+      INSERT INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total)
+      VALUES (
+        l_order_ids(o_idx),
+        l_product_ids(MOD(o_idx + j, l_product_ids.COUNT) + 1),
+        l_quantity,
+        l_unit_price,
+        l_quantity * l_unit_price
+      );
+      l_counter := l_counter + 1;
+    END LOOP;
+    IF MOD(o_idx, 5000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Order items processed for ' || o_idx || ' orders');
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Order items complete: ' || l_counter || ' rows');
+END;
+/
+
+`;
+
+    // RAC hot tables
+    script += `-- ============================================
+-- RAC CONTENTION TABLES
+-- ============================================\n`;
+
+    for (let tableNum = 1; tableNum <= racTableCount; tableNum++) {
+      const suffix = tableNum > 1 ? `_${tableNum}` : '';
+      script += `
+-- RAC Hot Block Table ${tableNum}
+BEGIN
+  FOR i IN 1..1000 LOOP
+    INSERT INTO ${p}rac_hotblock${suffix} (slot_id, counter, last_instance) VALUES (i, 0, 0);
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('rac_hotblock${suffix}: 1000 rows');
+END;
+/
+
+-- RAC Hot Index Table ${tableNum}
+BEGIN
+  FOR i IN 1..5000 LOOP
+    INSERT INTO ${p}rac_hotindex${suffix} (id, bucket, value) VALUES (i, MOD(i, 20) + 1, 0);
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('rac_hotindex${suffix}: 5000 rows');
+END;
+/
+`;
+    }
+
+    script += `
+-- ============================================
+-- SET TABLES TO LOGGING MODE
+-- ============================================
+`;
+
+    for (const tableName of Object.keys(tables)) {
+      script += `ALTER TABLE ${tableName} LOGGING;\n`;
+    }
+
+    script += `
+-- ============================================
+-- GATHER STATISTICS
+-- ============================================
+BEGIN
+  DBMS_STATS.GATHER_SCHEMA_STATS(USER, CASCADE => TRUE, DEGREE => 4);
+END;
+/
+
+PROMPT
+PROMPT ============================================
+PROMPT Schema creation complete!
+PROMPT ============================================
+PROMPT
+
+SET TIMING OFF
+SET ECHO OFF
+`;
+
+    return script;
+  }
 }
 
 module.exports = new SchemaManager();

@@ -123,6 +123,21 @@ app.post('/api/schema/drop', async (req, res) => {
   }
 });
 
+// Generate SQL script for schema creation (download)
+app.post('/api/schema/generate-script', (req, res) => {
+  const { prefix = '', compressionType = 'none', scaleFactor = 1, racTableCount = 1 } = req.body;
+  try {
+    const script = schemaManager.generateScript({ prefix, compressionType, scaleFactor, racTableCount });
+    const filename = `dbstress_schema${prefix ? `_${prefix}` : ''}_${scaleFactor}x.sql`;
+
+    res.setHeader('Content-Type', 'application/sql');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(script);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Get schema info (for a specific schema)
 app.get('/api/schema/info', async (req, res) => {
   const { prefix = '' } = req.query;

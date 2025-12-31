@@ -1,5 +1,13 @@
 import React, { useState, useEffect } from 'react';
 
+// Auto-detect server URL
+const getServerUrl = () => {
+  if (window.location.hostname !== 'localhost') {
+    return `http://${window.location.host}`;
+  }
+  return 'http://localhost:3001';
+};
+
 function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefreshSchemas, socket }) {
   const [scaleFactor, setScaleFactor] = useState(1);
   const parallelism = 10; // Fixed parallelism for batch inserts
@@ -113,6 +121,49 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
     if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
     return num?.toString() || '0';
+  };
+
+  // Download SQL script for a schema
+  const handleDownloadScript = async (schema) => {
+    try {
+      const response = await fetch(`${getServerUrl()}/api/schema/generate-script`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prefix: schema.prefix,
+          compressionType: schema.compressionType || 'none',
+          scaleFactor: scaleFactor,
+          racTableCount: schema.racTableCount || 1
+        })
+      });
+
+      if (!response.ok) throw new Error('Failed to generate script');
+
+      const blob = await response.blob();
+      const filename = `dbstress_schema${schema.prefix ? `_${schema.prefix}` : ''}_${scaleFactor}x.sql`;
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      alert('Failed to download script: ' + err.message);
+    }
+  };
+
+  // Download all enabled schemas as scripts
+  const handleDownloadAllScripts = async () => {
+    const enabledSchemas = schemaDefinitions.filter(s => s.enabled);
+    for (const schema of enabledSchemas) {
+      await handleDownloadScript(schema);
+      // Small delay between downloads
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
   };
 
   if (!dbStatus.connected) {
@@ -363,6 +414,24 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                         />
                       </div>
 
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadScript(schema)}
+                        disabled={isCreatingAny}
+                        title="Download SQL script"
+                        style={{
+                          background: 'var(--accent-primary)',
+                          border: 'none',
+                          color: 'white',
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          fontSize: '0.75rem',
+                          cursor: isCreatingAny ? 'not-allowed' : 'pointer'
+                        }}
+                      >
+                        SQL
+                      </button>
+
                       {schemaDefinitions.length > 1 && (
                         <button
                           type="button"
@@ -393,16 +462,29 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
             </p>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
             <button
               className="btn btn-success"
               onClick={handleCreateAll}
               disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
-              style={{ flex: 1 }}
+              style={{ flex: 1, minWidth: '150px' }}
             >
               {isCreatingAny
                 ? 'Creating...'
                 : `Create ${schemaDefinitions.filter(s => s.enabled).length} Schema(s)`}
+            </button>
+
+            <button
+              className="btn"
+              onClick={handleDownloadAllScripts}
+              disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
+              style={{
+                background: 'var(--accent-primary)',
+                whiteSpace: 'nowrap'
+              }}
+              title="Download SQL scripts to run from SQL*Plus"
+            >
+              Download SQL Scripts
             </button>
 
             {existingSchemas.length > 0 && (
