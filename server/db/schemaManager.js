@@ -1004,23 +1004,21 @@ WHENEVER SQLERROR CONTINUE
 
 -- Products (${baseProducts} rows)
 DECLARE
-  TYPE t_product IS RECORD (
-    product_name VARCHAR2(200),
-    description VARCHAR2(2000),
-    category_id NUMBER,
-    unit_price NUMBER,
-    unit_cost NUMBER,
-    weight NUMBER
-  );
-  TYPE t_products IS TABLE OF t_product;
-  l_products t_products := t_products();
-  l_category_ids DBMS_SQL.NUMBER_TABLE;
-  l_adjectives DBMS_SQL.VARCHAR2_TABLE;
-  l_nouns DBMS_SQL.VARCHAR2_TABLE;
-  l_idx NUMBER;
+  TYPE t_varchar_arr IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_category_ids t_number_arr;
+  l_adjectives t_varchar_arr;
+  l_nouns t_varchar_arr;
+  l_cat_id NUMBER;
+  l_adj VARCHAR2(100);
+  l_noun VARCHAR2(100);
+  l_cat_count NUMBER;
 BEGIN
-  -- Get category IDs
-  SELECT category_id BULK COLLECT INTO l_category_ids FROM ${p}categories;
+  -- Get category IDs into associative array
+  FOR rec IN (SELECT category_id, ROWNUM rn FROM ${p}categories) LOOP
+    l_category_ids(rec.rn) := rec.category_id;
+  END LOOP;
+  l_cat_count := l_category_ids.COUNT;
 
   -- Adjectives
   l_adjectives(1) := 'Premium'; l_adjectives(2) := 'Professional'; l_adjectives(3) := 'Ultra';
@@ -1035,11 +1033,15 @@ BEGIN
   l_nouns(10) := 'Monitor';
 
   FOR i IN 1..${baseProducts} LOOP
+    l_adj := l_adjectives(MOD(i, 10) + 1);
+    l_noun := l_nouns(MOD(i, 10) + 1);
+    l_cat_id := l_category_ids(MOD(i, l_cat_count) + 1);
+
     INSERT INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight)
     VALUES (
-      l_adjectives(MOD(i, 10) + 1) || ' ' || l_nouns(MOD(i, 10) + 1) || ' ' || i,
+      l_adj || ' ' || l_noun || ' ' || i,
       'High quality product with premium features',
-      l_category_ids(MOD(i, l_category_ids.COUNT) + 1),
+      l_cat_id,
       ROUND(DBMS_RANDOM.VALUE(10, 500), 2),
       ROUND(DBMS_RANDOM.VALUE(5, 300), 2),
       ROUND(DBMS_RANDOM.VALUE(0.5, 10), 2)
@@ -1056,19 +1058,53 @@ END;
 
 -- Customers (${baseCustomers} rows)
 DECLARE
-  TYPE t_names IS TABLE OF VARCHAR2(100);
-  l_first_names t_names := t_names('James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph', 'Thomas', 'Charles', 'Mary', 'Patricia', 'Jennifer', 'Linda', 'Elizabeth', 'Barbara', 'Susan', 'Jessica', 'Sarah', 'Karen');
-  l_last_names t_names := t_names('Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin');
-  l_cities t_names := t_names('New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose');
-  l_country_ids DBMS_SQL.NUMBER_TABLE;
+  TYPE t_varchar_arr IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_first_names t_varchar_arr;
+  l_last_names t_varchar_arr;
+  l_cities t_varchar_arr;
+  l_country_ids t_number_arr;
   l_fn VARCHAR2(100);
   l_ln VARCHAR2(100);
+  l_city VARCHAR2(100);
+  l_country_id NUMBER;
+  l_country_count NUMBER;
 BEGIN
-  SELECT country_id BULK COLLECT INTO l_country_ids FROM ${p}countries;
+  -- First names
+  l_first_names(1) := 'James'; l_first_names(2) := 'John'; l_first_names(3) := 'Robert';
+  l_first_names(4) := 'Michael'; l_first_names(5) := 'William'; l_first_names(6) := 'David';
+  l_first_names(7) := 'Richard'; l_first_names(8) := 'Joseph'; l_first_names(9) := 'Thomas';
+  l_first_names(10) := 'Charles'; l_first_names(11) := 'Mary'; l_first_names(12) := 'Patricia';
+  l_first_names(13) := 'Jennifer'; l_first_names(14) := 'Linda'; l_first_names(15) := 'Elizabeth';
+  l_first_names(16) := 'Barbara'; l_first_names(17) := 'Susan'; l_first_names(18) := 'Jessica';
+  l_first_names(19) := 'Sarah'; l_first_names(20) := 'Karen';
+
+  -- Last names
+  l_last_names(1) := 'Smith'; l_last_names(2) := 'Johnson'; l_last_names(3) := 'Williams';
+  l_last_names(4) := 'Brown'; l_last_names(5) := 'Jones'; l_last_names(6) := 'Garcia';
+  l_last_names(7) := 'Miller'; l_last_names(8) := 'Davis'; l_last_names(9) := 'Rodriguez';
+  l_last_names(10) := 'Martinez'; l_last_names(11) := 'Hernandez'; l_last_names(12) := 'Lopez';
+  l_last_names(13) := 'Gonzalez'; l_last_names(14) := 'Wilson'; l_last_names(15) := 'Anderson';
+  l_last_names(16) := 'Thomas'; l_last_names(17) := 'Taylor'; l_last_names(18) := 'Moore';
+  l_last_names(19) := 'Jackson'; l_last_names(20) := 'Martin';
+
+  -- Cities
+  l_cities(1) := 'New York'; l_cities(2) := 'Los Angeles'; l_cities(3) := 'Chicago';
+  l_cities(4) := 'Houston'; l_cities(5) := 'Phoenix'; l_cities(6) := 'Philadelphia';
+  l_cities(7) := 'San Antonio'; l_cities(8) := 'San Diego'; l_cities(9) := 'Dallas';
+  l_cities(10) := 'San Jose';
+
+  -- Get country IDs
+  FOR rec IN (SELECT country_id, ROWNUM rn FROM ${p}countries) LOOP
+    l_country_ids(rec.rn) := rec.country_id;
+  END LOOP;
+  l_country_count := l_country_ids.COUNT;
 
   FOR i IN 1..${baseCustomers} LOOP
-    l_fn := l_first_names(MOD(i, l_first_names.COUNT) + 1);
-    l_ln := l_last_names(MOD(i, l_last_names.COUNT) + 1);
+    l_fn := l_first_names(MOD(i, 20) + 1);
+    l_ln := l_last_names(MOD(i, 20) + 1);
+    l_city := l_cities(MOD(i, 10) + 1);
+    l_country_id := l_country_ids(MOD(i, l_country_count) + 1);
 
     INSERT INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
     VALUES (
@@ -1076,10 +1112,10 @@ BEGIN
       LOWER(l_fn) || '.' || LOWER(l_ln) || '.' || i || '@example.com',
       '+1-' || LPAD(FLOOR(DBMS_RANDOM.VALUE(100, 999)), 3, '0') || '-' || LPAD(FLOOR(DBMS_RANDOM.VALUE(1000, 9999)), 4, '0'),
       FLOOR(DBMS_RANDOM.VALUE(1, 9999)) || ' Main Street',
-      l_cities(MOD(i, l_cities.COUNT) + 1),
+      l_city,
       'State',
       LPAD(FLOOR(DBMS_RANDOM.VALUE(10000, 99999)), 5, '0'),
-      l_country_ids(MOD(i, l_country_ids.COUNT) + 1),
+      l_country_id,
       ROUND(DBMS_RANDOM.VALUE(1000, 10000), 2)
     );
     IF MOD(i, 1000) = 0 THEN
@@ -1094,18 +1130,32 @@ END;
 
 -- Inventory
 DECLARE
-  l_product_ids DBMS_SQL.NUMBER_TABLE;
-  l_warehouse_ids DBMS_SQL.NUMBER_TABLE;
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_product_ids t_number_arr;
+  l_warehouse_ids t_number_arr;
+  l_prod_id NUMBER;
+  l_wh_id NUMBER;
+  l_prod_count NUMBER;
+  l_wh_count NUMBER;
 BEGIN
-  SELECT product_id BULK COLLECT INTO l_product_ids FROM ${p}products;
-  SELECT warehouse_id BULK COLLECT INTO l_warehouse_ids FROM ${p}warehouses;
+  FOR rec IN (SELECT product_id, ROWNUM rn FROM ${p}products) LOOP
+    l_product_ids(rec.rn) := rec.product_id;
+  END LOOP;
+  l_prod_count := l_product_ids.COUNT;
 
-  FOR p_idx IN 1..l_product_ids.COUNT LOOP
-    FOR w_idx IN 1..l_warehouse_ids.COUNT LOOP
+  FOR rec IN (SELECT warehouse_id, ROWNUM rn FROM ${p}warehouses) LOOP
+    l_warehouse_ids(rec.rn) := rec.warehouse_id;
+  END LOOP;
+  l_wh_count := l_warehouse_ids.COUNT;
+
+  FOR p_idx IN 1..l_prod_count LOOP
+    l_prod_id := l_product_ids(p_idx);
+    FOR w_idx IN 1..l_wh_count LOOP
+      l_wh_id := l_warehouse_ids(w_idx);
       INSERT INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
       VALUES (
-        l_product_ids(p_idx),
-        l_warehouse_ids(w_idx),
+        l_prod_id,
+        l_wh_id,
         FLOOR(DBMS_RANDOM.VALUE(100, 1000)),
         FLOOR(DBMS_RANDOM.VALUE(0, 50)),
         FLOOR(DBMS_RANDOM.VALUE(10, 30))
@@ -1122,23 +1172,48 @@ END;
 
 -- Orders (${baseOrders} rows)
 DECLARE
-  l_customer_ids DBMS_SQL.NUMBER_TABLE;
-  l_warehouse_ids DBMS_SQL.NUMBER_TABLE;
-  TYPE t_status IS TABLE OF VARCHAR2(20);
-  l_statuses t_status := t_status('PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED');
-  TYPE t_shipping IS TABLE OF VARCHAR2(50);
-  l_shipping t_shipping := t_shipping('Standard', 'Express', 'Overnight');
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  TYPE t_varchar_arr IS TABLE OF VARCHAR2(50) INDEX BY PLS_INTEGER;
+  l_customer_ids t_number_arr;
+  l_warehouse_ids t_number_arr;
+  l_statuses t_varchar_arr;
+  l_shipping t_varchar_arr;
+  l_cust_id NUMBER;
+  l_wh_id NUMBER;
+  l_status VARCHAR2(20);
+  l_ship VARCHAR2(50);
+  l_cust_count NUMBER;
+  l_wh_count NUMBER;
 BEGIN
-  SELECT customer_id BULK COLLECT INTO l_customer_ids FROM ${p}customers;
-  SELECT warehouse_id BULK COLLECT INTO l_warehouse_ids FROM ${p}warehouses;
+  -- Statuses
+  l_statuses(1) := 'PENDING'; l_statuses(2) := 'PROCESSING'; l_statuses(3) := 'SHIPPED';
+  l_statuses(4) := 'DELIVERED'; l_statuses(5) := 'CANCELLED';
+
+  -- Shipping methods
+  l_shipping(1) := 'Standard'; l_shipping(2) := 'Express'; l_shipping(3) := 'Overnight';
+
+  FOR rec IN (SELECT customer_id, ROWNUM rn FROM ${p}customers) LOOP
+    l_customer_ids(rec.rn) := rec.customer_id;
+  END LOOP;
+  l_cust_count := l_customer_ids.COUNT;
+
+  FOR rec IN (SELECT warehouse_id, ROWNUM rn FROM ${p}warehouses) LOOP
+    l_warehouse_ids(rec.rn) := rec.warehouse_id;
+  END LOOP;
+  l_wh_count := l_warehouse_ids.COUNT;
 
   FOR i IN 1..${baseOrders} LOOP
+    l_cust_id := l_customer_ids(MOD(i, l_cust_count) + 1);
+    l_status := l_statuses(MOD(i, 5) + 1);
+    l_wh_id := l_warehouse_ids(MOD(i, l_wh_count) + 1);
+    l_ship := l_shipping(MOD(i, 3) + 1);
+
     INSERT INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes)
     VALUES (
-      l_customer_ids(MOD(i, l_customer_ids.COUNT) + 1),
-      l_statuses(MOD(i, 5) + 1),
-      l_warehouse_ids(MOD(i, l_warehouse_ids.COUNT) + 1),
-      l_shipping(MOD(i, 3) + 1),
+      l_cust_id,
+      l_status,
+      l_wh_id,
+      l_ship,
       'Order ' || i
     );
     IF MOD(i, 5000) = 0 THEN
@@ -1153,26 +1228,40 @@ END;
 
 -- Order Items (1-3 per order)
 DECLARE
-  l_order_ids DBMS_SQL.NUMBER_TABLE;
-  l_product_ids DBMS_SQL.NUMBER_TABLE;
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_order_ids t_number_arr;
+  l_product_ids t_number_arr;
+  l_order_id NUMBER;
+  l_prod_id NUMBER;
   l_item_count NUMBER;
   l_quantity NUMBER;
   l_unit_price NUMBER;
   l_counter NUMBER := 0;
+  l_order_count NUMBER;
+  l_prod_count NUMBER;
 BEGIN
-  SELECT order_id BULK COLLECT INTO l_order_ids FROM ${p}orders;
-  SELECT product_id BULK COLLECT INTO l_product_ids FROM ${p}products;
+  FOR rec IN (SELECT order_id, ROWNUM rn FROM ${p}orders) LOOP
+    l_order_ids(rec.rn) := rec.order_id;
+  END LOOP;
+  l_order_count := l_order_ids.COUNT;
 
-  FOR o_idx IN 1..l_order_ids.COUNT LOOP
+  FOR rec IN (SELECT product_id, ROWNUM rn FROM ${p}products) LOOP
+    l_product_ids(rec.rn) := rec.product_id;
+  END LOOP;
+  l_prod_count := l_product_ids.COUNT;
+
+  FOR o_idx IN 1..l_order_count LOOP
+    l_order_id := l_order_ids(o_idx);
     l_item_count := FLOOR(DBMS_RANDOM.VALUE(1, 4));
     FOR j IN 1..l_item_count LOOP
       l_quantity := FLOOR(DBMS_RANDOM.VALUE(1, 6));
       l_unit_price := ROUND(DBMS_RANDOM.VALUE(10, 200), 2);
+      l_prod_id := l_product_ids(MOD(o_idx + j, l_prod_count) + 1);
 
       INSERT INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total)
       VALUES (
-        l_order_ids(o_idx),
-        l_product_ids(MOD(o_idx + j, l_product_ids.COUNT) + 1),
+        l_order_id,
+        l_prod_id,
         l_quantity,
         l_unit_price,
         l_quantity * l_unit_price
