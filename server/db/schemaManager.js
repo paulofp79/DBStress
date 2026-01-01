@@ -211,6 +211,45 @@ const getRacIndexes = (prefix, tableNum = 1) => {
   ];
 };
 
+// Generate Index Contention table DDL
+// This table simulates the classic "right-hand index leaf block contention" scenario:
+// - Primary key populated by sequence (ascending values)
+// - All inserts go to the rightmost leaf block of the B-tree index
+// - Causes "buffer busy waits" and "enq: TX - index contention" wait events
+// - Low INITRANS to maximize contention
+const getIndexContentionTableDDL = (prefix, compressionType = 'none', tableCount = 1) => {
+  const p = prefix ? `${prefix}_` : '';
+  const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
+  const tables = {};
+
+  for (let i = 1; i <= tableCount; i++) {
+    const suffix = i > 1 ? `_${i}` : '';
+    // History table with sequence-based PK - classic index contention pattern
+    tables[`${p}txn_history${suffix}`] = `
+      CREATE TABLE ${p}txn_history${suffix} (
+        txn_id NUMBER NOT NULL,
+        session_id NUMBER,
+        instance_id NUMBER,
+        txn_type VARCHAR2(50),
+        txn_amount NUMBER(12,2),
+        txn_status VARCHAR2(20) DEFAULT 'COMPLETED',
+        txn_data VARCHAR2(200),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}pk_txn_history${suffix} PRIMARY KEY (txn_id)
+      )${compressClause} PCTFREE 10 INITRANS 1 MAXTRANS 255 LOGGING`;
+
+    // Sequence for the table - causes ascending key inserts
+    tables[`${p}seq_txn_history${suffix}`] = `
+      CREATE SEQUENCE ${p}seq_txn_history${suffix}
+        START WITH 1
+        INCREMENT BY 1
+        NOCACHE
+        NOORDER`;
+  }
+
+  return tables;
+};
+
 const getIndexes = (prefix) => {
   const p = prefix ? `${prefix}_` : '';
   return [
@@ -287,7 +326,7 @@ class SchemaManager {
     this.schemas = new Map(); // Store schema metadata
   }
 
-  getTableNames(prefix, racTableCount = 1) {
+  getTableNames(prefix, racTableCount = 1, indexContentionTableCount = 1) {
     const p = prefix ? `${prefix}_` : '';
     const baseNames = [
       `${p}regions`, `${p}countries`, `${p}warehouses`, `${p}categories`,
@@ -302,15 +341,22 @@ class SchemaManager {
       baseNames.push(`${p}rac_hotindex${suffix}`);
     }
 
+    // Add Index Contention tables dynamically
+    for (let i = 1; i <= indexContentionTableCount; i++) {
+      const suffix = i > 1 ? `_${i}` : '';
+      baseNames.push(`${p}txn_history${suffix}`);
+    }
+
     return baseNames;
   }
 
   async createSchema(db, options = {}, progressCallback = () => {}) {
     // Support both old boolean 'compress' and new 'compressionType' options
-    const { prefix = '', compress = false, compressionType = null, racTableCount = 1 } = options;
+    const { prefix = '', compress = false, compressionType = null, racTableCount = 1, indexContentionTableCount = 1 } = options;
     const effectiveCompression = compressionType || (compress ? 'advanced' : 'none');
     const tables = getTableDDL(prefix, effectiveCompression);
     const indexes = getIndexes(prefix);
+    const sequences = []; // Track sequences separately
 
     // Add RAC tables and indexes dynamically
     for (let i = 1; i <= racTableCount; i++) {
@@ -319,13 +365,24 @@ class SchemaManager {
       indexes.push(...getRacIndexes(prefix, i));
     }
 
+    // Add Index Contention tables and sequences
+    const indexContentionObjects = getIndexContentionTableDDL(prefix, effectiveCompression, indexContentionTableCount);
+    for (const [name, ddl] of Object.entries(indexContentionObjects)) {
+      if (name.includes('seq_')) {
+        sequences.push({ name, ddl });
+      } else {
+        tables[name] = ddl;
+      }
+    }
+
     const tableNames = Object.keys(tables);
-    const totalSteps = tableNames.length + indexes.length;
+    const totalSteps = tableNames.length + indexes.length + sequences.length;
     let currentStep = 0;
 
     const compressionLabel = COMPRESSION_TYPES[effectiveCompression] || 'no compression';
     const racLabel = racTableCount > 1 ? `, ${racTableCount} RAC tables` : '';
-    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel}${racLabel})...`, progress: 0 });
+    const idxLabel = indexContentionTableCount > 0 ? `, ${indexContentionTableCount} index contention tables` : '';
+    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel}${racLabel}${idxLabel})...`, progress: 0 });
 
     // Create tables in order
     for (const tableName of tableNames) {
@@ -355,8 +412,22 @@ class SchemaManager {
       progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
     }
 
-    // Store schema metadata including racTableCount
-    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, racTableCount, createdAt: new Date() });
+    // Create sequences for index contention tables
+    for (const seq of sequences) {
+      try {
+        await db.execute(seq.ddl);
+        console.log(`Created sequence: ${seq.name}`);
+      } catch (err) {
+        if (!err.message.includes('ORA-00955')) {
+          console.log(`Sequence warning for ${seq.name}:`, err.message);
+        }
+      }
+      currentStep++;
+      progressCallback({ step: `Creating sequence ${seq.name}...`, progress: Math.floor((currentStep / totalSteps) * 50) });
+    }
+
+    // Store schema metadata including racTableCount and indexContentionTableCount
+    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, racTableCount, indexContentionTableCount, createdAt: new Date() });
   }
 
   // Parallel batch insert helper - uses executeMany for much better performance
@@ -779,6 +850,46 @@ class SchemaManager {
       console.log('Warning querying RAC tables:', err.message);
     }
 
+    // Drop Index Contention tables and sequences dynamically
+    try {
+      const txnTablesResult = await db.execute(`
+        SELECT table_name FROM user_tables
+        WHERE table_name LIKE '${p.toUpperCase()}TXN_HISTORY%'
+        ORDER BY table_name DESC
+      `);
+
+      for (const row of txnTablesResult.rows) {
+        try {
+          await db.execute(`DROP TABLE ${row.TABLE_NAME} CASCADE CONSTRAINTS PURGE`);
+          console.log(`Dropped table: ${row.TABLE_NAME}`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00942')) {
+            console.log(`Warning dropping ${row.TABLE_NAME}:`, err.message);
+          }
+        }
+      }
+
+      // Drop corresponding sequences
+      const seqResult = await db.execute(`
+        SELECT sequence_name FROM user_sequences
+        WHERE sequence_name LIKE '${p.toUpperCase()}SEQ_TXN_HISTORY%'
+        ORDER BY sequence_name DESC
+      `);
+
+      for (const row of seqResult.rows) {
+        try {
+          await db.execute(`DROP SEQUENCE ${row.SEQUENCE_NAME}`);
+          console.log(`Dropped sequence: ${row.SEQUENCE_NAME}`);
+        } catch (err) {
+          if (!err.message.includes('ORA-02289')) {
+            console.log(`Warning dropping sequence ${row.SEQUENCE_NAME}:`, err.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.log('Warning querying index contention tables:', err.message);
+    }
+
     // Then drop the base tables in order
     const dropOrder = [
       'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
@@ -875,7 +986,8 @@ class SchemaManager {
       prefix = '',
       compressionType = 'none',
       scaleFactor = 1,
-      racTableCount = 1
+      racTableCount = 1,
+      indexContentionTableCount = 1
     } = options;
 
     const p = prefix ? `${prefix}_` : '';
@@ -887,6 +999,17 @@ class SchemaManager {
       const racTables = getRacTableDDL(prefix, compressionType, i);
       Object.assign(tables, racTables);
       indexes.push(...getRacIndexes(prefix, i));
+    }
+
+    // Add Index Contention tables and sequences
+    const sequences = [];
+    const indexContentionObjects = getIndexContentionTableDDL(prefix, compressionType, indexContentionTableCount);
+    for (const [name, ddl] of Object.entries(indexContentionObjects)) {
+      if (name.includes('seq_')) {
+        sequences.push({ name, ddl });
+      } else {
+        tables[name] = ddl;
+      }
     }
 
     // Calculate data sizes
@@ -901,6 +1024,7 @@ class SchemaManager {
 -- Compression: ${COMPRESSION_TYPES[compressionType] || 'none'}
 -- Scale Factor: ${scaleFactor} (${baseOrders} orders, ${baseCustomers} customers, ${baseProducts} products)
 -- RAC Tables: ${racTableCount}
+-- Index Contention Tables: ${indexContentionTableCount}
 -- ============================================
 
 SET ECHO ON
@@ -928,6 +1052,13 @@ WHENEVER SQLERROR CONTINUE
       script += `DROP TABLE ${p}rac_hotblock${suffix} CASCADE CONSTRAINTS PURGE;\n`;
     }
 
+    // Add Index Contention tables and sequences to drop
+    for (let i = indexContentionTableCount; i >= 1; i--) {
+      const suffix = i > 1 ? `_${i}` : '';
+      script += `DROP TABLE ${p}txn_history${suffix} CASCADE CONSTRAINTS PURGE;\n`;
+      script += `DROP SEQUENCE ${p}seq_txn_history${suffix};\n`;
+    }
+
     for (const table of dropOrder) {
       script += `DROP TABLE ${p}${table} CASCADE CONSTRAINTS PURGE;\n`;
     }
@@ -940,6 +1071,17 @@ WHENEVER SQLERROR CONTINUE
     for (const [tableName, ddl] of Object.entries(tables)) {
       script += `\n-- Table: ${tableName}\n`;
       script += ddl.trim() + ';\n';
+    }
+
+    // Create sequences for index contention tables
+    if (sequences.length > 0) {
+      script += `\n-- ============================================
+-- CREATE SEQUENCES (for index contention)
+-- ============================================\n`;
+      for (const seq of sequences) {
+        script += `\n-- Sequence: ${seq.name}\n`;
+        script += seq.ddl.trim() + ';\n';
+      }
     }
 
     script += `\n-- ============================================

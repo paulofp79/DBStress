@@ -27,8 +27,8 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
 
   // Batch schema definitions - create multiple schemas at once
   const [schemaDefinitions, setSchemaDefinitions] = useState([
-    { prefix: 'nocomp', compressionType: 'none', racTableCount: 1, enabled: true },
-    { prefix: 'rowadv', compressionType: 'advanced', racTableCount: 1, enabled: true }
+    { prefix: 'nocomp', compressionType: 'none', racTableCount: 1, indexContentionTableCount: 1, enabled: true },
+    { prefix: 'rowadv', compressionType: 'advanced', racTableCount: 1, indexContentionTableCount: 1, enabled: true }
   ]);
 
   useEffect(() => {
@@ -71,6 +71,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
         prefix: schema.prefix,
         compressionType: schema.compressionType,
         racTableCount: schema.racTableCount || 1,
+        indexContentionTableCount: schema.indexContentionTableCount || 1,
         parallelism
       });
     });
@@ -108,7 +109,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
   const addSchemaDefinition = () => {
     setSchemaDefinitions(prev => [
       ...prev,
-      { prefix: `schema${prev.length + 1}`, compressionType: 'none', racTableCount: 1, enabled: true }
+      { prefix: `schema${prev.length + 1}`, compressionType: 'none', racTableCount: 1, indexContentionTableCount: 1, enabled: true }
     ]);
   };
 
@@ -133,7 +134,8 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
           prefix: schema.prefix,
           compressionType: schema.compressionType || 'none',
           scaleFactor: scaleFactor,
-          racTableCount: schema.racTableCount || 1
+          racTableCount: schema.racTableCount || 1,
+          indexContentionTableCount: schema.indexContentionTableCount || 1
         })
       });
 
@@ -432,7 +434,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
                         <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                          RAC Tables:
+                          RAC:
                         </label>
                         <input
                           type="number"
@@ -441,6 +443,32 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                           value={schema.racTableCount || 1}
                           onChange={(e) => updateSchemaDefinition(index, 'racTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
                           disabled={isCreatingAny}
+                          title="Number of RAC hot table pairs"
+                          style={{
+                            width: '50px',
+                            padding: '0.4rem',
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border)',
+                            borderRadius: '4px',
+                            color: 'var(--text-primary)',
+                            fontSize: '0.75rem',
+                            textAlign: 'center'
+                          }}
+                        />
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                          Idx:
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={schema.indexContentionTableCount || 1}
+                          onChange={(e) => updateSchemaDefinition(index, 'indexContentionTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                          disabled={isCreatingAny}
+                          title="Number of Index Contention tables (txn_history)"
                           style={{
                             width: '50px',
                             padding: '0.4rem',
