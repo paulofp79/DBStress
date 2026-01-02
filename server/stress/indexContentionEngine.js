@@ -175,14 +175,23 @@ class IndexContentionEngine {
             break;
 
           case 'hash_partition':
-            // Hash partitioned index - helps single instance
-            // Note: This requires Enterprise Edition and partitioning
+            // Hash partitioned index - try GLOBAL HASH partitioned unique index (requires partitioning / EE)
             try {
-              await db.execute(`ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)`);
-              // Try to create hash partitioned index (may fail without EE)
-              console.log(`Table ${tableName}: Standard PK (hash partition requires EE)`);
+              const partitions = this.config.hashPartitions || 4;
+              await db.execute(`
+                ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)
+                USING INDEX (CREATE UNIQUE INDEX ${pkName}_idx ON ${tableName}(txn_id)
+                  GLOBAL PARTITION BY HASH (txn_id) PARTITIONS ${partitions})
+              `);
+              console.log(`Table ${tableName}: Created PK with GLOBAL HASH partitioned index (${partitions} partitions)`);
             } catch (err) {
-              console.log(`Table ${tableName}: Using standard PK (partitioning not available)`);
+              // Fallback to standard PK without partitioning
+              try {
+                await db.execute(`ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)`);
+                console.log(`Table ${tableName}: Using standard PK (partitioning not available)`);
+              } catch (e) {
+                console.log(`Table ${tableName}: Failed to create PK: ${e.message}`);
+              }
             }
             break;
 
