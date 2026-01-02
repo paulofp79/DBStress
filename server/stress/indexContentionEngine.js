@@ -29,6 +29,8 @@ class IndexContentionEngine {
     this.statsInterval = null;
     this.waitEventsInterval = null;
     this._queryingOracle = false;  // Guard against overlapping Oracle queries only
+    this._lastStatsTime = Date.now();
+    this._lastOracleQueryTime = Date.now();
   }
 
   async start(db, config, io) {
@@ -77,6 +79,11 @@ class IndexContentionEngine {
       oracleCommits: initialOracleCommits
     };
 
+    // Reset timestamps for TPS calculation
+    this._lastStatsTime = Date.now();
+    this._lastOracleQueryTime = Date.now();
+    this._queryingOracle = false;
+
     console.log(`Starting Index Contention Demo with ${this.config.threads} threads, index type: ${this.config.indexType}`);
 
     // Emit running status immediately so client shows Stop button
@@ -97,7 +104,7 @@ class IndexContentionEngine {
     }
 
     // Start stats reporting (every second)
-    this.statsInterval = setInterval(() => this.reportStats().catch(e => console.log('Stats error:', e.message)), 1000);
+    this.statsInterval = setInterval(() => this.reportStats(), 1000);
 
     // Start wait events monitoring (every 2 seconds)
     this.waitEventsInterval = setInterval(() => this.reportWaitEvents(db), 2000);
@@ -495,30 +502,21 @@ class IndexContentionEngine {
     }
   }
 
-  async reportStats() {
-    // TPS from App (application counter) - always calculate, no blocking
+  reportStats() {
+    const now = Date.now();
+    const elapsedSeconds = (now - this._lastStatsTime) / 1000;
+    this._lastStatsTime = now;
+
+    // TPS from App (application counter)
     const currentTotalTxns = this.stats.totalTransactions;
-    const tpsApp = currentTotalTxns - this.previousStats.totalTransactions;
+    const txnDelta = currentTotalTxns - this.previousStats.totalTransactions;
+    // Calculate TPS based on actual elapsed time (avoid division by zero)
+    const tpsApp = elapsedSeconds > 0 ? Math.round(txnDelta / elapsedSeconds) : 0;
     this.stats.tpsApp = tpsApp;
     this.previousStats.totalTransactions = currentTotalTxns;
 
-    // TPS from Oracle - only query if not already querying
-    let tpsOracle = this.stats.tpsOracle; // Use last known value by default
-    if (!this._queryingOracle && this.db) {
-      this._queryingOracle = true;
-      try {
-        const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
-        const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
-        tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
-        this.stats.oracleCommits = currentOracleCommits;
-        this.previousStats.oracleCommits = currentOracleCommits;
-        this.stats.tpsOracle = tpsOracle;
-      } catch (e) {
-        // Silently fail - might not have permissions
-      } finally {
-        this._queryingOracle = false;
-      }
-    }
+    // TPS from Oracle - query async but don't block stats emission
+    this.updateOracleTps();
 
     const avgResponseTime = this.stats.responseTimes.length > 0
       ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
@@ -526,7 +524,7 @@ class IndexContentionEngine {
 
     const metrics = {
       tpsApp,
-      tpsOracle,
+      tpsOracle: this.stats.tpsOracle,
       avgResponseTime,
       totalTransactions: this.stats.totalTransactions,
       errors: this.stats.errors
@@ -534,6 +532,32 @@ class IndexContentionEngine {
 
     if (this.io) {
       this.io.emit('index-contention-metrics', metrics);
+    }
+  }
+
+  async updateOracleTps() {
+    if (this._queryingOracle || !this.db) return;
+
+    this._queryingOracle = true;
+    const queryStartTime = Date.now();
+
+    try {
+      const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
+      const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
+      const elapsedSeconds = (Date.now() - this._lastOracleQueryTime) / 1000;
+      this._lastOracleQueryTime = Date.now();
+
+      const commitDelta = currentOracleCommits - this.previousStats.oracleCommits;
+      // Calculate TPS based on actual elapsed time
+      const tpsOracle = elapsedSeconds > 0 ? Math.round(commitDelta / elapsedSeconds) : 0;
+
+      this.stats.oracleCommits = currentOracleCommits;
+      this.previousStats.oracleCommits = currentOracleCommits;
+      this.stats.tpsOracle = tpsOracle;
+    } catch (e) {
+      // Silently fail - might not have permissions
+    } finally {
+      this._queryingOracle = false;
     }
   }
 
