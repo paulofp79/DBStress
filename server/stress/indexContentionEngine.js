@@ -159,6 +159,14 @@ class IndexContentionEngine {
           // Constraint might not exist
         }
 
+        // Truncate table to remove any duplicate data from previous runs
+        try {
+          await db.execute(`TRUNCATE TABLE ${tableName}`);
+          console.log(`Table ${tableName}: Truncated`);
+        } catch (err) {
+          // Table might not exist or other issue
+        }
+
         // Create new index based on type
         switch (indexType) {
           case 'none_no_seq':
