@@ -18,7 +18,7 @@ class IndexContentionEngine {
       errors: 0,
       responseTimes: [],  // Rolling window for avg calculation
       tpsApp: 0,           // TPS from application counter
-      tpsOracle: 0,        // TPS from Oracle V$SYSSTAT
+      tpsOracle: 0,        // TPS from Oracle GV$SYSSTAT (all RAC instances)
       oracleCommits: 0     // Current Oracle user commits value
     };
 
@@ -52,11 +52,11 @@ class IndexContentionEngine {
     this.db = db;  // Store db reference for Oracle queries
     this.isRunning = true;
 
-    // Get initial Oracle commits value
+    // Get initial Oracle commits value (SUM across all RAC instances)
     let initialOracleCommits = 0;
     try {
-      const result = await db.execute(`SELECT value FROM V$SYSSTAT WHERE name = 'user commits'`);
-      initialOracleCommits = parseInt(result.rows[0]?.VALUE) || 0;
+      const result = await db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
+      initialOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
     } catch (e) {
       console.log('Could not get initial Oracle commits:', e.message);
     }
@@ -504,12 +504,12 @@ class IndexContentionEngine {
     const tpsApp = this.stats.totalTransactions - this.previousStats.totalTransactions;
     this.stats.tpsApp = tpsApp;
 
-    // TPS from Oracle (V$SYSSTAT user commits)
+    // TPS from Oracle (GV$SYSSTAT user commits - SUM across all RAC instances)
     let tpsOracle = 0;
     try {
       if (this.db) {
-        const result = await this.db.execute(`SELECT value FROM V$SYSSTAT WHERE name = 'user commits'`);
-        const currentOracleCommits = parseInt(result.rows[0]?.VALUE) || 0;
+        const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
+        const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
         tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
         this.stats.oracleCommits = currentOracleCommits;
         this.previousStats.oracleCommits = currentOracleCommits;
