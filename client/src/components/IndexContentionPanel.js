@@ -47,9 +47,10 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
   // Configuration state
   const [config, setConfig] = useState({
     threads: 50,
-    thinkTime: 10,
+    thinkTime: 0,
     indexType: 'standard',
-    tableCount: 1
+    tableCount: 1,
+    rowsPerCommit: 10
   });
 
   // Runtime state
@@ -528,6 +529,31 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
               marginTop: '0.25rem'
             }}
           />
+        </div>
+
+        {/* Rows per Commit */}
+        <div className="form-group">
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Rows per Commit:</label>
+          <input
+            type="number"
+            min="1"
+            max="1000"
+            value={config.rowsPerCommit}
+            onChange={(e) => setConfig(prev => ({ ...prev, rowsPerCommit: Math.max(1, Math.min(1000, parseInt(e.target.value) || 1)) }))}
+            disabled={isRunning}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              background: 'var(--bg-primary)',
+              border: '1px solid var(--border)',
+              borderRadius: '4px',
+              color: 'var(--text-primary)',
+              marginTop: '0.25rem'
+            }}
+          />
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            Higher = less commit overhead, more visible index contention
+          </div>
         </div>
 
         {/* Index Type Selector - Key feature */}

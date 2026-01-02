@@ -37,9 +37,10 @@ class IndexContentionEngine {
 
     this.config = {
       threads: config.threads || 50,
-      thinkTime: config.thinkTime || 10,
+      thinkTime: config.thinkTime || 0,
       indexType: config.indexType || 'standard',
       tableCount: config.tableCount || 1,
+      rowsPerCommit: config.rowsPerCommit || 10,
       // Sequence cache size (0 = NOCACHE), configurable at start or runtime
       sequenceCache: (config.sequenceCache !== undefined ? config.sequenceCache : 0),
       // Default hash partitions for hash_partition index type
@@ -404,6 +405,7 @@ class IndexContentionEngine {
 
   async runWorker(workerId) {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+    const txnTypes = ['PURCHASE', 'REFUND', 'TRANSFER', 'ADJUSTMENT'];
 
     while (this.isRunning) {
       if (!this.pool) {
@@ -413,45 +415,49 @@ class IndexContentionEngine {
 
       let connection;
       const startTime = Date.now();
+      const rowsPerCommit = this.config.rowsPerCommit || 1;
 
       try {
         connection = await this.pool.getConnection();
 
-        // Select a random table
-        const tableNum = Math.floor(Math.random() * this.config.tableCount) + 1;
-        const suffix = tableNum > 1 ? `_${tableNum}` : '';
+        // Perform multiple inserts before commit (batch insert)
+        for (let row = 0; row < rowsPerCommit && this.isRunning; row++) {
+          // Select a random table
+          const tableNum = Math.floor(Math.random() * this.config.tableCount) + 1;
+          const suffix = tableNum > 1 ? `_${tableNum}` : '';
 
-        // Perform insert (use workerId as session_id to avoid extra query overhead)
-        const txnTypes = ['PURCHASE', 'REFUND', 'TRANSFER', 'ADJUSTMENT'];
-        const txnType = txnTypes[Math.floor(Math.random() * txnTypes.length)];
-        const txnAmount = parseFloat((Math.random() * 10000).toFixed(2));
+          const txnType = txnTypes[Math.floor(Math.random() * txnTypes.length)];
+          const txnAmount = parseFloat((Math.random() * 10000).toFixed(2));
 
-        if (this.config.indexType === 'none_no_seq') {
-          // Use random ID - no sequence contention
-          await connection.execute(
-            `INSERT INTO ${p}txn_history${suffix}
-               (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
-             VALUES
-               (TRUNC(DBMS_RANDOM.VALUE(1, 999999999999)), :1, 1, :2, :3, :4)`,
-            [workerId, txnType, txnAmount, `Worker ${workerId}`]
-          );
-        } else {
-          // Use sequence
-          await connection.execute(
-            `INSERT INTO ${p}txn_history${suffix}
-               (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
-             VALUES
-               (${p}seq_txn_history${suffix}.NEXTVAL, :1, 1, :2, :3, :4)`,
-            [workerId, txnType, txnAmount, `Worker ${workerId}`]
-          );
+          if (this.config.indexType === 'none_no_seq') {
+            // Use random ID - no sequence contention
+            await connection.execute(
+              `INSERT INTO ${p}txn_history${suffix}
+                 (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
+               VALUES
+                 (TRUNC(DBMS_RANDOM.VALUE(1, 999999999999)), :1, 1, :2, :3, :4)`,
+              [workerId, txnType, txnAmount, `Worker ${workerId}`]
+            );
+          } else {
+            // Use sequence
+            await connection.execute(
+              `INSERT INTO ${p}txn_history${suffix}
+                 (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
+               VALUES
+                 (${p}seq_txn_history${suffix}.NEXTVAL, :1, 1, :2, :3, :4)`,
+              [workerId, txnType, txnAmount, `Worker ${workerId}`]
+            );
+          }
+
+          // Count each row as a transaction
+          this.stats.totalTransactions++;
         }
 
         await connection.commit();
 
-        // Record success
+        // Record response time for the batch
         const responseTime = Date.now() - startTime;
-        this.stats.totalTransactions++;
-        this.stats.responseTimes.push(responseTime);
+        this.stats.responseTimes.push(responseTime / rowsPerCommit); // Avg per row
 
         // Keep only last 1000 response times for average
         if (this.stats.responseTimes.length > 1000) {
