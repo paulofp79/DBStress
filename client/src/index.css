@@ -8,11 +8,13 @@
   --bg-primary: #0f0f1a;
   --bg-secondary: #1a1a2e;
   --bg-tertiary: #252542;
+  --surface: #1e1e32;
+  --border: #2a2a45;
   --text-primary: #ffffff;
   --text-secondary: #a0a0b0;
   --text-muted: #6b6b80;
-  --accent-primary: #6366f1;
-  --accent-secondary: #8b5cf6;
+  --accent-primary: #0ea5e9;
+  --accent-secondary: #06b6d4;
   --accent-success: #10b981;
   --accent-warning: #f59e0b;
   --accent-danger: #ef4444;
@@ -133,7 +135,7 @@ body {
 .form-group select:focus {
   outline: none;
   border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
 }
 
 .form-group input::placeholder {
@@ -172,7 +174,7 @@ body {
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #5558e3;
+  background: #0284c7;
 }
 
 .btn-success {
@@ -191,6 +193,15 @@ body {
 
 .btn-danger:hover:not(:disabled) {
   background: #dc3535;
+}
+
+.btn-warning {
+  background: var(--accent-warning);
+  color: white;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: #d97706;
 }
 
 .btn-secondary {
@@ -351,7 +362,7 @@ body {
 
 .progress-bar .fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+  background: linear-gradient(90deg, var(--accent-primary), var(--accent-success));
   border-radius: 4px;
   transition: width 0.3s;
 }
@@ -390,7 +401,7 @@ body {
 
 .tab.active {
   color: var(--accent-primary);
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(14, 165, 233, 0.1);
 }
 
 /* Alerts */

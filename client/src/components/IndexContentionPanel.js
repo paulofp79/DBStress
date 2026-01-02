@@ -191,6 +191,9 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
       setResponseTimeHistory([]);
       setLabels([]);
 
+      // Set running immediately for UI responsiveness
+      setIsRunning(true);
+
       const response = await fetch(`${API_BASE}/index-contention/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -200,14 +203,16 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
         })
       });
 
+      const data = await response.json();
+
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to start');
+        setIsRunning(false);
+        throw new Error(data.error || 'Failed to start');
       }
 
-      setIsRunning(true);
       setStatusMessage('Running...');
     } catch (err) {
+      setIsRunning(false);
       setStatusMessage(`Error: ${err.message}`);
     }
   };
@@ -215,10 +220,20 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
   const handleStop = async () => {
     try {
       setStatusMessage('Stopping...');
-      await fetch(`${API_BASE}/index-contention/stop`, { method: 'POST' });
+
+      const response = await fetch(`${API_BASE}/index-contention/stop`, { method: 'POST' });
+      const data = await response.json();
+
       setIsRunning(false);
       setStatusMessage('Stopped');
+
+      // Stop uptime timer
+      if (uptimeRef.current) {
+        clearInterval(uptimeRef.current);
+        uptimeRef.current = null;
+      }
     } catch (err) {
+      setIsRunning(false);
       setStatusMessage(`Error: ${err.message}`);
     }
   };
