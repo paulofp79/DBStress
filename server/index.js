@@ -8,6 +8,7 @@ require('dotenv').config();
 const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
 const stressEngine = require('./stress/engine');
+const indexContentionEngine = require('./stress/indexContentionEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -283,6 +284,54 @@ app.put('/api/stress/config', async (req, res) => {
   }
 });
 
+// ============================================
+// Index Contention Demo API Routes
+// ============================================
+
+// Start index contention demo
+app.post('/api/index-contention/start', async (req, res) => {
+  const config = req.body;
+  try {
+    await indexContentionEngine.start(oracleDb, config, io);
+    res.json({ success: true, message: 'Index Contention demo started' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop index contention demo
+app.post('/api/index-contention/stop', async (req, res) => {
+  try {
+    const stats = await indexContentionEngine.stop();
+    res.json({ success: true, message: 'Index Contention demo stopped', stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Change index type while running
+app.post('/api/index-contention/change-index', async (req, res) => {
+  const { indexType, schemaPrefix } = req.body;
+  try {
+    if (!indexContentionEngine.isRunning) {
+      return res.status(400).json({ success: false, error: 'Demo not running' });
+    }
+    await indexContentionEngine.changeIndex(oracleDb, indexType);
+    res.json({ success: true, message: `Index type changed to ${indexType}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get index contention demo status
+app.get('/api/index-contention/status', (req, res) => {
+  res.json({
+    isRunning: indexContentionEngine.isRunning,
+    config: indexContentionEngine.config,
+    stats: indexContentionEngine.stats
+  });
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -311,6 +360,7 @@ server.listen(PORT, () => {
 process.on('SIGTERM', async () => {
   console.log('Shutting down...');
   stressEngine.stop();
+  indexContentionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
@@ -319,6 +369,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('Shutting down...');
   stressEngine.stop();
+  indexContentionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
