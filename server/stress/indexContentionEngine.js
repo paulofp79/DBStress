@@ -55,6 +55,9 @@ class IndexContentionEngine {
     // Create connection pool
     this.pool = await db.createStressPool(this.config.threads + 5);
 
+    // Create tables if they don't exist
+    await this.createTables(db);
+
     // Ensure tables and index exist with correct type
     await this.setupIndex(db);
 
@@ -70,6 +73,62 @@ class IndexContentionEngine {
     this.waitEventsInterval = setInterval(() => this.reportWaitEvents(db), 2000);
 
     this.io?.emit('index-contention-status', { running: true, message: 'Running...' });
+  }
+
+  async createTables(db) {
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+
+    this.io?.emit('index-contention-status', { message: 'Creating tables...' });
+
+    try {
+      for (let i = 1; i <= this.config.tableCount; i++) {
+        const suffix = i > 1 ? `_${i}` : '';
+        const tableName = `${p}txn_history${suffix}`;
+        const seqName = `${p}seq_txn_history${suffix}`;
+
+        // Create sequence if not exists (NOCACHE NOORDER for maximum contention)
+        try {
+          await db.execute(`
+            CREATE SEQUENCE ${seqName}
+              START WITH 1
+              INCREMENT BY 1
+              NOCACHE
+              NOORDER
+          `);
+          console.log(`Created sequence: ${seqName}`);
+        } catch (err) {
+          if (err.errorNum !== 955) { // ORA-00955: name is already used
+            console.log(`Sequence ${seqName} might already exist or error: ${err.message}`);
+          }
+        }
+
+        // Create table if not exists
+        try {
+          await db.execute(`
+            CREATE TABLE ${tableName} (
+              txn_id        NUMBER NOT NULL,
+              session_id    NUMBER,
+              instance_id   NUMBER,
+              txn_type      VARCHAR2(20),
+              txn_amount    NUMBER(12,2),
+              txn_data      VARCHAR2(100),
+              created_at    TIMESTAMP DEFAULT SYSTIMESTAMP
+            )
+          `);
+          console.log(`Created table: ${tableName}`);
+        } catch (err) {
+          if (err.errorNum !== 955) { // ORA-00955: name is already used
+            console.log(`Table ${tableName} might already exist or error: ${err.message}`);
+          }
+        }
+      }
+
+      this.io?.emit('index-contention-status', { message: 'Tables ready' });
+    } catch (err) {
+      console.error('Error creating tables:', err);
+      this.io?.emit('index-contention-status', { message: `Table creation error: ${err.message}` });
+      throw err;
+    }
   }
 
   async setupIndex(db) {
