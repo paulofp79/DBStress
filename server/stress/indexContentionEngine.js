@@ -28,6 +28,7 @@ class IndexContentionEngine {
     };
     this.statsInterval = null;
     this.waitEventsInterval = null;
+    this._reportingStats = false;  // Guard against overlapping reportStats calls
   }
 
   async start(db, config, io) {
@@ -492,41 +493,49 @@ class IndexContentionEngine {
   }
 
   async reportStats() {
-    // TPS from App (application counter)
-    const tpsApp = this.stats.totalTransactions - this.previousStats.totalTransactions;
-    this.stats.tpsApp = tpsApp;
+    // Prevent overlapping calls
+    if (this._reportingStats) return;
+    this._reportingStats = true;
 
-    // TPS from Oracle (GV$SYSSTAT user commits - SUM across all RAC instances)
-    let tpsOracle = 0;
     try {
-      if (this.db) {
-        const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
-        const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
-        tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
-        this.stats.oracleCommits = currentOracleCommits;
-        this.previousStats.oracleCommits = currentOracleCommits;
+      // TPS from App (application counter)
+      const currentTotalTxns = this.stats.totalTransactions;
+      const tpsApp = currentTotalTxns - this.previousStats.totalTransactions;
+      this.stats.tpsApp = tpsApp;
+      this.previousStats.totalTransactions = currentTotalTxns;
+
+      // TPS from Oracle (GV$SYSSTAT user commits - SUM across all RAC instances)
+      let tpsOracle = 0;
+      try {
+        if (this.db) {
+          const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
+          const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
+          tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
+          this.stats.oracleCommits = currentOracleCommits;
+          this.previousStats.oracleCommits = currentOracleCommits;
+        }
+      } catch (e) {
+        // Silently fail - might not have permissions
       }
-    } catch (e) {
-      // Silently fail - might not have permissions
-    }
-    this.stats.tpsOracle = tpsOracle;
+      this.stats.tpsOracle = tpsOracle;
 
-    const avgResponseTime = this.stats.responseTimes.length > 0
-      ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
-      : 0;
+      const avgResponseTime = this.stats.responseTimes.length > 0
+        ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
+        : 0;
 
-    const metrics = {
-      tpsApp,
-      tpsOracle,
-      avgResponseTime,
-      totalTransactions: this.stats.totalTransactions,
-      errors: this.stats.errors
-    };
+      const metrics = {
+        tpsApp,
+        tpsOracle,
+        avgResponseTime,
+        totalTransactions: this.stats.totalTransactions,
+        errors: this.stats.errors
+      };
 
-    this.previousStats.totalTransactions = this.stats.totalTransactions;
-
-    if (this.io) {
-      this.io.emit('index-contention-metrics', metrics);
+      if (this.io) {
+        this.io.emit('index-contention-metrics', metrics);
+      }
+    } finally {
+      this._reportingStats = false;
     }
   }
 
