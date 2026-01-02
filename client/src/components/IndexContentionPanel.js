@@ -221,8 +221,7 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     try {
       setStatusMessage('Stopping...');
 
-      const response = await fetch(`${API_BASE}/index-contention/stop`, { method: 'POST' });
-      const data = await response.json();
+      await fetch(`${API_BASE}/index-contention/stop`, { method: 'POST' });
 
       setIsRunning(false);
       setStatusMessage('Stopped');
