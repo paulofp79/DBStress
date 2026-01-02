@@ -323,6 +323,32 @@ app.post('/api/index-contention/change-index', async (req, res) => {
   }
 });
 
+// Change sequence cache (0 == NOCACHE) at runtime
+app.post('/api/index-contention/change-sequence-cache', async (req, res) => {
+  const { cache } = req.body; // integer
+  try {
+    await indexContentionEngine.changeSequenceCache(oracleDb, cache);
+    res.json({ success: true, message: `Sequence cache changed to ${cache}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Run an A/B test comparing two sequence cache settings while the demo is running
+app.post('/api/index-contention/ab-test-sequence-cache', async (req, res) => {
+  const { cacheA = 0, cacheB = 100, duration = 10, warmup = 5 } = req.body;
+  try {
+    if (!indexContentionEngine.isRunning) {
+      return res.status(400).json({ success: false, error: 'Demo not running' });
+    }
+
+    const result = await indexContentionEngine.runSequenceCacheABTest(oracleDb, { cacheA, cacheB, duration, warmup });
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get index contention demo status
 app.get('/api/index-contention/status', (req, res) => {
   res.json({

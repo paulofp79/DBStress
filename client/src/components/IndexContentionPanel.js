@@ -82,6 +82,11 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
   const [statusMessage, setStatusMessage] = useState('');
   const [isChangingIndex, setIsChangingIndex] = useState(false);
 
+  // A/B test state
+  const [abTestConfig, setAbTestConfig] = useState({ cacheA: 0, cacheB: 100, warmup: 5, duration: 10 });
+  const [abTestRunning, setAbTestRunning] = useState(false);
+  const [abTestResult, setAbTestResult] = useState(null);
+
   // Timer for uptime
   const [uptime, setUptime] = useState(0);
   const uptimeRef = useRef(null);
@@ -140,20 +145,18 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
         }
       });
 
-      socket.on('index-contention-stopped', () => {
-        setIsRunning(false);
-        if (uptimeRef.current) {
-          clearInterval(uptimeRef.current);
-          uptimeRef.current = null;
-        }
+      socket.on('index-contention-abtest-result', (data) => {
+        setAbTestResult(data);
+        setAbTestRunning(false);
+        setStatusMessage('A/B test complete');
       });
-    }
 
     return () => {
       if (socket) {
         socket.off('index-contention-metrics');
         socket.off('index-contention-status');
         socket.off('index-contention-stopped');
+        socket.off('index-contention-abtest-result');
       }
     };
   }, [socket]);
@@ -279,6 +282,38 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     }
   };
 
+  const handleRunABTest = async () => {
+    if (!isRunning || abTestRunning) return;
+    setAbTestRunning(true);
+    setAbTestResult(null);
+    setStatusMessage('Running A/B test...');
+
+    try {
+      const response = await fetch(`${API_BASE}/index-contention/ab-test-sequence-cache`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cacheA: parseInt(abTestConfig.cacheA, 10),
+          cacheB: parseInt(abTestConfig.cacheB, 10),
+          duration: parseInt(abTestConfig.duration, 10),
+          warmup: parseInt(abTestConfig.warmup, 10)
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'A/B test failed');
+      }
+
+      setAbTestResult(data.result || data);
+      setStatusMessage('A/B test complete');
+    } catch (err) {
+      setStatusMessage(`A/B test error: ${err.message}`);
+    } finally {
+      setAbTestRunning(false);
+    }
+  };
+
   const formatUptime = (seconds) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -333,6 +368,41 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     plugins: {
       legend: { display: false }
     }
+  };
+
+  // A/B test chart data (derived from abTestResult)
+  const getResultFor = (cache) => {
+    if (!abTestResult) return null;
+    const results = abTestResult.results || abTestResult.result?.results || abTestResult;
+    return results && (results[cache] || results[String(cache)]) ? results[cache] || results[String(cache)] : null;
+  };
+
+  const resA = getResultFor(abTestConfig.cacheA);
+  const resB = getResultFor(abTestConfig.cacheB);
+  const abLabels = resA?.samples?.map((_, i) => `${i + 1}s`) || resB?.samples?.map((_, i) => `${i + 1}s`) || [];
+
+  const abChartData = {
+    labels: abLabels,
+    datasets: [
+      {
+        label: `Cache ${abTestConfig.cacheA} TPS`,
+        data: resA?.samples?.map(s => s.tps) || [],
+        borderColor: '#3b82f6',
+        backgroundColor: 'rgba(59,130,246,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0
+      },
+      {
+        label: `Cache ${abTestConfig.cacheB} TPS`,
+        data: resB?.samples?.map(s => s.tps) || [],
+        borderColor: '#10b981',
+        backgroundColor: 'rgba(16,185,129,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0
+      }
+    ]
   };
 
   const existingSchemas = schemas || [];
@@ -506,6 +576,58 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
           </div>
         )}
 
+        {/* A/B Test - Sequence Cache */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>A/B Test - Sequence Cache</label>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <input
+              type="number"
+              min="0"
+              value={abTestConfig.cacheA}
+              onChange={(e) => setAbTestConfig(prev => ({ ...prev, cacheA: Math.max(0, parseInt(e.target.value || 0, 10)) }))}
+              disabled={!isRunning || abTestRunning}
+              style={{ flex: 1, padding: '0.4rem' }}
+            />
+            <input
+              type="number"
+              min="0"
+              value={abTestConfig.cacheB}
+              onChange={(e) => setAbTestConfig(prev => ({ ...prev, cacheB: Math.max(0, parseInt(e.target.value || 0, 10)) }))}
+              disabled={!isRunning || abTestRunning}
+              style={{ flex: 1, padding: '0.4rem' }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <input
+              type="number"
+              min="1"
+              value={abTestConfig.warmup}
+              onChange={(e) => setAbTestConfig(prev => ({ ...prev, warmup: Math.max(1, parseInt(e.target.value || 1, 10)) }))}
+              disabled={!isRunning || abTestRunning}
+              style={{ width: '60px', padding: '0.4rem' }}
+            />
+            <input
+              type="number"
+              min="1"
+              value={abTestConfig.duration}
+              onChange={(e) => setAbTestConfig(prev => ({ ...prev, duration: Math.max(1, parseInt(e.target.value || 1, 10)) }))}
+              disabled={!isRunning || abTestRunning}
+              style={{ width: '80px', padding: '0.4rem' }}
+            />
+            <button
+              onClick={handleRunABTest}
+              disabled={!isRunning || abTestRunning}
+              className="btn btn-primary"
+              style={{ flex: 1 }}
+            >
+              {abTestRunning ? 'Running A/B...' : 'Run A/B Test'}
+            </button>
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            <div>Cache A &nbsp;&nbsp;&nbsp; Cache B &nbsp;&nbsp;&nbsp; Warmup(s) &nbsp;&nbsp;&nbsp; Duration(s)</div>
+          </div>
+        </div>
+
         {/* Buttons */}
         <div style={{ display: 'flex', gap: '0.5rem', marginTop: 'auto' }}>
           <button
@@ -654,6 +776,29 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Errors</div>
           </div>
         </div>
+
+        {/* A/B Test Results */}
+        {abTestResult && (
+          <div style={{ marginTop: '1rem', background: 'var(--surface)', borderRadius: '8px', padding: '1rem' }}>
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-muted)' }}>A/B Test Results</h3>
+            <div style={{ display:'flex', gap:'1rem' }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:'0.85rem', color:'var(--text-muted)' }}>Cache {abTestResult.cacheA}</div>
+                <div style={{ fontSize:'1.2rem', fontWeight:700 }}>{(abTestResult.results && abTestResult.results[abTestResult.cacheA] && abTestResult.results[abTestResult.cacheA].meanTps) ? Math.round(abTestResult.results[abTestResult.cacheA].meanTps) : 'N/A' } TPS</div>
+                <div style={{ fontSize:'0.8rem', color:'var(--text-muted)' }}>Avg Response: {(abTestResult.results && abTestResult.results[abTestResult.cacheA] && abTestResult.results[abTestResult.cacheA].meanAvgResponseTime) ? abTestResult.results[abTestResult.cacheA].meanAvgResponseTime.toFixed(2) : 'N/A'} ms</div>
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:'0.85rem', color:'var(--text-muted)' }}>Cache {abTestResult.cacheB}</div>
+                <div style={{ fontSize:'1.2rem', fontWeight:700 }}>{(abTestResult.results && abTestResult.results[abTestResult.cacheB] && abTestResult.results[abTestResult.cacheB].meanTps) ? Math.round(abTestResult.results[abTestResult.cacheB].meanTps) : 'N/A' } TPS</div>
+                <div style={{ fontSize:'0.8rem', color:'var(--text-muted)' }}>Avg Response: {(abTestResult.results && abTestResult.results[abTestResult.cacheB] && abTestResult.results[abTestResult.cacheB].meanAvgResponseTime) ? abTestResult.results[abTestResult.cacheB].meanAvgResponseTime.toFixed(2) : 'N/A'} ms</div>
+              </div>
+            </div>
+            <div style={{ marginTop:'0.75rem', height:'180px' }}>
+              <Line data={abChartData} options={{ ...chartOptions, plugins: { legend: { display: true } } }} />
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   );

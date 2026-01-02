@@ -34,6 +34,10 @@ class IndexContentionEngine {
       thinkTime: config.thinkTime || 10,
       indexType: config.indexType || 'standard',
       tableCount: config.tableCount || 1,
+      // Sequence cache size (0 = NOCACHE), configurable at start or runtime
+      sequenceCache: (config.sequenceCache !== undefined ? config.sequenceCache : 0),
+      // Default hash partitions for hash_partition index type
+      hashPartitions: config.hashPartitions || 4,
       ...config
     };
 
@@ -86,16 +90,17 @@ class IndexContentionEngine {
         const tableName = `${p}txn_history${suffix}`;
         const seqName = `${p}seq_txn_history${suffix}`;
 
-        // Create sequence if not exists (NOCACHE NOORDER for maximum contention)
+        // Create sequence if not exists (configurable cache for sequence contention tests)
         try {
+          const cacheClause = (this.config.sequenceCache && this.config.sequenceCache > 0) ? `CACHE ${this.config.sequenceCache}` : 'NOCACHE';
           await db.execute(`
             CREATE SEQUENCE ${seqName}
               START WITH 1
               INCREMENT BY 1
-              NOCACHE
+              ${cacheClause}
               NOORDER
           `);
-          console.log(`Created sequence: ${seqName}`);
+          console.log(`Created sequence: ${seqName} (${cacheClause})`);
         } catch (err) {
           if (err.errorNum !== 955) { // ORA-00955: name is already used
             console.log(`Sequence ${seqName} might already exist or error: ${err.message}`);
@@ -134,6 +139,8 @@ class IndexContentionEngine {
   async setupIndex(db) {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
     const indexType = this.config.indexType;
+    // Use configured sequence cache when creating/recreating sequences
+    const cacheClause = (this.config.sequenceCache && this.config.sequenceCache > 0) ? `CACHE ${this.config.sequenceCache}` : 'NOCACHE';
 
     this.io?.emit('index-contention-status', { message: `Setting up ${indexType} index...` });
 
@@ -204,11 +211,11 @@ class IndexContentionEngine {
                 CREATE SEQUENCE ${seqName}
                   START WITH 1
                   INCREMENT BY 1
-                  NOCACHE
+                  ${cacheClause}
                   SCALE EXTEND
               `);
               await db.execute(`ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)`);
-              console.log(`Table ${tableName}: Scalable sequence with standard PK`);
+              console.log(`Table ${tableName}: Scalable sequence with standard PK (${cacheClause})`);
             } catch (err) {
               // Fall back to standard sequence if SCALE not supported
               try {
@@ -216,14 +223,14 @@ class IndexContentionEngine {
                   CREATE SEQUENCE ${seqName}
                     START WITH 1
                     INCREMENT BY 1
-                    NOCACHE
+                    ${cacheClause}
                     NOORDER
                 `);
               } catch (e) {
                 // Sequence might already exist
               }
               await db.execute(`ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)`);
-              console.log(`Table ${tableName}: Standard sequence (SCALE not available)`);
+              console.log(`Table ${tableName}: Standard sequence (SCALE not available, ${cacheClause})`);
             }
             break;
 
@@ -242,6 +249,88 @@ class IndexContentionEngine {
   async changeIndex(db, newIndexType) {
     this.config.indexType = newIndexType;
     await this.setupIndex(db);
+  }
+
+  async changeSequenceCache(db, newCache) {
+    // newCache: integer (0 == NOCACHE)
+    this.config.sequenceCache = newCache;
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+
+    this.io?.emit('index-contention-status', { message: `Changing sequence cache to ${newCache}` });
+
+    try {
+      for (let i = 1; i <= this.config.tableCount; i++) {
+        const suffix = i > 1 ? `_${i}` : '';
+        const seqName = `${p}seq_txn_history${suffix}`;
+        const sql = (newCache && newCache > 0)
+          ? `ALTER SEQUENCE ${seqName} CACHE ${newCache}`
+          : `ALTER SEQUENCE ${seqName} NOCACHE`;
+        await db.execute(sql);
+        console.log(`Sequence ${seqName} altered: ${newCache && newCache > 0 ? 'CACHE ' + newCache : 'NOCACHE'}`);
+      }
+
+      this.io?.emit('index-contention-status', { message: `Sequence cache changed to ${newCache}`, sequenceCache: newCache });
+    } catch (err) {
+      console.log('Error changing sequence cache:', err.message);
+      this.io?.emit('index-contention-status', { message: `Sequence cache change error: ${err.message}` });
+      throw err;
+    }
+  }
+
+  async runSequenceCacheABTest(db, { cacheA = 0, cacheB = 100, duration = 10, warmup = 5 } = {}) {
+    // Must be running so we can measure under the active workload
+    if (!this.isRunning) {
+      throw new Error('Index Contention demo must be running to perform A/B test');
+    }
+
+    const originalCache = this.config.sequenceCache || 0;
+    const variants = [ { name: 'A', cache: cacheA }, { name: 'B', cache: cacheB } ];
+    const results = {};
+
+    try {
+      for (const v of variants) {
+        this.io?.emit('index-contention-status', { message: `A/B test: variant ${v.name} -> cache=${v.cache}` });
+
+        // Apply cache for this variant
+        await this.changeSequenceCache(db, v.cache);
+        this.config.sequenceCache = v.cache;
+
+        // Warmup period
+        await this.sleep(warmup * 1000);
+
+        // Sample tps and avg response time every second for duration
+        const samples = [];
+        for (let i = 0; i < duration; i++) {
+          await this.sleep(1000);
+          const tpsSample = this.stats.tps;
+          const avgResponseTimeSample = this.stats.responseTimes.length > 0
+            ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
+            : 0;
+          samples.push({ tps: tpsSample, avgResponseTime: avgResponseTimeSample });
+        }
+
+        const meanTps = samples.reduce((s, x) => s + x.tps, 0) / samples.length;
+        const meanAvgResponseTime = samples.reduce((s, x) => s + x.avgResponseTime, 0) / samples.length;
+
+        results[v.cache] = { meanTps, meanAvgResponseTime, samples };
+      }
+    } catch (err) {
+      console.log('A/B test error:', err.message);
+      throw err;
+    } finally {
+      // Restore original cache setting
+      try {
+        await this.changeSequenceCache(db, originalCache);
+        this.config.sequenceCache = originalCache;
+      } catch (e) {
+        console.log('Failed to restore original sequence cache:', e.message);
+      }
+      this.io?.emit('index-contention-status', { message: `A/B test complete, restored sequence cache to ${originalCache}` });
+    }
+
+    // Emit results over socket and return
+    this.io?.emit('index-contention-abtest-result', { cacheA, cacheB, results });
+    return { cacheA, cacheB, results };
   }
 
   async runWorker(workerId) {
