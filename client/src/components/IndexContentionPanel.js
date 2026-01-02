@@ -150,6 +150,7 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
         setAbTestRunning(false);
         setStatusMessage('A/B test complete');
       });
+    }
 
     return () => {
       if (socket) {
