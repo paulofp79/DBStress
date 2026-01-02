@@ -79,6 +79,9 @@ class IndexContentionEngine {
 
     console.log(`Starting Index Contention Demo with ${this.config.threads} threads, index type: ${this.config.indexType}`);
 
+    // Emit running status immediately so client shows Stop button
+    this.io?.emit('index-contention-status', { running: true, message: 'Starting...' });
+
     // Create connection pool
     this.pool = await db.createStressPool(this.config.threads + 5);
 

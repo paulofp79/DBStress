@@ -160,6 +160,11 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
         setAbTestRunning(false);
         setStatusMessage('A/B test complete');
       });
+
+      socket.on('index-contention-stopped', (data) => {
+        setIsRunning(false);
+        setStatusMessage('Stopped');
+      });
     }
 
     return () => {
