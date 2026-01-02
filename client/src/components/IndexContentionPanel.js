@@ -58,7 +58,8 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
 
   // Metrics state
   const [metrics, setMetrics] = useState({
-    tps: 0,
+    tpsApp: 0,
+    tpsOracle: 0,
     avgResponseTime: 0,
     totalTransactions: 0,
     errors: 0
@@ -75,7 +76,8 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
 
   // Chart data - keep last 60 seconds
   const maxDataPoints = 60;
-  const [tpsHistory, setTpsHistory] = useState([]);
+  const [tpsAppHistory, setTpsAppHistory] = useState([]);
+  const [tpsOracleHistory, setTpsOracleHistory] = useState([]);
   const [responseTimeHistory, setResponseTimeHistory] = useState([]);
   const [labels, setLabels] = useState([]);
 
@@ -105,7 +107,8 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     if (socket) {
       socket.on('index-contention-metrics', (data) => {
         setMetrics({
-          tps: data.tps || 0,
+          tpsApp: data.tpsApp || 0,
+          tpsOracle: data.tpsOracle || 0,
           avgResponseTime: data.avgResponseTime || 0,
           totalTransactions: data.totalTransactions || 0,
           errors: data.errors || 0
@@ -120,8 +123,13 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
           return newLabels.slice(-maxDataPoints);
         });
 
-        setTpsHistory(prev => {
-          const newData = [...prev, data.tps || 0];
+        setTpsAppHistory(prev => {
+          const newData = [...prev, data.tpsApp || 0];
+          return newData.slice(-maxDataPoints);
+        });
+
+        setTpsOracleHistory(prev => {
+          const newData = [...prev, data.tpsOracle || 0];
           return newData.slice(-maxDataPoints);
         });
 
@@ -192,7 +200,8 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     try {
       setStatusMessage('Starting Index Contention Demo...');
       // Clear chart data
-      setTpsHistory([]);
+      setTpsAppHistory([]);
+      setTpsOracleHistory([]);
       setResponseTimeHistory([]);
       setLabels([]);
 
@@ -243,10 +252,11 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
   };
 
   const handleReset = () => {
-    setTpsHistory([]);
+    setTpsAppHistory([]);
+    setTpsOracleHistory([]);
     setResponseTimeHistory([]);
     setLabels([]);
-    setMetrics({ tps: 0, avgResponseTime: 0, totalTransactions: 0, errors: 0 });
+    setMetrics({ tpsApp: 0, tpsOracle: 0, avgResponseTime: 0, totalTransactions: 0, errors: 0 });
     setWaitEvents({
       'buffer busy waits': 0,
       'enq: TX - index contention': 0,
@@ -325,15 +335,26 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
   // TPS Chart configuration
   const tpsChartData = {
     labels,
-    datasets: [{
-      label: 'Throughput (TPS)',
-      data: tpsHistory,
-      borderColor: '#f59e0b',
-      backgroundColor: 'rgba(245, 158, 11, 0.1)',
-      fill: true,
-      tension: 0.3,
-      pointRadius: 0
-    }]
+    datasets: [
+      {
+        label: 'TPS from App',
+        data: tpsAppHistory,
+        borderColor: '#f59e0b',
+        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+        fill: false,
+        tension: 0.3,
+        pointRadius: 0
+      },
+      {
+        label: 'TPS from Oracle',
+        data: tpsOracleHistory,
+        borderColor: '#10b981',
+        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+        fill: false,
+        tension: 0.3,
+        pointRadius: 0
+      }
+    ]
   };
 
   // Response Time Chart configuration
@@ -754,10 +775,16 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
           padding: '1rem'
         }}>
           <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--accent-success)' }}>
-              {metrics.tps.toLocaleString()}
+            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>
+              {metrics.tpsApp.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Current TPS</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>TPS from App</div>
+          </div>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>
+              {metrics.tpsOracle.toLocaleString()}
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>TPS from Oracle</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--accent-warning)' }}>
@@ -769,7 +796,7 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
             <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--accent-primary)' }}>
               {metrics.totalTransactions.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Transactions</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Txns</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: metrics.errors > 0 ? 'var(--accent-danger)' : 'var(--text-muted)' }}>

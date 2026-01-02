@@ -8,6 +8,7 @@ class IndexContentionEngine {
     this.config = null;
     this.pool = null;
     this.io = null;
+    this.db = null;  // Reference to db for Oracle queries
     this.workers = [];
     this.schemaPrefix = '';
 
@@ -16,10 +17,15 @@ class IndexContentionEngine {
       totalTransactions: 0,
       errors: 0,
       responseTimes: [],  // Rolling window for avg calculation
-      tps: 0
+      tpsApp: 0,           // TPS from application counter
+      tpsOracle: 0,        // TPS from Oracle V$SYSSTAT
+      oracleCommits: 0     // Current Oracle user commits value
     };
 
-    this.previousStats = { totalTransactions: 0 };
+    this.previousStats = {
+      totalTransactions: 0,
+      oracleCommits: 0
+    };
     this.statsInterval = null;
     this.waitEventsInterval = null;
   }
@@ -43,16 +49,31 @@ class IndexContentionEngine {
 
     this.schemaPrefix = config.schemaPrefix || '';
     this.io = io;
+    this.db = db;  // Store db reference for Oracle queries
     this.isRunning = true;
+
+    // Get initial Oracle commits value
+    let initialOracleCommits = 0;
+    try {
+      const result = await db.execute(`SELECT value FROM V$SYSSTAT WHERE name = 'user commits'`);
+      initialOracleCommits = parseInt(result.rows[0]?.VALUE) || 0;
+    } catch (e) {
+      console.log('Could not get initial Oracle commits:', e.message);
+    }
 
     // Reset stats
     this.stats = {
       totalTransactions: 0,
       errors: 0,
       responseTimes: [],
-      tps: 0
+      tpsApp: 0,
+      tpsOracle: 0,
+      oracleCommits: initialOracleCommits
     };
-    this.previousStats = { totalTransactions: 0 };
+    this.previousStats = {
+      totalTransactions: 0,
+      oracleCommits: initialOracleCommits
+    };
 
     console.log(`Starting Index Contention Demo with ${this.config.threads} threads, index type: ${this.config.indexType}`);
 
@@ -71,7 +92,7 @@ class IndexContentionEngine {
     }
 
     // Start stats reporting (every second)
-    this.statsInterval = setInterval(() => this.reportStats(), 1000);
+    this.statsInterval = setInterval(() => this.reportStats().catch(e => console.log('Stats error:', e.message)), 1000);
 
     // Start wait events monitoring (every 2 seconds)
     this.waitEventsInterval = setInterval(() => this.reportWaitEvents(db), 2000);
@@ -478,16 +499,33 @@ class IndexContentionEngine {
     }
   }
 
-  reportStats() {
-    const tps = this.stats.totalTransactions - this.previousStats.totalTransactions;
-    this.stats.tps = tps;
+  async reportStats() {
+    // TPS from App (application counter)
+    const tpsApp = this.stats.totalTransactions - this.previousStats.totalTransactions;
+    this.stats.tpsApp = tpsApp;
+
+    // TPS from Oracle (V$SYSSTAT user commits)
+    let tpsOracle = 0;
+    try {
+      if (this.db) {
+        const result = await this.db.execute(`SELECT value FROM V$SYSSTAT WHERE name = 'user commits'`);
+        const currentOracleCommits = parseInt(result.rows[0]?.VALUE) || 0;
+        tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
+        this.stats.oracleCommits = currentOracleCommits;
+        this.previousStats.oracleCommits = currentOracleCommits;
+      }
+    } catch (e) {
+      // Silently fail - might not have permissions
+    }
+    this.stats.tpsOracle = tpsOracle;
 
     const avgResponseTime = this.stats.responseTimes.length > 0
       ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
       : 0;
 
     const metrics = {
-      tps,
+      tpsApp,
+      tpsOracle,
       avgResponseTime,
       totalTransactions: this.stats.totalTransactions,
       errors: this.stats.errors
