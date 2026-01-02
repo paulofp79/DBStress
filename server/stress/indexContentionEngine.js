@@ -28,7 +28,7 @@ class IndexContentionEngine {
     };
     this.statsInterval = null;
     this.waitEventsInterval = null;
-    this._reportingStats = false;  // Guard against overlapping reportStats calls
+    this._queryingOracle = false;  // Guard against overlapping Oracle queries only
   }
 
   async start(db, config, io) {
@@ -496,49 +496,44 @@ class IndexContentionEngine {
   }
 
   async reportStats() {
-    // Prevent overlapping calls
-    if (this._reportingStats) return;
-    this._reportingStats = true;
+    // TPS from App (application counter) - always calculate, no blocking
+    const currentTotalTxns = this.stats.totalTransactions;
+    const tpsApp = currentTotalTxns - this.previousStats.totalTransactions;
+    this.stats.tpsApp = tpsApp;
+    this.previousStats.totalTransactions = currentTotalTxns;
 
-    try {
-      // TPS from App (application counter)
-      const currentTotalTxns = this.stats.totalTransactions;
-      const tpsApp = currentTotalTxns - this.previousStats.totalTransactions;
-      this.stats.tpsApp = tpsApp;
-      this.previousStats.totalTransactions = currentTotalTxns;
-
-      // TPS from Oracle (GV$SYSSTAT user commits - SUM across all RAC instances)
-      let tpsOracle = 0;
+    // TPS from Oracle - only query if not already querying
+    let tpsOracle = this.stats.tpsOracle; // Use last known value by default
+    if (!this._queryingOracle && this.db) {
+      this._queryingOracle = true;
       try {
-        if (this.db) {
-          const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
-          const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
-          tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
-          this.stats.oracleCommits = currentOracleCommits;
-          this.previousStats.oracleCommits = currentOracleCommits;
-        }
+        const result = await this.db.execute(`SELECT SUM(value) as total FROM GV$SYSSTAT WHERE name = 'user commits'`);
+        const currentOracleCommits = parseInt(result.rows[0]?.TOTAL) || 0;
+        tpsOracle = currentOracleCommits - this.previousStats.oracleCommits;
+        this.stats.oracleCommits = currentOracleCommits;
+        this.previousStats.oracleCommits = currentOracleCommits;
+        this.stats.tpsOracle = tpsOracle;
       } catch (e) {
         // Silently fail - might not have permissions
+      } finally {
+        this._queryingOracle = false;
       }
-      this.stats.tpsOracle = tpsOracle;
+    }
 
-      const avgResponseTime = this.stats.responseTimes.length > 0
-        ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
-        : 0;
+    const avgResponseTime = this.stats.responseTimes.length > 0
+      ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
+      : 0;
 
-      const metrics = {
-        tpsApp,
-        tpsOracle,
-        avgResponseTime,
-        totalTransactions: this.stats.totalTransactions,
-        errors: this.stats.errors
-      };
+    const metrics = {
+      tpsApp,
+      tpsOracle,
+      avgResponseTime,
+      totalTransactions: this.stats.totalTransactions,
+      errors: this.stats.errors
+    };
 
-      if (this.io) {
-        this.io.emit('index-contention-metrics', metrics);
-      }
-    } finally {
-      this._reportingStats = false;
+    if (this.io) {
+      this.io.emit('index-contention-metrics', metrics);
     }
   }
 
