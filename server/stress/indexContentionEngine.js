@@ -421,21 +421,7 @@ class IndexContentionEngine {
         const tableNum = Math.floor(Math.random() * this.config.tableCount) + 1;
         const suffix = tableNum > 1 ? `_${tableNum}` : '';
 
-        // Get session/instance info
-        let sessionId = workerId;
-        let instanceNum = 1;
-        try {
-          const result = await connection.execute(
-            `SELECT SYS_CONTEXT('USERENV', 'SID') as sid,
-                    SYS_CONTEXT('USERENV', 'INSTANCE') as inst FROM dual`
-          );
-          sessionId = parseInt(result.rows[0]?.SID) || workerId;
-          instanceNum = parseInt(result.rows[0]?.INST) || 1;
-        } catch (e) {
-          // Use defaults
-        }
-
-        // Perform insert
+        // Perform insert (use workerId as session_id to avoid extra query overhead)
         const txnTypes = ['PURCHASE', 'REFUND', 'TRANSFER', 'ADJUSTMENT'];
         const txnType = txnTypes[Math.floor(Math.random() * txnTypes.length)];
         const txnAmount = parseFloat((Math.random() * 10000).toFixed(2));
@@ -446,8 +432,8 @@ class IndexContentionEngine {
             `INSERT INTO ${p}txn_history${suffix}
                (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
              VALUES
-               (TRUNC(DBMS_RANDOM.VALUE(1, 999999999999)), :1, :2, :3, :4, :5)`,
-            [sessionId, instanceNum, txnType, txnAmount, `Worker ${workerId}`]
+               (TRUNC(DBMS_RANDOM.VALUE(1, 999999999999)), :1, 1, :2, :3, :4)`,
+            [workerId, txnType, txnAmount, `Worker ${workerId}`]
           );
         } else {
           // Use sequence
@@ -455,8 +441,8 @@ class IndexContentionEngine {
             `INSERT INTO ${p}txn_history${suffix}
                (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
              VALUES
-               (${p}seq_txn_history${suffix}.NEXTVAL, :1, :2, :3, :4, :5)`,
-            [sessionId, instanceNum, txnType, txnAmount, `Worker ${workerId}`]
+               (${p}seq_txn_history${suffix}.NEXTVAL, :1, 1, :2, :3, :4)`,
+            [workerId, txnType, txnAmount, `Worker ${workerId}`]
           );
         }
 
