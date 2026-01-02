@@ -35,7 +35,8 @@ const API_BASE = `${getServerUrl()}/api`;
 
 // Index type options based on Oracle Real-World Performance demo
 const INDEX_TYPES = [
-  { value: 'none', label: 'NONE (No Index - Heap Table)', description: 'No primary key index, heap organized table' },
+  { value: 'none_no_seq', label: 'No Index, No Sequence', description: 'Heap table with random ID - fastest baseline, no contention' },
+  { value: 'none_cached_seq', label: 'No Index, Cached Sequence', description: 'Heap table with CACHE 1000 sequence - shows cached seq has no contention' },
   { value: 'standard', label: 'Standard B-Tree Index', description: 'Normal ascending sequence PK - maximum right-hand contention' },
   { value: 'reverse', label: 'Reverse Key Index', description: 'Distributes inserts across leaf blocks, but increases I/O' },
   { value: 'hash_partition', label: 'Hash Partitioned Index', description: 'Partitions index by hash - helps single instance, not RAC' },

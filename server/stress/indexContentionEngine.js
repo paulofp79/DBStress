@@ -161,24 +161,64 @@ class IndexContentionEngine {
 
         // Create new index based on type
         switch (indexType) {
-          case 'none':
-            // No index - heap table, no PK
-            console.log(`Table ${tableName}: No index (heap table)`);
+          case 'none_no_seq':
+            // No index, no sequence - uses random ID
+            console.log(`Table ${tableName}: No index, no sequence (random ID)`);
+            break;
+
+          case 'none_cached_seq':
+            // No index, but cached sequence
+            try {
+              await db.execute(`DROP SEQUENCE ${seqName}`);
+            } catch (e) { /* might not exist */ }
+            try {
+              await db.execute(`
+                CREATE SEQUENCE ${seqName}
+                  START WITH 1
+                  INCREMENT BY 1
+                  CACHE 1000
+              `);
+              console.log(`Table ${tableName}: No index, cached sequence (CACHE 1000)`);
+            } catch (err) {
+              console.log(`Table ${tableName}: Sequence error: ${err.message}`);
+            }
             break;
 
           case 'standard':
             // Standard B-tree index - maximum contention
+            // Ensure sequence has NOCACHE NOORDER for maximum contention
+            try {
+              await db.execute(`DROP SEQUENCE ${seqName}`);
+            } catch (e) { /* might not exist */ }
+            await db.execute(`
+              CREATE SEQUENCE ${seqName}
+                START WITH 1
+                INCREMENT BY 1
+                NOCACHE
+                NOORDER
+            `);
             await db.execute(`ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)`);
-            console.log(`Table ${tableName}: Standard B-tree PK created`);
+            console.log(`Table ${tableName}: Standard B-tree PK with NOCACHE NOORDER sequence`);
             break;
 
           case 'reverse':
             // Reverse key index - distributes inserts but increases I/O
+            // Ensure sequence has NOCACHE NOORDER
+            try {
+              await db.execute(`DROP SEQUENCE ${seqName}`);
+            } catch (e) { /* might not exist */ }
+            await db.execute(`
+              CREATE SEQUENCE ${seqName}
+                START WITH 1
+                INCREMENT BY 1
+                NOCACHE
+                NOORDER
+            `);
             await db.execute(`
               ALTER TABLE ${tableName} ADD CONSTRAINT ${pkName} PRIMARY KEY (txn_id)
               USING INDEX (CREATE UNIQUE INDEX ${pkName} ON ${tableName}(txn_id) REVERSE)
             `);
-            console.log(`Table ${tableName}: Reverse key index created`);
+            console.log(`Table ${tableName}: Reverse key index with NOCACHE NOORDER sequence`);
             break;
 
           case 'hash_partition':
@@ -366,18 +406,30 @@ class IndexContentionEngine {
           // Use defaults
         }
 
-        // Perform insert with sequence
+        // Perform insert
         const txnTypes = ['PURCHASE', 'REFUND', 'TRANSFER', 'ADJUSTMENT'];
         const txnType = txnTypes[Math.floor(Math.random() * txnTypes.length)];
         const txnAmount = parseFloat((Math.random() * 10000).toFixed(2));
 
-        await connection.execute(
-          `INSERT INTO ${p}txn_history${suffix}
-             (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
-           VALUES
-             (${p}seq_txn_history${suffix}.NEXTVAL, :1, :2, :3, :4, :5)`,
-          [sessionId, instanceNum, txnType, txnAmount, `Worker ${workerId}`]
-        );
+        if (this.config.indexType === 'none_no_seq') {
+          // Use random ID - no sequence contention
+          await connection.execute(
+            `INSERT INTO ${p}txn_history${suffix}
+               (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
+             VALUES
+               (TRUNC(DBMS_RANDOM.VALUE(1, 999999999999)), :1, :2, :3, :4, :5)`,
+            [sessionId, instanceNum, txnType, txnAmount, `Worker ${workerId}`]
+          );
+        } else {
+          // Use sequence
+          await connection.execute(
+            `INSERT INTO ${p}txn_history${suffix}
+               (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
+             VALUES
+               (${p}seq_txn_history${suffix}.NEXTVAL, :1, :2, :3, :4, :5)`,
+            [sessionId, instanceNum, txnType, txnAmount, `Worker ${workerId}`]
+          );
+        }
 
         await connection.commit();
 
