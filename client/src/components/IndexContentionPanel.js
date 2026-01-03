@@ -340,29 +340,32 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // TPS Chart configuration
-  const tpsChartData = {
+  // TPS from App Chart configuration
+  const tpsAppChartData = {
     labels,
-    datasets: [
-      {
-        label: 'TPS from App',
-        data: tpsAppHistory,
-        borderColor: '#f59e0b',
-        backgroundColor: 'rgba(245, 158, 11, 0.1)',
-        fill: false,
-        tension: 0.3,
-        pointRadius: 0
-      },
-      {
-        label: 'TPS from Oracle',
-        data: tpsOracleHistory,
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.1)',
-        fill: false,
-        tension: 0.3,
-        pointRadius: 0
-      }
-    ]
+    datasets: [{
+      label: 'TPS from App',
+      data: tpsAppHistory,
+      borderColor: '#f59e0b',
+      backgroundColor: 'rgba(245, 158, 11, 0.2)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0
+    }]
+  };
+
+  // TPS from Oracle Chart configuration
+  const tpsOracleChartData = {
+    labels,
+    datasets: [{
+      label: 'TPS from Oracle',
+      data: tpsOracleHistory,
+      borderColor: '#10b981',
+      backgroundColor: 'rgba(16, 185, 129, 0.2)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0
+    }]
   };
 
   // Response Time Chart configuration
@@ -750,7 +753,7 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
             </div>
           </div>
 
-          {/* TPS Chart */}
+          {/* TPS from App Chart */}
           <div style={{
             flex: 1,
             background: 'var(--surface)',
@@ -759,11 +762,28 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
             display: 'flex',
             flexDirection: 'column'
           }}>
-            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-              TPS x1000
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#f59e0b' }}>
+              TPS from App
             </h3>
             <div style={{ flex: 1, minHeight: '150px' }}>
-              <Line data={tpsChartData} options={chartOptions} />
+              <Line data={tpsAppChartData} options={chartOptions} />
+            </div>
+          </div>
+
+          {/* TPS from Oracle Chart */}
+          <div style={{
+            flex: 1,
+            background: 'var(--surface)',
+            borderRadius: '8px',
+            padding: '1rem',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#10b981' }}>
+              TPS from Oracle
+            </h3>
+            <div style={{ flex: 1, minHeight: '150px' }}>
+              <Line data={tpsOracleChartData} options={chartOptions} />
             </div>
           </div>
 
