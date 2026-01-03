@@ -115,29 +115,31 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
           errors: data.errors || 0
         });
 
-        // Update chart data
-        const now = new Date();
-        const timeLabel = `${now.getMinutes()}:${now.getSeconds().toString().padStart(2, '0')}`;
+        // Only update chart data if we have actual TPS (skip zeros to keep charts clean)
+        if (data.tpsApp > 0 || data.tpsOracle > 0) {
+          const now = new Date();
+          const timeLabel = `${now.getMinutes()}:${now.getSeconds().toString().padStart(2, '0')}`;
 
-        setLabels(prev => {
-          const newLabels = [...prev, timeLabel];
-          return newLabels.slice(-maxDataPoints);
-        });
+          setLabels(prev => {
+            const newLabels = [...prev, timeLabel];
+            return newLabels.slice(-maxDataPoints);
+          });
 
-        setTpsAppHistory(prev => {
-          const newData = [...prev, data.tpsApp || 0];
-          return newData.slice(-maxDataPoints);
-        });
+          setTpsAppHistory(prev => {
+            const newData = [...prev, data.tpsApp || 0];
+            return newData.slice(-maxDataPoints);
+          });
 
-        setTpsOracleHistory(prev => {
-          const newData = [...prev, data.tpsOracle || 0];
-          return newData.slice(-maxDataPoints);
-        });
+          setTpsOracleHistory(prev => {
+            const newData = [...prev, data.tpsOracle || 0];
+            return newData.slice(-maxDataPoints);
+          });
 
-        setResponseTimeHistory(prev => {
-          const newData = [...prev, data.avgResponseTime || 0];
-          return newData.slice(-maxDataPoints);
-        });
+          setResponseTimeHistory(prev => {
+            const newData = [...prev, data.avgResponseTime || 0];
+            return newData.slice(-maxDataPoints);
+          });
+        }
 
         // Update wait events if provided
         if (data.waitEvents) {
