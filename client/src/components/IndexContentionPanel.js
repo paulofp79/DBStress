@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Line } from 'react-chartjs-2';
+import { Line, Bar } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   Title,
   Tooltip,
   Legend,
@@ -17,6 +18,7 @@ ChartJS.register(
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   Title,
   Tooltip,
   Legend,
@@ -74,6 +76,9 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
     'gc buffer busy release': 0,
     'cell single block physical read': 0
   });
+
+  // TOP 10 wait events state
+  const [top10WaitEvents, setTop10WaitEvents] = useState([]);
 
   // Chart data - keep last 60 seconds
   const maxDataPoints = 60;
@@ -167,6 +172,15 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
         setIsRunning(false);
         setStatusMessage('Stopped');
       });
+
+      socket.on('index-contention-wait-events', (data) => {
+        if (data.waitEvents) {
+          setWaitEvents(data.waitEvents);
+        }
+        if (data.top10WaitEvents) {
+          setTop10WaitEvents(data.top10WaitEvents);
+        }
+      });
     }
 
     return () => {
@@ -175,6 +189,7 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
         socket.off('index-contention-status');
         socket.off('index-contention-stopped');
         socket.off('index-contention-abtest-result');
+        socket.off('index-contention-wait-events');
       }
     };
   }, [socket]);
@@ -272,6 +287,7 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
       'gc buffer busy release': 0,
       'cell single block physical read': 0
     });
+    setTop10WaitEvents([]);
   };
 
   const handleIndexTypeChange = async (newType) => {
@@ -380,6 +396,75 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
       tension: 0.3,
       pointRadius: 0
     }]
+  };
+
+  // TOP 10 Wait Events Chart configuration (horizontal bar)
+  const top10WaitEventsChartData = {
+    labels: top10WaitEvents.map(e => e.event?.substring(0, 30) || 'Unknown'),
+    datasets: [{
+      label: 'Time Waited (seconds)',
+      data: top10WaitEvents.map(e => e.timeSeconds || 0),
+      backgroundColor: [
+        'rgba(239, 68, 68, 0.7)',   // red
+        'rgba(249, 115, 22, 0.7)',  // orange
+        'rgba(245, 158, 11, 0.7)', // amber
+        'rgba(234, 179, 8, 0.7)',  // yellow
+        'rgba(132, 204, 22, 0.7)', // lime
+        'rgba(34, 197, 94, 0.7)',  // green
+        'rgba(20, 184, 166, 0.7)', // teal
+        'rgba(6, 182, 212, 0.7)',  // cyan
+        'rgba(59, 130, 246, 0.7)', // blue
+        'rgba(139, 92, 246, 0.7)'  // violet
+      ],
+      borderColor: [
+        'rgb(239, 68, 68)',
+        'rgb(249, 115, 22)',
+        'rgb(245, 158, 11)',
+        'rgb(234, 179, 8)',
+        'rgb(132, 204, 22)',
+        'rgb(34, 197, 94)',
+        'rgb(20, 184, 166)',
+        'rgb(6, 182, 212)',
+        'rgb(59, 130, 246)',
+        'rgb(139, 92, 246)'
+      ],
+      borderWidth: 1
+    }]
+  };
+
+  const top10WaitEventsChartOptions = {
+    indexAxis: 'y',
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 0 },
+    scales: {
+      x: {
+        display: true,
+        beginAtZero: true,
+        grid: { color: 'rgba(255,255,255,0.1)' },
+        ticks: { color: '#9ca3af' },
+        title: { display: true, text: 'Time (seconds)', color: '#9ca3af' }
+      },
+      y: {
+        display: true,
+        grid: { display: false },
+        ticks: { color: '#9ca3af', font: { size: 11 } }
+      }
+    },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: (context) => {
+            const event = top10WaitEvents[context.dataIndex];
+            return [
+              `Time: ${event?.timeSeconds?.toFixed(2) || 0} seconds`,
+              `Waits: ${event?.totalWaits?.toLocaleString() || 0}`
+            ];
+          }
+        }
+      }
+    }
   };
 
   const chartOptions = {
@@ -858,6 +943,22 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Errors</div>
           </div>
         </div>
+
+        {/* TOP 10 Wait Events Chart */}
+        {top10WaitEvents.length > 0 && (
+          <div style={{
+            background: 'var(--surface)',
+            borderRadius: '8px',
+            padding: '1rem'
+          }}>
+            <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+              TOP 10 Wait Events (RAC-wide)
+            </h3>
+            <div style={{ height: '280px' }}>
+              <Bar data={top10WaitEventsChartData} options={top10WaitEventsChartOptions} />
+            </div>
+          </div>
+        )}
 
         {/* A/B Test Results */}
         {abTestResult && (

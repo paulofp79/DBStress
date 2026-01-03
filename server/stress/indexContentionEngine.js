@@ -564,14 +564,31 @@ class IndexContentionEngine {
   async reportWaitEvents(db) {
     if (!this.isRunning) return;
 
-    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-
     try {
-      // Query v$session_event for relevant wait events
-      // This requires SELECT on V$ views
+      // Query GV$SESSION_EVENT for TOP 10 wait events (RAC-aware)
       const result = await db.execute(`
+        SELECT * FROM (
+          SELECT event, SUM(time_waited_micro)/1000000 as time_seconds, SUM(total_waits) as total_waits
+          FROM gv$session_event
+          WHERE wait_class != 'Idle'
+          GROUP BY event
+          ORDER BY time_seconds DESC
+        ) WHERE ROWNUM <= 10
+      `);
+
+      const top10WaitEvents = [];
+      for (const row of result.rows) {
+        top10WaitEvents.push({
+          event: row.EVENT,
+          timeSeconds: row.TIME_SECONDS || 0,
+          totalWaits: row.TOTAL_WAITS || 0
+        });
+      }
+
+      // Also get the specific index contention related events for the side panel
+      const indexResult = await db.execute(`
         SELECT event, SUM(time_waited_micro)/1000000 as time_seconds
-        FROM v$session_event
+        FROM gv$session_event
         WHERE event IN (
           'buffer busy waits',
           'enq: TX - index contention',
@@ -591,25 +608,20 @@ class IndexContentionEngine {
         'cell single block physical read': 0
       };
 
-      for (const row of result.rows) {
+      for (const row of indexResult.rows) {
         if (waitEvents.hasOwnProperty(row.EVENT)) {
           waitEvents[row.EVENT] = row.TIME_SECONDS || 0;
         }
       }
 
       if (this.io) {
-        this.io.emit('index-contention-metrics', {
-          tps: this.stats.tps,
-          avgResponseTime: this.stats.responseTimes.length > 0
-            ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
-            : 0,
-          totalTransactions: this.stats.totalTransactions,
-          errors: this.stats.errors,
+        this.io.emit('index-contention-wait-events', {
+          top10WaitEvents,
           waitEvents
         });
       }
     } catch (err) {
-      // Might not have access to v$ views
+      // Might not have access to GV$ views
       console.log('Cannot query wait events:', err.message);
     }
   }
