@@ -390,13 +390,13 @@ function IndexContentionPanel({ dbStatus, socket, schemas }) {
       x: {
         display: true,
         grid: { color: 'rgba(255,255,255,0.1)' },
-        ticks: { color: 'var(--text-muted)', maxTicksLimit: 10 }
+        ticks: { color: '#9ca3af', maxTicksLimit: 10 }
       },
       y: {
         display: true,
         beginAtZero: true,
         grid: { color: 'rgba(255,255,255,0.1)' },
-        ticks: { color: 'var(--text-muted)' }
+        ticks: { color: '#9ca3af' }
       }
     },
     plugins: {
