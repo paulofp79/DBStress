@@ -133,6 +133,10 @@ class LibraryCacheLockEngine {
           -- Additional ALTER SESSION to increase contention
           EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_DATE_FORMAT = ''YYYY-MM-DD HH24:MI:SS''';
 
+          -- DDL operation to cause library cache lock contention
+          -- Multiple sessions trying to compile the same procedure simultaneously
+          EXECUTE IMMEDIATE 'CREATE OR REPLACE PROCEDURE temp_stress_proc AS BEGIN NULL; END;';
+
         END;
       `);
 
