@@ -36,11 +36,8 @@ class LibraryCacheLockEngine {
 
     this.config = {
       threads: config.threads || 50,
-      thinkTime: config.thinkTime || 0,
-      callsPerSession: config.callsPerSession || 100,  // Calls before reconnect
+      callInterval: config.callInterval || 10000,  // Interval between calls in ms (default 10 seconds)
       useAlterSession: config.useAlterSession !== false,  // Toggle ALTER SESSION statements
-      useSetModule: config.useSetModule !== false,  // Toggle DBMS_APPLICATION_INFO
-      useSetIdentifier: config.useSetIdentifier !== false,  // Toggle DBMS_SESSION
       ...config
     };
 
@@ -159,14 +156,13 @@ class LibraryCacheLockEngine {
       }
 
       let connection;
-      let callCount = 0;
 
       try {
         connection = await this.pool.getConnection();
 
-        // Make multiple calls on same session before reconnecting
+        // Keep connection open and call procedure at regular intervals
         // This simulates "Same session repeatedly calling a procedure"
-        while (this.isRunning && callCount < this.config.callsPerSession) {
+        while (this.isRunning) {
           const startTime = Date.now();
 
           try {
@@ -199,18 +195,18 @@ class LibraryCacheLockEngine {
               this.stats.responseTimes.shift();
             }
 
-            callCount++;
-
           } catch (err) {
             this.stats.errors++;
             if (this.stats.errors % 100 === 1) {
               console.log(`Library cache lock worker ${workerId} error:`, err.message);
             }
+            // Break out of inner loop on error to get new connection
+            break;
           }
 
-          // Think time between calls
-          if (this.isRunning && this.config.thinkTime > 0) {
-            await this.sleep(this.config.thinkTime);
+          // Wait for call interval before next call
+          if (this.isRunning && this.config.callInterval > 0) {
+            await this.sleep(this.config.callInterval);
           }
         }
 
@@ -229,9 +225,9 @@ class LibraryCacheLockEngine {
         }
       }
 
-      // Small delay before getting new connection
+      // Small delay before reconnecting after error
       if (this.isRunning) {
-        await this.sleep(10);
+        await this.sleep(1000);
       }
     }
   }

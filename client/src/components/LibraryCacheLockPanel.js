@@ -39,11 +39,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
   // Configuration state
   const [config, setConfig] = useState({
     threads: 100,
-    thinkTime: 0,
-    callsPerSession: 100,
-    useAlterSession: true,
-    useSetModule: true,
-    useSetIdentifier: true
+    callInterval: 10000,  // 10 seconds between calls
+    useAlterSession: true
   });
 
   // Runtime state
@@ -485,15 +482,15 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           </div>
         </div>
 
-        {/* Calls per Session */}
+        {/* Call Interval */}
         <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Calls per Session:</label>
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Call Interval (seconds):</label>
           <input
             type="number"
             min="1"
-            max="10000"
-            value={config.callsPerSession}
-            onChange={(e) => setConfig(prev => ({ ...prev, callsPerSession: Math.max(1, parseInt(e.target.value) || 1) }))}
+            max="60"
+            value={config.callInterval / 1000}
+            onChange={(e) => setConfig(prev => ({ ...prev, callInterval: Math.max(1, parseInt(e.target.value) || 10) * 1000 }))}
             disabled={isRunning}
             style={{
               width: '100%',
@@ -506,30 +503,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             }}
           />
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Calls before session reconnects
+            Each session calls procedure every {config.callInterval / 1000}s
           </div>
-        </div>
-
-        {/* Think Time */}
-        <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Think Time (ms):</label>
-          <input
-            type="number"
-            min="0"
-            max="1000"
-            value={config.thinkTime}
-            onChange={(e) => setConfig(prev => ({ ...prev, thinkTime: Math.max(0, parseInt(e.target.value) || 0) }))}
-            disabled={isRunning}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              marginTop: '0.25rem'
-            }}
-          />
         </div>
 
         {/* ALTER SESSION Toggle */}
