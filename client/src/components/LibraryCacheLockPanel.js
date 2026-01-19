@@ -36,11 +36,11 @@ const getServerUrl = () => {
 const API_BASE = `${getServerUrl()}/api`;
 
 function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
-  // Configuration state
+  // Configuration state - using correct DDL invalidation pattern
   const [config, setConfig] = useState({
-    threads: 100,
-    callInterval: 10000,  // 10 seconds between calls
-    useAlterSession: true
+    threads: 50,                    // Number of execution workers
+    invalidateInterval: 1000,       // How often to recompile (ms)
+    enableInvalidator: true         // Toggle DDL invalidator
   });
 
   // Runtime state
@@ -52,6 +52,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     tps: 0,
     avgResponseTime: 0,
     totalCalls: 0,
+    totalInvalidations: 0,
     errors: 0
   });
 
@@ -90,6 +91,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           tps: data.tps || 0,
           avgResponseTime: data.avgResponseTime || 0,
           totalCalls: data.totalCalls || 0,
+          totalInvalidations: data.totalInvalidations || 0,
           errors: data.errors || 0
         });
 
@@ -237,7 +239,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     setTpsHistory([]);
     setResponseTimeHistory([]);
     setLabels([]);
-    setMetrics({ tps: 0, avgResponseTime: 0, totalCalls: 0, errors: 0 });
+    setMetrics({ tps: 0, avgResponseTime: 0, totalCalls: 0, totalInvalidations: 0, errors: 0 });
     setLibraryCacheEvents({});
     setTop10WaitEvents([]);
     setHardParses(0);
@@ -424,12 +426,14 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           fontSize: '0.75rem',
           color: 'var(--text-muted)'
         }}>
-          <strong style={{ color: '#ef4444' }}>Reproduces:</strong>
+          <strong style={{ color: '#ef4444' }}>DDL Invalidation Pattern:</strong>
           <ul style={{ margin: '0.25rem 0 0 0', paddingLeft: '1.2rem' }}>
-            <li>library cache lock</li>
-            <li>cursor: pin S wait on X</li>
-            <li>hard parse storms</li>
+            <li>Execution workers: tight loop calling procedure</li>
+            <li>DDL invalidator: continuously recompiles procedure</li>
           </ul>
+          <div style={{ marginTop: '0.5rem', fontStyle: 'italic' }}>
+            Reproduces: library cache lock, cursor: pin S wait on X, hard parse storms
+          </div>
         </div>
 
         {/* Schema Selection */}
@@ -457,13 +461,13 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           </select>
         </div>
 
-        {/* Number of Threads */}
+        {/* Number of Execution Workers */}
         <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Concurrent Sessions:</label>
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Execution Workers:</label>
           <input
             type="number"
             min="1"
-            max="1000"
+            max="500"
             value={config.threads}
             onChange={(e) => setConfig(prev => ({ ...prev, threads: Math.max(1, parseInt(e.target.value) || 1) }))}
             disabled={isRunning}
@@ -478,19 +482,20 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             }}
           />
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            More sessions = more contention
+            Sessions calling procedure in tight loop
           </div>
         </div>
 
-        {/* Call Interval */}
+        {/* Recompile Interval */}
         <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Call Interval (seconds):</label>
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Recompile Interval (ms):</label>
           <input
             type="number"
-            min="1"
-            max="60"
-            value={config.callInterval / 1000}
-            onChange={(e) => setConfig(prev => ({ ...prev, callInterval: Math.max(1, parseInt(e.target.value) || 10) * 1000 }))}
+            min="100"
+            max="10000"
+            step="100"
+            value={config.invalidateInterval}
+            onChange={(e) => setConfig(prev => ({ ...prev, invalidateInterval: Math.max(100, parseInt(e.target.value) || 1000) }))}
             disabled={isRunning}
             style={{
               width: '100%',
@@ -503,27 +508,27 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             }}
           />
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Each session calls procedure every {config.callInterval / 1000}s
+            How often DDL invalidator recompiles (lower = more contention)
           </div>
         </div>
 
-        {/* ALTER SESSION Toggle */}
+        {/* Enable Invalidator Toggle */}
         <div className="form-group">
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', cursor: 'pointer' }}>
             <input
               type="checkbox"
-              checked={config.useAlterSession}
-              onChange={(e) => setConfig(prev => ({ ...prev, useAlterSession: e.target.checked }))}
+              checked={config.enableInvalidator}
+              onChange={(e) => setConfig(prev => ({ ...prev, enableInvalidator: e.target.checked }))}
               disabled={isRunning}
             />
-            <span style={{ fontWeight: '500', color: config.useAlterSession ? '#ef4444' : 'var(--text-muted)' }}>
-              Use ALTER SESSION
+            <span style={{ fontWeight: '500', color: config.enableInvalidator ? '#ef4444' : 'var(--text-muted)' }}>
+              Enable DDL Invalidator
             </span>
           </label>
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem', marginLeft: '1.5rem' }}>
-            {config.useAlterSession
+            {config.enableInvalidator
               ? 'Enabled - causes library cache lock contention'
-              : 'Disabled - lighter workload, less contention'}
+              : 'Disabled - no contention, baseline performance'}
           </div>
         </div>
 
@@ -711,6 +716,12 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
               {metrics.totalCalls.toLocaleString()}
             </div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Calls</div>
+          </div>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#a855f7' }}>
+              {metrics.totalInvalidations.toLocaleString()}
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Invalidations</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: metrics.errors > 0 ? 'var(--accent-danger)' : 'var(--text-muted)' }}>

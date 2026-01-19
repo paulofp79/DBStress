@@ -1,6 +1,11 @@
 // Library Cache Lock Demo Engine
-// Simulates library cache lock contention through repeated ALTER SESSION calls
-// Reproduces: library cache lock, cursor: pin S wait on X, hard parse storms
+// Simulates library cache lock contention through DDL invalidation pattern
+//
+// Correct pattern to generate library cache lock:
+// - Role 1 (Execution workers): Many sessions executing ONE shared procedure in tight loop
+// - Role 2 (DDL invalidator): Separate session continuously recompiling the procedure
+//
+// This causes: library cache lock, cursor: pin S wait on X, hard parse storms
 
 class LibraryCacheLockEngine {
   constructor() {
@@ -10,11 +15,13 @@ class LibraryCacheLockEngine {
     this.io = null;
     this.db = null;
     this.workers = [];
+    this.invalidatorWorker = null;
     this.schemaPrefix = '';
 
     // Performance metrics
     this.stats = {
       totalCalls: 0,
+      totalInvalidations: 0,
       errors: 0,
       responseTimes: [],
       tps: 0
@@ -35,9 +42,9 @@ class LibraryCacheLockEngine {
     }
 
     this.config = {
-      threads: config.threads || 50,
-      callInterval: config.callInterval || 10000,  // Interval between calls in ms (default 10 seconds)
-      useAlterSession: config.useAlterSession !== false,  // Toggle ALTER SESSION statements
+      threads: config.threads || 50,              // Number of execution workers
+      invalidateInterval: config.invalidateInterval || 1000,  // How often to recompile (ms)
+      enableInvalidator: config.enableInvalidator !== false,  // Toggle DDL invalidator
       ...config
     };
 
@@ -49,6 +56,7 @@ class LibraryCacheLockEngine {
     // Reset stats
     this.stats = {
       totalCalls: 0,
+      totalInvalidations: 0,
       errors: 0,
       responseTimes: [],
       tps: 0
@@ -56,20 +64,26 @@ class LibraryCacheLockEngine {
     this.previousStats = { totalCalls: 0 };
     this._lastStatsTime = Date.now();
 
-    console.log(`Starting Library Cache Lock Demo with ${this.config.threads} threads`);
+    console.log(`Starting Library Cache Lock Demo with ${this.config.threads} execution workers`);
+    console.log(`DDL Invalidator: ${this.config.enableInvalidator ? 'ENABLED' : 'DISABLED'} (interval: ${this.config.invalidateInterval}ms)`);
 
     // Emit running status immediately
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Starting...' });
 
-    // Create connection pool
-    this.pool = await db.createStressPool(this.config.threads + 5);
+    // Create connection pool (extra connections for invalidator)
+    this.pool = await db.createStressPool(this.config.threads + 10);
 
-    // Create the procedure
+    // Create the simple procedure (no ALTER SESSION - just simple work)
     await this.createProcedure(db);
 
-    // Start workers
+    // Start execution workers (Role 1) - tight loop calling the procedure
     for (let i = 0; i < this.config.threads; i++) {
-      this.workers.push(this.runWorker(i));
+      this.workers.push(this.runExecutionWorker(i));
+    }
+
+    // Start DDL invalidator worker (Role 2) - continuously recompiles the procedure
+    if (this.config.enableInvalidator) {
+      this.invalidatorWorker = this.runInvalidatorWorker();
     }
 
     // Start stats reporting (every second)
@@ -83,7 +97,7 @@ class LibraryCacheLockEngine {
 
   async createProcedure(db) {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-    const procName = `${p}STRESS_SESSION_PROC`;
+    const procName = `${p}LIB_CACHE_STRESS_PROC`;
 
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Creating procedure...' });
 
@@ -95,48 +109,21 @@ class LibraryCacheLockEngine {
         // Procedure might not exist
       }
 
-      // Create the procedure that causes library cache lock contention
-      // Based on a customer procedure pattern (PROCEDURE_LIBRARY_CACHE_FROM_CUSTOMER)
+      // Create a SIMPLE procedure - NO ALTER SESSION, NO DDL
+      // Just does some simple work that execution workers will call
       await db.execute(`
         CREATE OR REPLACE PROCEDURE ${procName} (
-          pModuleName VARCHAR2
+          p_input NUMBER,
+          p_output OUT NUMBER
         )
         IS
-          pActionName      VARCHAR2(14);
-          pModuleName_mod  VARCHAR2(48);
+          v_temp NUMBER;
         BEGIN
-          -- Build action name
-          pActionName := 'STRESS_ONLINE';
-
-          -- Build modified module name (similar to original pattern)
-          pModuleName_mod := SUBSTR(pModuleName, 1, 22)
-                            || '0000000'
-                            || SUBSTR(pModuleName, 30);
-
-          -- DBMS_APPLICATION_INFO.SET_MODULE - populates v$session module and action
-          DBMS_APPLICATION_INFO.SET_MODULE(pModuleName_mod, pActionName);
-
-          -- DBMS_SESSION.SET_IDENTIFIER - populates client_identifier
-          DBMS_SESSION.SET_IDENTIFIER(pModuleName);
-
-          -- Multiple ALTER SESSION statements - these cause library cache lock contention
-          -- Each ALTER SESSION requires exclusive access to the library cache
-
-          -- Setup optimizer_mode
-          EXECUTE IMMEDIATE 'ALTER SESSION SET OPTIMIZER_MODE = first_rows_1';
-
-          -- Disable optimizer features (causes hard parsing)
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_use_feedback" = false';
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_adaptive_cursor_sharing" = false';
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_extended_cursor_sharing_rel" = none';
-
-          -- Additional ALTER SESSION to increase contention
-          EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_DATE_FORMAT = ''YYYY-MM-DD HH24:MI:SS''';
-
-          -- DDL operation to cause library cache lock contention
-          -- Multiple sessions trying to compile the same procedure simultaneously
-          EXECUTE IMMEDIATE 'CREATE OR REPLACE PROCEDURE temp_stress_proc AS BEGIN NULL; END;';
-
+          -- Simple computation work
+          v_temp := p_input * 2;
+          v_temp := v_temp + DBMS_RANDOM.VALUE(1, 100);
+          v_temp := SQRT(v_temp * v_temp);
+          p_output := v_temp;
         END;
       `);
 
@@ -149,9 +136,10 @@ class LibraryCacheLockEngine {
     }
   }
 
-  async runWorker(workerId) {
+  // Role 1: Execution workers - call the procedure in tight loop
+  async runExecutionWorker(workerId) {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-    const procName = `${p}STRESS_SESSION_PROC`;
+    const procName = `${p}LIB_CACHE_STRESS_PROC`;
 
     while (this.isRunning) {
       if (!this.pool) {
@@ -164,31 +152,19 @@ class LibraryCacheLockEngine {
       try {
         connection = await this.pool.getConnection();
 
-        // Keep connection open and call procedure at regular intervals
-        // This simulates "Same session repeatedly calling a procedure"
+        // Tight loop - keep calling the procedure as fast as possible
         while (this.isRunning) {
           const startTime = Date.now();
 
           try {
-            // Generate a unique module name for each call
-            const timestamp = Date.now().toString(36);
-            const moduleName = `STRESS_W${workerId.toString().padStart(3, '0')}_${timestamp}_TESTMODULE`;
-
-            if (this.config.useAlterSession) {
-              // Call the procedure with ALTER SESSION statements
-              await connection.execute(
-                `BEGIN ${procName}(:moduleName); END;`,
-                { moduleName }
-              );
-            } else {
-              // Light version - only SET_MODULE, no ALTER SESSION
-              await connection.execute(
-                `BEGIN
-                   DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, 'STRESS_LIGHT');
-                 END;`,
-                { moduleName }
-              );
-            }
+            // Call the shared procedure
+            const result = await connection.execute(
+              `BEGIN ${procName}(:input, :output); END;`,
+              {
+                input: workerId + Date.now() % 1000,
+                output: { dir: require('oracledb').BIND_OUT, type: require('oracledb').NUMBER }
+              }
+            );
 
             const responseTime = Date.now() - startTime;
             this.stats.totalCalls++;
@@ -201,17 +177,17 @@ class LibraryCacheLockEngine {
 
           } catch (err) {
             this.stats.errors++;
-            if (this.stats.errors % 100 === 1) {
-              console.log(`Library cache lock worker ${workerId} error:`, err.message);
+            // ORA-04068: existing state of packages has been discarded (expected during recompile)
+            // ORA-04061: existing state of <object> has been invalidated (expected during recompile)
+            if (!err.message.includes('ORA-04068') &&
+                !err.message.includes('ORA-04061') &&
+                this.stats.errors % 100 === 1) {
+              console.log(`Execution worker ${workerId} error:`, err.message);
             }
-            // Break out of inner loop on error to get new connection
-            break;
+            // Continue in the loop - don't break on invalidation errors
           }
 
-          // Wait for call interval before next call
-          if (this.isRunning && this.config.callInterval > 0) {
-            await this.sleep(this.config.callInterval);
-          }
+          // No sleep - tight loop for maximum contention
         }
 
       } catch (err) {
@@ -220,7 +196,7 @@ class LibraryCacheLockEngine {
             !err.message.includes('NJS-003') &&
             !err.message.includes('NJS-500')) {
           if (this.stats.errors % 100 === 1) {
-            console.log(`Library cache lock worker ${workerId} connection error:`, err.message);
+            console.log(`Execution worker ${workerId} connection error:`, err.message);
           }
         }
       } finally {
@@ -231,9 +207,65 @@ class LibraryCacheLockEngine {
 
       // Small delay before reconnecting after error
       if (this.isRunning) {
+        await this.sleep(100);
+      }
+    }
+  }
+
+  // Role 2: DDL invalidator - continuously recompiles the procedure
+  async runInvalidatorWorker() {
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+    const procName = `${p}LIB_CACHE_STRESS_PROC`;
+
+    console.log(`DDL Invalidator started - recompiling ${procName} every ${this.config.invalidateInterval}ms`);
+
+    while (this.isRunning) {
+      if (!this.pool) {
+        await this.sleep(100);
+        continue;
+      }
+
+      let connection;
+
+      try {
+        connection = await this.pool.getConnection();
+
+        while (this.isRunning) {
+          try {
+            // Recompile the procedure - this invalidates it in the library cache
+            // All executing sessions will need to wait for library cache lock
+            await connection.execute(`ALTER PROCEDURE ${procName} COMPILE`);
+            this.stats.totalInvalidations++;
+
+          } catch (err) {
+            // Ignore compilation errors - procedure might be in use
+            if (this.stats.errors % 100 === 1) {
+              console.log(`Invalidator error:`, err.message);
+            }
+          }
+
+          // Wait before next recompile
+          if (this.isRunning) {
+            await this.sleep(this.config.invalidateInterval);
+          }
+        }
+
+      } catch (err) {
+        if (!err.message.includes('pool is terminating')) {
+          console.log(`Invalidator connection error:`, err.message);
+        }
+      } finally {
+        if (connection) {
+          try { await connection.close(); } catch (e) {}
+        }
+      }
+
+      if (this.isRunning) {
         await this.sleep(1000);
       }
     }
+
+    console.log('DDL Invalidator stopped');
   }
 
   reportStats() {
@@ -256,6 +288,7 @@ class LibraryCacheLockEngine {
       tps,
       avgResponseTime,
       totalCalls: this.stats.totalCalls,
+      totalInvalidations: this.stats.totalInvalidations,
       errors: this.stats.errors
     };
 
@@ -375,10 +408,12 @@ class LibraryCacheLockEngine {
     }
 
     this.workers = [];
+    this.invalidatorWorker = null;
 
     if (this.io) {
       this.io.emit('library-cache-lock-stopped', {
         totalCalls: this.stats.totalCalls,
+        totalInvalidations: this.stats.totalInvalidations,
         errors: this.stats.errors
       });
     }
