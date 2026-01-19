@@ -75,8 +75,8 @@ class LibraryCacheLockEngine {
     // Start stats reporting (every second)
     this.statsInterval = setInterval(() => this.reportStats(), 1000);
 
-    // Start wait events monitoring (every 2 seconds)
-    this.waitEventsInterval = setInterval(() => this.reportWaitEvents(), 2000);
+    // Start wait events monitoring (every 5 seconds)
+    this.waitEventsInterval = setInterval(() => this.reportWaitEvents(), 5000);
 
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Running...' });
   }
