@@ -79,7 +79,7 @@ class LibraryCacheLockEngine {
     this.statsInterval = setInterval(() => this.reportStats(), 1000);
 
     // Start wait events monitoring (every 2 seconds)
-    this.waitEventsInterval = setInterval(() => this.reportWaitEvents(db), 2000);
+    this.waitEventsInterval = setInterval(() => this.reportWaitEvents(), 2000);
 
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Running...' });
   }
@@ -88,7 +88,7 @@ class LibraryCacheLockEngine {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
     const procName = `${p}STRESS_SESSION_PROC`;
 
-    this.io?.emit('library-cache-lock-status', { message: 'Creating procedure...' });
+    this.io?.emit('library-cache-lock-status', { running: true, message: 'Creating procedure...' });
 
     try {
       // Drop existing procedure if exists
@@ -140,10 +140,10 @@ class LibraryCacheLockEngine {
       `);
 
       console.log(`Created procedure: ${procName}`);
-      this.io?.emit('library-cache-lock-status', { message: 'Procedure ready' });
+      this.io?.emit('library-cache-lock-status', { running: true, message: 'Procedure ready' });
     } catch (err) {
       console.error('Error creating procedure:', err);
-      this.io?.emit('library-cache-lock-status', { message: `Procedure error: ${err.message}` });
+      this.io?.emit('library-cache-lock-status', { running: true, message: `Procedure error: ${err.message}` });
       throw err;
     }
   }
@@ -264,12 +264,12 @@ class LibraryCacheLockEngine {
     }
   }
 
-  async reportWaitEvents(db) {
-    if (!this.isRunning) return;
+  async reportWaitEvents() {
+    if (!this.isRunning || !this.db) return;
 
     try {
       // Query GV$SESSION_EVENT for library cache related wait events (RAC-aware)
-      const result = await db.execute(`
+      const result = await this.db.execute(`
         SELECT * FROM (
           SELECT event, SUM(time_waited_micro)/1000000 as time_seconds, SUM(total_waits) as total_waits
           FROM gv$session_event
@@ -289,7 +289,7 @@ class LibraryCacheLockEngine {
       }
 
       // Also get the specific library cache contention events
-      const libCacheResult = await db.execute(`
+      const libCacheResult = await this.db.execute(`
         SELECT event, SUM(time_waited_micro)/1000000 as time_seconds, SUM(total_waits) as total_waits
         FROM gv$session_event
         WHERE event IN (
@@ -319,7 +319,7 @@ class LibraryCacheLockEngine {
       let hardParses = 0;
       let parseCount = 0;
       try {
-        const parseResult = await db.execute(`
+        const parseResult = await this.db.execute(`
           SELECT name, SUM(value) as total
           FROM gv$sysstat
           WHERE name IN ('parse count (hard)', 'parse count (total)')
