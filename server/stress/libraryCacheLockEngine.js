@@ -99,7 +99,7 @@ class LibraryCacheLockEngine {
       }
 
       // Create the procedure that causes library cache lock contention
-      // This mimics the GRAV_SESSION_MFES_ONLINE procedure pattern
+      // Based on a customer procedure pattern (PROCEDURE_LIBRARY_CACHE_FROM_CUSTOMER)
       await db.execute(`
         CREATE OR REPLACE PROCEDURE ${procName} (
           pModuleName VARCHAR2
