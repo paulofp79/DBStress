@@ -9,6 +9,7 @@ const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
 const stressEngine = require('./stress/engine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
+const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -358,6 +359,40 @@ app.get('/api/index-contention/status', (req, res) => {
   });
 });
 
+// ============================================
+// Library Cache Lock Demo API Routes
+// ============================================
+
+// Start library cache lock demo
+app.post('/api/library-cache-lock/start', async (req, res) => {
+  const config = req.body;
+  try {
+    await libraryCacheLockEngine.start(oracleDb, config, io);
+    res.json({ success: true, message: 'Library Cache Lock demo started' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop library cache lock demo
+app.post('/api/library-cache-lock/stop', async (req, res) => {
+  try {
+    const stats = await libraryCacheLockEngine.stop();
+    res.json({ success: true, message: 'Library Cache Lock demo stopped', stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get library cache lock demo status
+app.get('/api/library-cache-lock/status', (req, res) => {
+  res.json({
+    isRunning: libraryCacheLockEngine.isRunning,
+    config: libraryCacheLockEngine.config,
+    stats: libraryCacheLockEngine.stats
+  });
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -387,6 +422,7 @@ process.on('SIGTERM', async () => {
   console.log('Shutting down...');
   stressEngine.stop();
   indexContentionEngine.stop();
+  libraryCacheLockEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
@@ -396,6 +432,7 @@ process.on('SIGINT', async () => {
   console.log('Shutting down...');
   stressEngine.stop();
   indexContentionEngine.stop();
+  libraryCacheLockEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);

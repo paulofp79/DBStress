@@ -10,6 +10,7 @@ import TPSChart from './components/TPSChart';
 import OperationsChart from './components/OperationsChart';
 import GCWaitChart from './components/GCWaitChart';
 import IndexContentionPanel from './components/IndexContentionPanel';
+import LibraryCacheLockPanel from './components/LibraryCacheLockPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -376,6 +377,22 @@ function App() {
           >
             Index Contention Demo
           </button>
+          <button
+            onClick={() => setActiveTab('library-cache-lock')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'library-cache-lock' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'library-cache-lock' ? '2px solid #ef4444' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'library-cache-lock' ? '#ef4444' : 'var(--text-muted)',
+              fontWeight: activeTab === 'library-cache-lock' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            Library Cache Lock Demo
+          </button>
         </div>
 
         {/* Stress Test Tab */}
@@ -434,6 +451,15 @@ function App() {
         {/* Index Contention Demo Tab */}
         {activeTab === 'index-contention' && (
           <IndexContentionPanel
+            dbStatus={dbStatus}
+            socket={socket}
+            schemas={schemas}
+          />
+        )}
+
+        {/* Library Cache Lock Demo Tab */}
+        {activeTab === 'library-cache-lock' && (
+          <LibraryCacheLockPanel
             dbStatus={dbStatus}
             socket={socket}
             schemas={schemas}
