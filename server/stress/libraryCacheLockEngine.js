@@ -1,34 +1,39 @@
-// Library Cache Lock Demo Engine
-// Simulates library cache lock contention through repeated ALTER SESSION calls
-// Reproduces: library cache lock, cursor: pin S wait on X, hard parse storms
+// Library Cache Lock Demo Engine (Correct Oracle Internals Model)
+// Reproduces:
+//   - library cache lock
+//   - cursor: pin S wait on X
+// Optional:
+//   - hard parse storms (without ALTER SESSION abuse)
 
 class LibraryCacheLockEngine {
   constructor() {
     this.isRunning = false;
     this.config = null;
     this.pool = null;
-    this.io = null;
     this.db = null;
+    this.io = null;
+
     this.workers = [];
+    this.ddlWorker = null;
     this.schemaPrefix = '';
 
-    // Performance metrics
     this.stats = {
       totalCalls: 0,
       errors: 0,
-      responseTimes: [],
-      tps: 0
+      tps: 0,
+      responseTimes: []
     };
 
-    this.previousStats = {
-      totalCalls: 0
-    };
+    this.previousStats = { totalCalls: 0 };
+    this._lastStatsTime = Date.now();
 
     this.statsInterval = null;
     this.waitEventsInterval = null;
-    this._lastStatsTime = Date.now();
   }
 
+  /* =======================
+     START
+     ======================= */
   async start(db, config, io) {
     if (this.isRunning) {
       throw new Error('Library Cache Lock demo already running');
@@ -36,359 +41,237 @@ class LibraryCacheLockEngine {
 
     this.config = {
       threads: config.threads || 50,
-      callInterval: config.callInterval || 10000,  // Interval between calls in ms (default 10 seconds)
-      useAlterSession: config.useAlterSession !== false,  // Toggle ALTER SESSION statements
-      ...config
+      callInterval: config.callInterval || 0,
+      ddlIntervalMs: config.ddlIntervalMs || 100,
+      enableHardParseStorm: config.enableHardParseStorm || false,
+      schemaPrefix: config.schemaPrefix || ''
     };
 
-    this.schemaPrefix = config.schemaPrefix || '';
-    this.io = io;
     this.db = db;
+    this.io = io;
+    this.schemaPrefix = this.config.schemaPrefix;
     this.isRunning = true;
 
-    // Reset stats
-    this.stats = {
-      totalCalls: 0,
-      errors: 0,
-      responseTimes: [],
-      tps: 0
-    };
-    this.previousStats = { totalCalls: 0 };
-    this._lastStatsTime = Date.now();
+    this.resetStats();
 
-    console.log(`Starting Library Cache Lock Demo with ${this.config.threads} threads`);
-
-    // Emit running status immediately
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Starting...' });
 
-    // Create connection pool
-    this.pool = await db.createStressPool(this.config.threads + 5);
+    // Create pool
+    this.pool = await db.createStressPool(this.config.threads + 2);
 
-    // Create the procedure
-    await this.createProcedure(db);
+    // Create shared procedure
+    await this.createProcedure();
 
-    // Start workers
+    // Start execution workers
     for (let i = 0; i < this.config.threads; i++) {
       this.workers.push(this.runWorker(i));
     }
 
-    // Start stats reporting (every second)
-    this.statsInterval = setInterval(() => this.reportStats(), 1000);
+    // Start DDL invalidator
+    this.ddlWorker = this.runDDLInvalidator();
 
-    // Start wait events monitoring (every 5 seconds)
+    // Stats + waits
+    this.statsInterval = setInterval(() => this.reportStats(), 1000);
     this.waitEventsInterval = setInterval(() => this.reportWaitEvents(), 5000);
 
-    this.io?.emit('library-cache-lock-status', { running: true, message: 'Running...' });
+    this.io?.emit('library-cache-lock-status', { running: true, message: 'Running' });
   }
 
-  async createProcedure(db) {
+  /* =======================
+     SHARED PROCEDURE
+     ======================= */
+  async createProcedure() {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-    const procName = `${p}STRESS_SESSION_PROC`;
+    const procName = `${p}STRESS_SHARED_PROC`;
 
-    this.io?.emit('library-cache-lock-status', { running: true, message: 'Creating procedure...' });
+    await this.db.execute(`BEGIN
+      EXECUTE IMMEDIATE 'DROP PROCEDURE ${procName}';
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;`);
 
-    try {
-      // Drop existing procedure if exists
-      try {
-        await db.execute(`DROP PROCEDURE ${procName}`);
-      } catch (err) {
-        // Procedure might not exist
-      }
+    await this.db.execute(`
+      CREATE OR REPLACE PROCEDURE ${procName}(p_module VARCHAR2) AS
+        v_dummy NUMBER;
+      BEGIN
+        DBMS_APPLICATION_INFO.SET_MODULE(p_module, 'STRESS');
 
-      // Create the procedure that causes library cache lock contention
-      // Based on a customer procedure pattern (PROCEDURE_LIBRARY_CACHE_FROM_CUSTOMER)
-      await db.execute(`
-        CREATE OR REPLACE PROCEDURE ${procName} (
-          pModuleName VARCHAR2
-        )
-        IS
-          pActionName      VARCHAR2(14);
-          pModuleName_mod  VARCHAR2(48);
-        BEGIN
-          -- Build action name
-          pActionName := 'STRESS_ONLINE';
-
-          -- Build modified module name (similar to original pattern)
-          pModuleName_mod := SUBSTR(pModuleName, 1, 22)
-                            || '0000000'
-                            || SUBSTR(pModuleName, 30);
-
-          -- DBMS_APPLICATION_INFO.SET_MODULE - populates v$session module and action
-          DBMS_APPLICATION_INFO.SET_MODULE(pModuleName_mod, pActionName);
-
-          -- DBMS_SESSION.SET_IDENTIFIER - populates client_identifier
-          DBMS_SESSION.SET_IDENTIFIER(pModuleName);
-
-          -- Multiple ALTER SESSION statements - these cause library cache lock contention
-          -- Each ALTER SESSION requires exclusive access to the library cache
-
-          -- Setup optimizer_mode
-          EXECUTE IMMEDIATE 'ALTER SESSION SET OPTIMIZER_MODE = first_rows_1';
-
-          -- Disable optimizer features (causes hard parsing)
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_use_feedback" = false';
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_adaptive_cursor_sharing" = false';
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_extended_cursor_sharing_rel" = none';
-
-          -- Additional ALTER SESSION to increase contention
-          EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_DATE_FORMAT = ''YYYY-MM-DD HH24:MI:SS''';
-
-          -- DDL operation to cause library cache lock contention
-          -- Multiple sessions trying to compile the same procedure simultaneously
-          EXECUTE IMMEDIATE 'CREATE OR REPLACE PROCEDURE temp_stress_proc AS BEGIN NULL; END;';
-
-        END;
-      `);
-
-      console.log(`Created procedure: ${procName}`);
-      this.io?.emit('library-cache-lock-status', { running: true, message: 'Procedure ready' });
-    } catch (err) {
-      console.error('Error creating procedure:', err);
-      this.io?.emit('library-cache-lock-status', { running: true, message: `Procedure error: ${err.message}` });
-      throw err;
-    }
+        ${this.config.enableHardParseStorm ? `
+        EXECUTE IMMEDIATE
+          'SELECT COUNT(*) FROM dual WHERE dummy = ''' ||
+          DBMS_RANDOM.STRING('A', 5) || ''''
+        INTO v_dummy;
+        ` : `
+        SELECT COUNT(*) INTO v_dummy FROM dual;
+        `}
+      END;
+    `);
   }
 
+  /* =======================
+     WORKER SESSIONS
+     ======================= */
   async runWorker(workerId) {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-    const procName = `${p}STRESS_SESSION_PROC`;
+    const procName = `${p}STRESS_SHARED_PROC`;
 
     while (this.isRunning) {
-      if (!this.pool) {
-        await this.sleep(100);
-        continue;
-      }
-
-      let connection;
-
+      let conn;
       try {
-        connection = await this.pool.getConnection();
+        conn = await this.pool.getConnection();
 
-        // Keep connection open and call procedure at regular intervals
-        // This simulates "Same session repeatedly calling a procedure"
         while (this.isRunning) {
-          const startTime = Date.now();
+          const start = Date.now();
+          const moduleName = `STRESS_W${workerId}_${Date.now().toString(36)}`;
 
           try {
-            // Generate a unique module name for each call
-            const timestamp = Date.now().toString(36);
-            const moduleName = `STRESS_W${workerId.toString().padStart(3, '0')}_${timestamp}_TESTMODULE`;
+            await conn.execute(
+              `BEGIN ${procName}(:p); END;`,
+              { p: moduleName }
+            );
 
-            if (this.config.useAlterSession) {
-              // Call the procedure with ALTER SESSION statements
-              await connection.execute(
-                `BEGIN ${procName}(:moduleName); END;`,
-                { moduleName }
-              );
-            } else {
-              // Light version - only SET_MODULE, no ALTER SESSION
-              await connection.execute(
-                `BEGIN
-                   DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, 'STRESS_LIGHT');
-                 END;`,
-                { moduleName }
-              );
-            }
-
-            const responseTime = Date.now() - startTime;
+            const rt = Date.now() - start;
             this.stats.totalCalls++;
-            this.stats.responseTimes.push(responseTime);
-
-            // Keep only last 1000 response times
+            this.stats.responseTimes.push(rt);
             if (this.stats.responseTimes.length > 1000) {
               this.stats.responseTimes.shift();
             }
 
           } catch (err) {
-            this.stats.errors++;
-            if (this.stats.errors % 100 === 1) {
-              console.log(`Library cache lock worker ${workerId} error:`, err.message);
+            // Expected invalidation errors
+            if ([4068, 4065, 6508].includes(err.errorNum)) {
+              continue;
             }
-            // Break out of inner loop on error to get new connection
+            this.stats.errors++;
             break;
           }
 
-          // Wait for call interval before next call
-          if (this.isRunning && this.config.callInterval > 0) {
+          if (this.config.callInterval > 0) {
             await this.sleep(this.config.callInterval);
           }
         }
-
-      } catch (err) {
-        this.stats.errors++;
-        if (!err.message.includes('pool is terminating') &&
-            !err.message.includes('NJS-003') &&
-            !err.message.includes('NJS-500')) {
-          if (this.stats.errors % 100 === 1) {
-            console.log(`Library cache lock worker ${workerId} connection error:`, err.message);
-          }
-        }
       } finally {
-        if (connection) {
-          try { await connection.close(); } catch (e) {}
+        if (conn) {
+          try { await conn.close(); } catch {}
         }
       }
 
-      // Small delay before reconnecting after error
-      if (this.isRunning) {
-        await this.sleep(1000);
-      }
+      await this.sleep(500);
     }
+  }
+
+  /* =======================
+     DDL INVALIDATOR
+     ======================= */
+  async runDDLInvalidator() {
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+    const procName = `${p}STRESS_SHARED_PROC`;
+
+    while (this.isRunning) {
+      let conn;
+      try {
+        conn = await this.pool.getConnection();
+        await conn.execute(`
+          CREATE OR REPLACE PROCEDURE ${procName}(p_module VARCHAR2) AS
+            v_dummy NUMBER;
+          BEGIN
+            DBMS_APPLICATION_INFO.SET_MODULE(p_module, 'STRESS');
+            SELECT COUNT(*) INTO v_dummy FROM dual;
+          END;
+        `);
+      } catch {
+        // Ignore
+      } finally {
+        if (conn) {
+          try { await conn.close(); } catch {}
+        }
+      }
+      await this.sleep(this.config.ddlIntervalMs);
+    }
+  }
+
+  /* =======================
+     STATS
+     ======================= */
+  resetStats() {
+    this.stats = { totalCalls: 0, errors: 0, tps: 0, responseTimes: [] };
+    this.previousStats = { totalCalls: 0 };
+    this._lastStatsTime = Date.now();
   }
 
   reportStats() {
     const now = Date.now();
-    const elapsedSeconds = (now - this._lastStatsTime) / 1000;
+    const elapsed = (now - this._lastStatsTime) / 1000;
     this._lastStatsTime = now;
 
-    // Calculate TPS
-    const currentTotalCalls = this.stats.totalCalls;
-    const callsDelta = currentTotalCalls - this.previousStats.totalCalls;
-    const tps = elapsedSeconds > 0 ? Math.round(callsDelta / elapsedSeconds) : 0;
-    this.stats.tps = tps;
-    this.previousStats.totalCalls = currentTotalCalls;
+    const delta = this.stats.totalCalls - this.previousStats.totalCalls;
+    this.stats.tps = elapsed > 0 ? Math.round(delta / elapsed) : 0;
+    this.previousStats.totalCalls = this.stats.totalCalls;
 
-    const avgResponseTime = this.stats.responseTimes.length > 0
-      ? this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length
+    const avgRT = this.stats.responseTimes.length
+      ? Math.round(this.stats.responseTimes.reduce((a, b) => a + b, 0) / this.stats.responseTimes.length)
       : 0;
 
-    const metrics = {
-      tps,
-      avgResponseTime,
+    this.io?.emit('library-cache-lock-metrics', {
+      tps: this.stats.tps,
+      avgResponseTime: avgRT,
       totalCalls: this.stats.totalCalls,
       errors: this.stats.errors
-    };
-
-    if (this.io) {
-      this.io.emit('library-cache-lock-metrics', metrics);
-    }
+    });
   }
 
+  /* =======================
+     WAIT EVENTS
+     ======================= */
   async reportWaitEvents() {
-    if (!this.isRunning || !this.db) return;
+    if (!this.isRunning) return;
 
     try {
-      // Query GV$SESSION_EVENT for library cache related wait events (RAC-aware)
       const result = await this.db.execute(`
-        SELECT * FROM (
-          SELECT event, SUM(time_waited_micro)/1000000 as time_seconds, SUM(total_waits) as total_waits
-          FROM gv$session_event
-          WHERE wait_class != 'Idle'
-          GROUP BY event
-          ORDER BY time_seconds DESC
-        ) WHERE ROWNUM <= 10
-      `);
-
-      const top10WaitEvents = [];
-      for (const row of result.rows) {
-        top10WaitEvents.push({
-          event: row.EVENT,
-          timeSeconds: row.TIME_SECONDS || 0,
-          totalWaits: row.TOTAL_WAITS || 0
-        });
-      }
-
-      // Also get the specific library cache contention events
-      const libCacheResult = await this.db.execute(`
-        SELECT event, SUM(time_waited_micro)/1000000 as time_seconds, SUM(total_waits) as total_waits
+        SELECT event, SUM(time_waited_micro)/1e6 time_s, SUM(total_waits) waits
         FROM gv$session_event
         WHERE event IN (
           'library cache lock',
-          'library cache pin',
-          'library cache load lock',
           'cursor: pin S wait on X',
-          'cursor: pin S',
+          'library cache pin',
           'cursor: mutex S',
-          'cursor: mutex X',
-          'latch: shared pool',
-          'latch: library cache',
-          'row cache lock'
+          'cursor: mutex X'
         )
         GROUP BY event
       `);
 
-      const libraryCacheEvents = {};
-      for (const row of libCacheResult.rows) {
-        libraryCacheEvents[row.EVENT] = {
-          timeSeconds: row.TIME_SECONDS || 0,
-          totalWaits: row.TOTAL_WAITS || 0
+      const events = {};
+      for (const r of result.rows) {
+        events[r.EVENT] = {
+          timeSeconds: r.TIME_S || 0,
+          totalWaits: r.WAITS || 0
         };
       }
 
-      // Get hard parse count from GV$SYSSTAT
-      let hardParses = 0;
-      let parseCount = 0;
-      try {
-        const parseResult = await this.db.execute(`
-          SELECT name, SUM(value) as total
-          FROM gv$sysstat
-          WHERE name IN ('parse count (hard)', 'parse count (total)')
-          GROUP BY name
-        `);
-        for (const row of parseResult.rows) {
-          if (row.NAME === 'parse count (hard)') {
-            hardParses = row.TOTAL || 0;
-          } else if (row.NAME === 'parse count (total)') {
-            parseCount = row.TOTAL || 0;
-          }
-        }
-      } catch (e) {
-        // Silently fail
-      }
-
-      if (this.io) {
-        this.io.emit('library-cache-lock-wait-events', {
-          top10WaitEvents,
-          libraryCacheEvents,
-          hardParses,
-          parseCount
-        });
-      }
-    } catch (err) {
-      console.log('Cannot query wait events:', err.message);
-    }
+      this.io?.emit('library-cache-lock-wait-events', events);
+    } catch {}
   }
 
+  /* =======================
+     STOP
+     ======================= */
   async stop() {
-    console.log('Stopping Library Cache Lock Demo...');
     this.isRunning = false;
 
-    if (this.statsInterval) {
-      clearInterval(this.statsInterval);
-      this.statsInterval = null;
-    }
-
-    if (this.waitEventsInterval) {
-      clearInterval(this.waitEventsInterval);
-      this.waitEventsInterval = null;
-    }
+    clearInterval(this.statsInterval);
+    clearInterval(this.waitEventsInterval);
 
     await this.sleep(500);
 
     if (this.pool) {
-      try {
-        await this.pool.close(2);
-      } catch (err) {
-        console.log('Pool close warning:', err.message);
-      }
-      this.pool = null;
+      try { await this.pool.close(2); } catch {}
     }
 
-    this.workers = [];
-
-    if (this.io) {
-      this.io.emit('library-cache-lock-stopped', {
-        totalCalls: this.stats.totalCalls,
-        errors: this.stats.errors
-      });
-    }
-
-    console.log('Library Cache Lock Demo stopped');
+    this.io?.emit('library-cache-lock-stopped', this.stats);
     return this.stats;
   }
 
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(r => setTimeout(r, ms));
   }
 }
 
