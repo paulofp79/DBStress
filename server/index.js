@@ -8,6 +8,8 @@ require('dotenv').config();
 const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
 const stressEngine = require('./stress/engine');
+const indexContentionEngine = require('./stress/indexContentionEngine');
+const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -118,6 +120,21 @@ app.post('/api/schema/drop', async (req, res) => {
   try {
     await schemaManager.dropSchema(oracleDb, prefix);
     res.json({ success: true, message: `Schema${prefix ? ` '${prefix}'` : ''} dropped successfully` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Generate SQL script for schema creation (download)
+app.post('/api/schema/generate-script', (req, res) => {
+  const { prefix = '', compressionType = 'none', scaleFactor = 1, racTableCount = 1 } = req.body;
+  try {
+    const script = schemaManager.generateScript({ prefix, compressionType, scaleFactor, racTableCount });
+    const filename = `dbstress_schema${prefix ? `_${prefix}` : ''}_${scaleFactor}x.sql`;
+
+    res.setHeader('Content-Type', 'application/sql');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(script);
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -268,6 +285,114 @@ app.put('/api/stress/config', async (req, res) => {
   }
 });
 
+// ============================================
+// Index Contention Demo API Routes
+// ============================================
+
+// Start index contention demo
+app.post('/api/index-contention/start', async (req, res) => {
+  const config = req.body;
+  try {
+    await indexContentionEngine.start(oracleDb, config, io);
+    res.json({ success: true, message: 'Index Contention demo started' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop index contention demo
+app.post('/api/index-contention/stop', async (req, res) => {
+  try {
+    const stats = await indexContentionEngine.stop();
+    res.json({ success: true, message: 'Index Contention demo stopped', stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Change index type while running
+app.post('/api/index-contention/change-index', async (req, res) => {
+  const { indexType, schemaPrefix } = req.body;
+  try {
+    if (!indexContentionEngine.isRunning) {
+      return res.status(400).json({ success: false, error: 'Demo not running' });
+    }
+    await indexContentionEngine.changeIndex(oracleDb, indexType);
+    res.json({ success: true, message: `Index type changed to ${indexType}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Change sequence cache (0 == NOCACHE) at runtime
+app.post('/api/index-contention/change-sequence-cache', async (req, res) => {
+  const { cache } = req.body; // integer
+  try {
+    await indexContentionEngine.changeSequenceCache(oracleDb, cache);
+    res.json({ success: true, message: `Sequence cache changed to ${cache}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Run an A/B test comparing two sequence cache settings while the demo is running
+app.post('/api/index-contention/ab-test-sequence-cache', async (req, res) => {
+  const { cacheA = 0, cacheB = 100, duration = 10, warmup = 5 } = req.body;
+  try {
+    if (!indexContentionEngine.isRunning) {
+      return res.status(400).json({ success: false, error: 'Demo not running' });
+    }
+
+    const result = await indexContentionEngine.runSequenceCacheABTest(oracleDb, { cacheA, cacheB, duration, warmup });
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get index contention demo status
+app.get('/api/index-contention/status', (req, res) => {
+  res.json({
+    isRunning: indexContentionEngine.isRunning,
+    config: indexContentionEngine.config,
+    stats: indexContentionEngine.stats
+  });
+});
+
+// ============================================
+// Library Cache Lock Demo API Routes
+// ============================================
+
+// Start library cache lock demo
+app.post('/api/library-cache-lock/start', async (req, res) => {
+  const config = req.body;
+  try {
+    await libraryCacheLockEngine.start(oracleDb, config, io);
+    res.json({ success: true, message: 'Library Cache Lock demo started' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop library cache lock demo
+app.post('/api/library-cache-lock/stop', async (req, res) => {
+  try {
+    const stats = await libraryCacheLockEngine.stop();
+    res.json({ success: true, message: 'Library Cache Lock demo stopped', stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get library cache lock demo status
+app.get('/api/library-cache-lock/status', (req, res) => {
+  res.json({
+    isRunning: libraryCacheLockEngine.isRunning,
+    config: libraryCacheLockEngine.config,
+    stats: libraryCacheLockEngine.stats
+  });
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -296,6 +421,8 @@ server.listen(PORT, () => {
 process.on('SIGTERM', async () => {
   console.log('Shutting down...');
   stressEngine.stop();
+  indexContentionEngine.stop();
+  libraryCacheLockEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
@@ -304,6 +431,8 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('Shutting down...');
   stressEngine.stop();
+  indexContentionEngine.stop();
+  libraryCacheLockEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);

@@ -1,5 +1,13 @@
 import React, { useState, useEffect } from 'react';
 
+// Auto-detect server URL
+const getServerUrl = () => {
+  if (window.location.hostname !== 'localhost') {
+    return `http://${window.location.host}`;
+  }
+  return 'http://localhost:3001';
+};
+
 function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefreshSchemas, socket }) {
   const [scaleFactor, setScaleFactor] = useState(1);
   const parallelism = 10; // Fixed parallelism for batch inserts
@@ -19,8 +27,8 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
 
   // Batch schema definitions - create multiple schemas at once
   const [schemaDefinitions, setSchemaDefinitions] = useState([
-    { prefix: 'nocomp', compressionType: 'none', racTableCount: 1, enabled: true },
-    { prefix: 'rowadv', compressionType: 'advanced', racTableCount: 1, enabled: true }
+    { prefix: 'nocomp', compressionType: 'none', racTableCount: 1, indexContentionTableCount: 1, enabled: true },
+    { prefix: 'rowadv', compressionType: 'advanced', racTableCount: 1, indexContentionTableCount: 1, enabled: true }
   ]);
 
   useEffect(() => {
@@ -63,6 +71,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
         prefix: schema.prefix,
         compressionType: schema.compressionType,
         racTableCount: schema.racTableCount || 1,
+        indexContentionTableCount: schema.indexContentionTableCount || 1,
         parallelism
       });
     });
@@ -100,7 +109,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
   const addSchemaDefinition = () => {
     setSchemaDefinitions(prev => [
       ...prev,
-      { prefix: `schema${prev.length + 1}`, compressionType: 'none', racTableCount: 1, enabled: true }
+      { prefix: `schema${prev.length + 1}`, compressionType: 'none', racTableCount: 1, indexContentionTableCount: 1, enabled: true }
     ]);
   };
 
@@ -113,6 +122,50 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
     if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
     return num?.toString() || '0';
+  };
+
+  // Download SQL script for a schema
+  const handleDownloadScript = async (schema) => {
+    try {
+      const response = await fetch(`${getServerUrl()}/api/schema/generate-script`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prefix: schema.prefix,
+          compressionType: schema.compressionType || 'none',
+          scaleFactor: scaleFactor,
+          racTableCount: schema.racTableCount || 1,
+          indexContentionTableCount: schema.indexContentionTableCount || 1
+        })
+      });
+
+      if (!response.ok) throw new Error('Failed to generate script');
+
+      const blob = await response.blob();
+      const filename = `dbstress_schema${schema.prefix ? `_${schema.prefix}` : ''}_${scaleFactor}x.sql`;
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      alert('Failed to download script: ' + err.message);
+    }
+  };
+
+  // Download all enabled schemas as scripts
+  const handleDownloadAllScripts = async () => {
+    const enabledSchemas = schemaDefinitions.filter(s => s.enabled);
+    for (const schema of enabledSchemas) {
+      await handleDownloadScript(schema);
+      // Small delay between downloads
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
   };
 
   if (!dbStatus.connected) {
@@ -227,14 +280,54 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
               <input
                 type="range"
                 min="1"
-                max="100"
+                max="1000"
                 value={scaleFactor}
                 onChange={(e) => setScaleFactor(parseInt(e.target.value))}
                 disabled={isCreatingAny}
               />
-              <span className="slider-value">{scaleFactor}x</span>
+              <input
+                type="number"
+                min="1"
+                max="1000"
+                value={scaleFactor}
+                onChange={(e) => setScaleFactor(Math.max(1, Math.min(1000, parseInt(e.target.value) || 1)))}
+                disabled={isCreatingAny}
+                style={{
+                  width: '70px',
+                  padding: '0.25rem',
+                  background: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '4px',
+                  color: 'var(--text-primary)',
+                  fontSize: '0.875rem',
+                  textAlign: 'center',
+                  marginLeft: '0.5rem'
+                }}
+              />
+              <span className="slider-value">x</span>
             </div>
-            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            <div style={{ display: 'flex', gap: '0.25rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+              {[1, 10, 50, 100, 250, 500, 1000].map(val => (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => setScaleFactor(val)}
+                  disabled={isCreatingAny}
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: '0.7rem',
+                    background: scaleFactor === val ? 'var(--accent-primary)' : 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '4px',
+                    color: scaleFactor === val ? 'white' : 'var(--text-primary)',
+                    cursor: isCreatingAny ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {val}x
+                </button>
+              ))}
+            </div>
+            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
               {scaleFactor}x = ~{formatNumber(1000 * scaleFactor)} customers,
               ~{formatNumber(500 * scaleFactor)} products,
               ~{formatNumber(5000 * scaleFactor)} orders
@@ -341,7 +434,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
                         <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                          RAC Tables:
+                          RAC:
                         </label>
                         <input
                           type="number"
@@ -350,6 +443,7 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                           value={schema.racTableCount || 1}
                           onChange={(e) => updateSchemaDefinition(index, 'racTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
                           disabled={isCreatingAny}
+                          title="Number of RAC hot table pairs"
                           style={{
                             width: '50px',
                             padding: '0.4rem',
@@ -362,6 +456,49 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
                           }}
                         />
                       </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                          Idx:
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={schema.indexContentionTableCount || 1}
+                          onChange={(e) => updateSchemaDefinition(index, 'indexContentionTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                          disabled={isCreatingAny}
+                          title="Number of Index Contention tables (txn_history)"
+                          style={{
+                            width: '50px',
+                            padding: '0.4rem',
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border)',
+                            borderRadius: '4px',
+                            color: 'var(--text-primary)',
+                            fontSize: '0.75rem',
+                            textAlign: 'center'
+                          }}
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadScript(schema)}
+                        disabled={isCreatingAny}
+                        title="Download SQL script"
+                        style={{
+                          background: 'var(--accent-primary)',
+                          border: 'none',
+                          color: 'white',
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          fontSize: '0.75rem',
+                          cursor: isCreatingAny ? 'not-allowed' : 'pointer'
+                        }}
+                      >
+                        SQL
+                      </button>
 
                       {schemaDefinitions.length > 1 && (
                         <button
@@ -393,16 +530,29 @@ function SchemaPanel({ dbStatus, schemas, onCreateSchema, onDropSchema, onRefres
             </p>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
             <button
               className="btn btn-success"
               onClick={handleCreateAll}
               disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
-              style={{ flex: 1 }}
+              style={{ flex: 1, minWidth: '150px' }}
             >
               {isCreatingAny
                 ? 'Creating...'
                 : `Create ${schemaDefinitions.filter(s => s.enabled).length} Schema(s)`}
+            </button>
+
+            <button
+              className="btn"
+              onClick={handleDownloadAllScripts}
+              disabled={isCreatingAny || schemaDefinitions.filter(s => s.enabled).length === 0}
+              style={{
+                background: 'var(--accent-primary)',
+                whiteSpace: 'nowrap'
+              }}
+              title="Download SQL scripts to run from SQL*Plus"
+            >
+              Download SQL Scripts
             </button>
 
             {existingSchemas.length > 0 && (

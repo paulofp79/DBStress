@@ -48,6 +48,9 @@ class StressEngine {
       // RAC Contention Mode settings
       racMode: config.racMode || false,
       racIntensity: config.racIntensity || 'high', // low, medium, high
+      // Index Contention Mode settings
+      indexContentionMode: config.indexContentionMode || false,
+      indexContentionTableCount: config.indexContentionTableCount || 1,
       ...config
     };
 
@@ -111,6 +114,10 @@ class StressEngine {
           if (this.config.racMode) {
             await this.performRacContention(connection, p, workerId);
             stats.updates++;
+          } else if (this.config.indexContentionMode) {
+            // Index Contention Mode: Focus on right-hand leaf block contention
+            await this.performIndexContention(connection, p, workerId);
+            stats.inserts++;
           } else {
             // Normal mode: Decide which operation to perform based on configured ratios
             const operation = this.selectOperation();
@@ -635,6 +642,68 @@ class StressEngine {
          WHERE id BETWEEN :1 AND :2
          GROUP BY bucket`,
         [startId, startId + 50]
+      );
+    }
+  }
+
+  // Index Contention Mode - generates "enq: TX - index contention" and "buffer busy waits"
+  // by having all sessions insert into the same rightmost leaf block of a B-tree index
+  // This simulates the classic sequence-based primary key contention problem
+  async performIndexContention(connection, p = '', workerId = 0) {
+    const tableCount = this.config.indexContentionTableCount || 1;
+
+    // Get current instance and session info for tracking
+    let instanceNum = 1;
+    let sessionId = 0;
+    try {
+      const instResult = await connection.execute(
+        `SELECT SYS_CONTEXT('USERENV', 'INSTANCE') as inst,
+                SYS_CONTEXT('USERENV', 'SID') as sid
+         FROM dual`
+      );
+      instanceNum = parseInt(instResult.rows[0]?.INST) || 1;
+      sessionId = parseInt(instResult.rows[0]?.SID) || 0;
+    } catch (err) {
+      // Ignore - use defaults
+    }
+
+    // Randomly select which txn_history table to target (spreads load if multiple tables)
+    const tableNum = Math.floor(Math.random() * tableCount) + 1;
+    const tableSuffix = tableNum > 1 ? `_${tableNum}` : '';
+
+    // Get sequence nextval - with NOCACHE NOORDER, this causes contention
+    // Then insert into table - all inserts go to rightmost leaf block of PK index
+    const txnTypes = ['PURCHASE', 'REFUND', 'TRANSFER', 'ADJUSTMENT', 'REVERSAL'];
+    const txnType = txnTypes[Math.floor(Math.random() * txnTypes.length)];
+    const txnAmount = parseFloat((Math.random() * 10000).toFixed(2));
+    const txnData = `Worker ${workerId} transaction at ${new Date().toISOString()}`;
+
+    // Single insert using sequence - this is where the contention occurs
+    // The sequence NEXTVAL serializes across all sessions (NOCACHE)
+    // The PK index insert all go to the same rightmost leaf block (ascending key)
+    await connection.execute(
+      `INSERT INTO ${p}txn_history${tableSuffix}
+         (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
+       VALUES
+         (${p}seq_txn_history${tableSuffix}.NEXTVAL, :1, :2, :3, :4, :5)`,
+      [sessionId, instanceNum, txnType, txnAmount, txnData]
+    );
+
+    // Optionally do multiple inserts per transaction to increase contention
+    // Each insert competes for sequence latch and index leaf block
+    const additionalInserts = Math.floor(Math.random() * 3); // 0-2 additional
+    for (let i = 0; i < additionalInserts; i++) {
+      const nextTableNum = Math.floor(Math.random() * tableCount) + 1;
+      const nextSuffix = nextTableNum > 1 ? `_${nextTableNum}` : '';
+      const nextType = txnTypes[Math.floor(Math.random() * txnTypes.length)];
+      const nextAmount = parseFloat((Math.random() * 10000).toFixed(2));
+
+      await connection.execute(
+        `INSERT INTO ${p}txn_history${nextSuffix}
+           (txn_id, session_id, instance_id, txn_type, txn_amount, txn_data)
+         VALUES
+           (${p}seq_txn_history${nextSuffix}.NEXTVAL, :1, :2, :3, :4, :5)`,
+        [sessionId, instanceNum, nextType, nextAmount, `Additional insert ${i + 1}`]
       );
     }
   }

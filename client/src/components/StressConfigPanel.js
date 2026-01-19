@@ -11,7 +11,10 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
     // RAC Contention Mode
     racMode: false,
     racIntensity: 'high',
-    racTableCount: 1  // Number of RAC hot table pairs to target
+    racTableCount: 1,  // Number of RAC hot table pairs to target
+    // Index Contention Mode
+    indexContentionMode: false,
+    indexContentionTableCount: 1  // Number of txn_history tables
   });
 
   // Schema selection for stress testing
@@ -361,14 +364,84 @@ function StressConfigPanel({ dbStatus, schemas, stressStatus, onStart, onStop, o
               )}
             </div>
 
+            {/* Index Contention Mode */}
+            <div style={{
+              background: config.indexContentionMode ? 'rgba(251, 146, 60, 0.1)' : 'var(--surface)',
+              border: config.indexContentionMode ? '2px solid var(--accent-warning)' : '1px solid var(--border)',
+              borderRadius: '8px',
+              padding: '1rem',
+              marginBottom: '1rem'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div>
+                  <label style={{ fontWeight: '600', color: config.indexContentionMode ? 'var(--accent-warning)' : 'var(--text-primary)' }}>
+                    Index Contention Mode
+                  </label>
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: '0.25rem 0 0 0' }}>
+                    Simulates "enq: TX - index contention" and "buffer busy waits"
+                  </p>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={config.indexContentionMode}
+                    onChange={(e) => {
+                      handleChange('indexContentionMode', e.target.checked);
+                      // Turn off RAC mode if enabling index contention mode
+                      if (e.target.checked && config.racMode) {
+                        handleChange('racMode', false);
+                      }
+                    }}
+                    disabled={stressStatus.isRunning}
+                    style={{ width: '18px', height: '18px', marginRight: '0.5rem' }}
+                  />
+                  <span style={{ fontSize: '0.8rem', fontWeight: '500' }}>
+                    {config.indexContentionMode ? 'ON' : 'OFF'}
+                  </span>
+                </label>
+              </div>
+
+              {config.indexContentionMode && (
+                <>
+                  <div className="form-group" style={{ marginBottom: '0.5rem' }}>
+                    <label style={{ fontSize: '0.8rem' }}>Number of Transaction History Tables</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={config.indexContentionTableCount}
+                      onChange={(e) => handleChange('indexContentionTableCount', Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                      disabled={stressStatus.isRunning}
+                      style={{
+                        width: '100px',
+                        padding: '0.5rem',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '4px',
+                        color: 'var(--text-primary)',
+                        marginTop: '0.25rem',
+                        textAlign: 'center'
+                      }}
+                    />
+                  </div>
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0 }}>
+                    All sessions insert with sequence-based PKs (NOCACHE NOORDER).
+                    This causes right-hand leaf block contention on the B-tree index.
+                  </p>
+                </>
+              )}
+            </div>
+
             <div className="btn-group">
               {canStart && (
                 <button
-                  className={config.racMode ? "btn btn-danger" : "btn btn-success"}
+                  className={config.racMode ? "btn btn-danger" : config.indexContentionMode ? "btn btn-warning" : "btn btn-success"}
                   onClick={handleStart}
                 >
                   {config.racMode
                     ? `Start RAC Contention Test (${selectedSchemas.length} schema${selectedSchemas.length > 1 ? 's' : ''})`
+                    : config.indexContentionMode
+                    ? `Start Index Contention Test (${selectedSchemas.length} schema${selectedSchemas.length > 1 ? 's' : ''})`
                     : `Start Stress Test (${selectedSchemas.length} schema${selectedSchemas.length > 1 ? 's' : ''})`
                   }
                 </button>

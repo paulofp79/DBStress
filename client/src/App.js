@@ -9,8 +9,21 @@ import WaitEventsPanel from './components/WaitEventsPanel';
 import TPSChart from './components/TPSChart';
 import OperationsChart from './components/OperationsChart';
 import GCWaitChart from './components/GCWaitChart';
+import IndexContentionPanel from './components/IndexContentionPanel';
+import LibraryCacheLockPanel from './components/LibraryCacheLockPanel';
 
-const API_BASE = 'http://localhost:3001/api';
+// Auto-detect server URL based on where the page is loaded from
+const getServerUrl = () => {
+  // In production, use the same host as the page
+  if (window.location.hostname !== 'localhost') {
+    return `http://${window.location.host}`;
+  }
+  // In development, use localhost:3001
+  return 'http://localhost:3001';
+};
+
+const SERVER_URL = getServerUrl();
+const API_BASE = `${SERVER_URL}/api`;
 
 // Configure axios defaults
 axios.defaults.timeout = 30000; // 30 second timeout
@@ -21,6 +34,7 @@ function App() {
   const [dbStatus, setDbStatus] = useState({ connected: false });
   const [stressStatus, setStressStatus] = useState({ isRunning: false });
   const [schemas, setSchemas] = useState([]);
+  const [activeTab, setActiveTab] = useState('stress'); // 'stress' or 'index-contention'
   const [metrics, setMetrics] = useState({
     tps: [],
     operations: [],
@@ -36,7 +50,7 @@ function App() {
 
   // Initialize socket connection
   useEffect(() => {
-    const newSocket = io('http://localhost:3001');
+    const newSocket = io(SERVER_URL);
 
     newSocket.on('connect', () => {
       console.log('Socket connected');
@@ -324,52 +338,132 @@ function App() {
         {error && <div className="alert alert-danger">{error}</div>}
         {success && <div className="alert alert-success">{success}</div>}
 
-        <div className="grid-3">
-          <ConnectionPanel
-            dbStatus={dbStatus}
-            onConnect={handleConnect}
-            onDisconnect={handleDisconnect}
-          />
-
-          <SchemaPanel
-            dbStatus={dbStatus}
-            schemas={schemas}
-            onCreateSchema={handleCreateSchema}
-            onDropSchema={handleDropSchema}
-            onRefreshSchemas={fetchSchemas}
-            socket={socket}
-          />
-
-          <StressConfigPanel
-            dbStatus={dbStatus}
-            schemas={schemas}
-            stressStatus={stressStatus}
-            onStart={handleStartStress}
-            onStop={handleStopStress}
-            onUpdateConfig={handleUpdateConfig}
-          />
+        {/* Tab Navigation */}
+        <div style={{
+          display: 'flex',
+          gap: '0',
+          marginBottom: '1rem',
+          borderBottom: '2px solid var(--border)'
+        }}>
+          <button
+            onClick={() => setActiveTab('stress')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'stress' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'stress' ? '2px solid var(--accent-primary)' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'stress' ? 'var(--accent-primary)' : 'var(--text-muted)',
+              fontWeight: activeTab === 'stress' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            Stress Test
+          </button>
+          <button
+            onClick={() => setActiveTab('index-contention')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'index-contention' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'index-contention' ? '2px solid var(--accent-warning)' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'index-contention' ? 'var(--accent-warning)' : 'var(--text-muted)',
+              fontWeight: activeTab === 'index-contention' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            Index Contention Demo
+          </button>
+          <button
+            onClick={() => setActiveTab('library-cache-lock')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'library-cache-lock' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'library-cache-lock' ? '2px solid #ef4444' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'library-cache-lock' ? '#ef4444' : 'var(--text-muted)',
+              fontWeight: activeTab === 'library-cache-lock' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            Library Cache Lock Demo
+          </button>
         </div>
 
-        {stressStatus.isRunning && (
+        {/* Stress Test Tab */}
+        {activeTab === 'stress' && (
           <>
-            <MetricsPanel metrics={metrics} stressStatus={stressStatus} />
-
-            <div className="grid-2">
-              <TPSChart
-                data={metrics.tps}
-                schemaData={isMultiSchema ? metrics.tpsBySchema : null}
+            <div className="grid-3">
+              <ConnectionPanel
+                dbStatus={dbStatus}
+                onConnect={handleConnect}
+                onDisconnect={handleDisconnect}
               />
-              <OperationsChart
-                data={metrics.operations}
-                schemaData={isMultiSchema ? metrics.operationsBySchema : null}
+
+              <SchemaPanel
+                dbStatus={dbStatus}
+                schemas={schemas}
+                onCreateSchema={handleCreateSchema}
+                onDropSchema={handleDropSchema}
+                onRefreshSchemas={fetchSchemas}
+                socket={socket}
+              />
+
+              <StressConfigPanel
+                dbStatus={dbStatus}
+                schemas={schemas}
+                stressStatus={stressStatus}
+                onStart={handleStartStress}
+                onStop={handleStopStress}
+                onUpdateConfig={handleUpdateConfig}
               />
             </div>
 
-            <div className="grid-2">
-              <WaitEventsPanel waitEvents={metrics.waitEvents} />
-              <GCWaitChart gcWaitEvents={metrics.gcWaitEvents} />
-            </div>
+            {stressStatus.isRunning && (
+              <>
+                <MetricsPanel metrics={metrics} stressStatus={stressStatus} />
+
+                <div className="grid-2">
+                  <TPSChart
+                    data={metrics.tps}
+                    schemaData={isMultiSchema ? metrics.tpsBySchema : null}
+                  />
+                  <OperationsChart
+                    data={metrics.operations}
+                    schemaData={isMultiSchema ? metrics.operationsBySchema : null}
+                  />
+                </div>
+
+                <div className="grid-2">
+                  <WaitEventsPanel waitEvents={metrics.waitEvents} />
+                  <GCWaitChart gcWaitEvents={metrics.gcWaitEvents} />
+                </div>
+              </>
+            )}
           </>
+        )}
+
+        {/* Index Contention Demo Tab */}
+        {activeTab === 'index-contention' && (
+          <IndexContentionPanel
+            dbStatus={dbStatus}
+            socket={socket}
+            schemas={schemas}
+          />
+        )}
+
+        {/* Library Cache Lock Demo Tab */}
+        {activeTab === 'library-cache-lock' && (
+          <LibraryCacheLockPanel
+            dbStatus={dbStatus}
+            socket={socket}
+            schemas={schemas}
+          />
         )}
       </main>
     </div>

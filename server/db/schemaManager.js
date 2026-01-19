@@ -211,6 +211,45 @@ const getRacIndexes = (prefix, tableNum = 1) => {
   ];
 };
 
+// Generate Index Contention table DDL
+// This table simulates the classic "right-hand index leaf block contention" scenario:
+// - Primary key populated by sequence (ascending values)
+// - All inserts go to the rightmost leaf block of the B-tree index
+// - Causes "buffer busy waits" and "enq: TX - index contention" wait events
+// - Low INITRANS to maximize contention
+const getIndexContentionTableDDL = (prefix, compressionType = 'none', tableCount = 1) => {
+  const p = prefix ? `${prefix}_` : '';
+  const compressClause = COMPRESSION_TYPES[compressionType] ? ` ${COMPRESSION_TYPES[compressionType]}` : '';
+  const tables = {};
+
+  for (let i = 1; i <= tableCount; i++) {
+    const suffix = i > 1 ? `_${i}` : '';
+    // History table with sequence-based PK - classic index contention pattern
+    tables[`${p}txn_history${suffix}`] = `
+      CREATE TABLE ${p}txn_history${suffix} (
+        txn_id NUMBER NOT NULL,
+        session_id NUMBER,
+        instance_id NUMBER,
+        txn_type VARCHAR2(50),
+        txn_amount NUMBER(12,2),
+        txn_status VARCHAR2(20) DEFAULT 'COMPLETED',
+        txn_data VARCHAR2(200),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT ${p}pk_txn_history${suffix} PRIMARY KEY (txn_id)
+      )${compressClause} PCTFREE 10 INITRANS 1 MAXTRANS 255 LOGGING`;
+
+    // Sequence for the table - causes ascending key inserts
+    tables[`${p}seq_txn_history${suffix}`] = `
+      CREATE SEQUENCE ${p}seq_txn_history${suffix}
+        START WITH 1
+        INCREMENT BY 1
+        NOCACHE
+        NOORDER`;
+  }
+
+  return tables;
+};
+
 const getIndexes = (prefix) => {
   const p = prefix ? `${prefix}_` : '';
   return [
@@ -287,7 +326,7 @@ class SchemaManager {
     this.schemas = new Map(); // Store schema metadata
   }
 
-  getTableNames(prefix, racTableCount = 1) {
+  getTableNames(prefix, racTableCount = 1, indexContentionTableCount = 1) {
     const p = prefix ? `${prefix}_` : '';
     const baseNames = [
       `${p}regions`, `${p}countries`, `${p}warehouses`, `${p}categories`,
@@ -302,15 +341,22 @@ class SchemaManager {
       baseNames.push(`${p}rac_hotindex${suffix}`);
     }
 
+    // Add Index Contention tables dynamically
+    for (let i = 1; i <= indexContentionTableCount; i++) {
+      const suffix = i > 1 ? `_${i}` : '';
+      baseNames.push(`${p}txn_history${suffix}`);
+    }
+
     return baseNames;
   }
 
   async createSchema(db, options = {}, progressCallback = () => {}) {
     // Support both old boolean 'compress' and new 'compressionType' options
-    const { prefix = '', compress = false, compressionType = null, racTableCount = 1 } = options;
+    const { prefix = '', compress = false, compressionType = null, racTableCount = 1, indexContentionTableCount = 1 } = options;
     const effectiveCompression = compressionType || (compress ? 'advanced' : 'none');
     const tables = getTableDDL(prefix, effectiveCompression);
     const indexes = getIndexes(prefix);
+    const sequences = []; // Track sequences separately
 
     // Add RAC tables and indexes dynamically
     for (let i = 1; i <= racTableCount; i++) {
@@ -319,13 +365,24 @@ class SchemaManager {
       indexes.push(...getRacIndexes(prefix, i));
     }
 
+    // Add Index Contention tables and sequences
+    const indexContentionObjects = getIndexContentionTableDDL(prefix, effectiveCompression, indexContentionTableCount);
+    for (const [name, ddl] of Object.entries(indexContentionObjects)) {
+      if (name.includes('seq_')) {
+        sequences.push({ name, ddl });
+      } else {
+        tables[name] = ddl;
+      }
+    }
+
     const tableNames = Object.keys(tables);
-    const totalSteps = tableNames.length + indexes.length;
+    const totalSteps = tableNames.length + indexes.length + sequences.length;
     let currentStep = 0;
 
     const compressionLabel = COMPRESSION_TYPES[effectiveCompression] || 'no compression';
     const racLabel = racTableCount > 1 ? `, ${racTableCount} RAC tables` : '';
-    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel}${racLabel})...`, progress: 0 });
+    const idxLabel = indexContentionTableCount > 0 ? `, ${indexContentionTableCount} index contention tables` : '';
+    progressCallback({ step: `Creating schema${prefix ? ` '${prefix}'` : ''} (${compressionLabel}${racLabel}${idxLabel})...`, progress: 0 });
 
     // Create tables in order
     for (const tableName of tableNames) {
@@ -355,8 +412,22 @@ class SchemaManager {
       progressCallback({ step: 'Creating indexes...', progress: Math.floor((currentStep / totalSteps) * 50) });
     }
 
-    // Store schema metadata including racTableCount
-    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, racTableCount, createdAt: new Date() });
+    // Create sequences for index contention tables
+    for (const seq of sequences) {
+      try {
+        await db.execute(seq.ddl);
+        console.log(`Created sequence: ${seq.name}`);
+      } catch (err) {
+        if (!err.message.includes('ORA-00955')) {
+          console.log(`Sequence warning for ${seq.name}:`, err.message);
+        }
+      }
+      currentStep++;
+      progressCallback({ step: `Creating sequence ${seq.name}...`, progress: Math.floor((currentStep / totalSteps) * 50) });
+    }
+
+    // Store schema metadata including racTableCount and indexContentionTableCount
+    this.schemas.set(prefix || 'default', { prefix, compressionType: effectiveCompression, racTableCount, indexContentionTableCount, createdAt: new Date() });
   }
 
   // Parallel batch insert helper - uses executeMany for much better performance
@@ -779,6 +850,46 @@ class SchemaManager {
       console.log('Warning querying RAC tables:', err.message);
     }
 
+    // Drop Index Contention tables and sequences dynamically
+    try {
+      const txnTablesResult = await db.execute(`
+        SELECT table_name FROM user_tables
+        WHERE table_name LIKE '${p.toUpperCase()}TXN_HISTORY%'
+        ORDER BY table_name DESC
+      `);
+
+      for (const row of txnTablesResult.rows) {
+        try {
+          await db.execute(`DROP TABLE ${row.TABLE_NAME} CASCADE CONSTRAINTS PURGE`);
+          console.log(`Dropped table: ${row.TABLE_NAME}`);
+        } catch (err) {
+          if (!err.message.includes('ORA-00942')) {
+            console.log(`Warning dropping ${row.TABLE_NAME}:`, err.message);
+          }
+        }
+      }
+
+      // Drop corresponding sequences
+      const seqResult = await db.execute(`
+        SELECT sequence_name FROM user_sequences
+        WHERE sequence_name LIKE '${p.toUpperCase()}SEQ_TXN_HISTORY%'
+        ORDER BY sequence_name DESC
+      `);
+
+      for (const row of seqResult.rows) {
+        try {
+          await db.execute(`DROP SEQUENCE ${row.SEQUENCE_NAME}`);
+          console.log(`Dropped sequence: ${row.SEQUENCE_NAME}`);
+        } catch (err) {
+          if (!err.message.includes('ORA-02289')) {
+            console.log(`Warning dropping sequence ${row.SEQUENCE_NAME}:`, err.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.log('Warning querying index contention tables:', err.message);
+    }
+
     // Then drop the base tables in order
     const dropOrder = [
       'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
@@ -867,6 +978,511 @@ class SchemaManager {
     } catch (err) {
       return [];
     }
+  }
+
+  // Generate SQL script for schema creation (can be run from SQL*Plus)
+  generateScript(options = {}) {
+    const {
+      prefix = '',
+      compressionType = 'none',
+      scaleFactor = 1,
+      racTableCount = 1,
+      indexContentionTableCount = 1
+    } = options;
+
+    const p = prefix ? `${prefix}_` : '';
+    const tables = getTableDDL(prefix, compressionType);
+    const indexes = getIndexes(prefix);
+
+    // Add RAC tables
+    for (let i = 1; i <= racTableCount; i++) {
+      const racTables = getRacTableDDL(prefix, compressionType, i);
+      Object.assign(tables, racTables);
+      indexes.push(...getRacIndexes(prefix, i));
+    }
+
+    // Add Index Contention tables and sequences
+    const sequences = [];
+    const indexContentionObjects = getIndexContentionTableDDL(prefix, compressionType, indexContentionTableCount);
+    for (const [name, ddl] of Object.entries(indexContentionObjects)) {
+      if (name.includes('seq_')) {
+        sequences.push({ name, ddl });
+      } else {
+        tables[name] = ddl;
+      }
+    }
+
+    // Calculate data sizes
+    const baseCustomers = 1000 * scaleFactor;
+    const baseProducts = 500 * scaleFactor;
+    const baseOrders = 5000 * scaleFactor;
+
+    let script = `-- ============================================
+-- DBStress Schema Creation Script
+-- Generated: ${new Date().toISOString()}
+-- Schema Prefix: ${prefix || '(none)'}
+-- Compression: ${COMPRESSION_TYPES[compressionType] || 'none'}
+-- Scale Factor: ${scaleFactor} (${baseOrders} orders, ${baseCustomers} customers, ${baseProducts} products)
+-- RAC Tables: ${racTableCount}
+-- Index Contention Tables: ${indexContentionTableCount}
+-- ============================================
+
+SET ECHO ON
+SET TIMING ON
+SET SERVEROUTPUT ON SIZE UNLIMITED
+SET DEFINE OFF
+WHENEVER SQLERROR CONTINUE
+
+-- ============================================
+-- DROP EXISTING TABLES (if any)
+-- ============================================
+`;
+
+    // Drop tables in reverse order
+    const dropOrder = [
+      'product_reviews', 'order_history', 'payments', 'order_items', 'orders',
+      'customers', 'inventory', 'products', 'categories', 'warehouses',
+      'countries', 'regions'
+    ];
+
+    // Add RAC tables to drop
+    for (let i = racTableCount; i >= 1; i--) {
+      const suffix = i > 1 ? `_${i}` : '';
+      script += `DROP TABLE ${p}rac_hotindex${suffix} CASCADE CONSTRAINTS PURGE;\n`;
+      script += `DROP TABLE ${p}rac_hotblock${suffix} CASCADE CONSTRAINTS PURGE;\n`;
+    }
+
+    // Add Index Contention tables and sequences to drop
+    for (let i = indexContentionTableCount; i >= 1; i--) {
+      const suffix = i > 1 ? `_${i}` : '';
+      script += `DROP TABLE ${p}txn_history${suffix} CASCADE CONSTRAINTS PURGE;\n`;
+      script += `DROP SEQUENCE ${p}seq_txn_history${suffix};\n`;
+    }
+
+    for (const table of dropOrder) {
+      script += `DROP TABLE ${p}${table} CASCADE CONSTRAINTS PURGE;\n`;
+    }
+
+    script += `\n-- ============================================
+-- CREATE TABLES (indexes created after data load for performance)
+-- ============================================\n`;
+
+    // Create tables
+    for (const [tableName, ddl] of Object.entries(tables)) {
+      script += `\n-- Table: ${tableName}\n`;
+      script += ddl.trim() + ';\n';
+    }
+
+    // Create sequences for index contention tables
+    if (sequences.length > 0) {
+      script += `\n-- ============================================
+-- CREATE SEQUENCES (for index contention)
+-- ============================================\n`;
+      for (const seq of sequences) {
+        script += `\n-- Sequence: ${seq.name}\n`;
+        script += seq.ddl.trim() + ';\n';
+      }
+    }
+
+    script += `\n-- ============================================
+-- POPULATE REFERENCE DATA
+-- ============================================\n`;
+
+    // Regions
+    script += `\n-- Regions\n`;
+    for (const region of REGIONS_DATA) {
+      script += `INSERT INTO ${p}regions (region_name) VALUES ('${region}');\n`;
+    }
+    script += `COMMIT;\n`;
+
+    // Countries
+    script += `\n-- Countries\n`;
+    for (const country of COUNTRIES_DATA) {
+      script += `INSERT INTO ${p}countries (country_name, country_code, region_id)
+  SELECT '${country.name}', '${country.code}', region_id FROM ${p}regions WHERE region_name = '${country.region}';\n`;
+    }
+    script += `COMMIT;\n`;
+
+    // Warehouses
+    script += `\n-- Warehouses\n`;
+    const warehouseLocations = ['East Coast DC', 'West Coast DC', 'Central DC', 'European DC', 'Asian DC'];
+    for (let i = 0; i < warehouseLocations.length; i++) {
+      script += `INSERT INTO ${p}warehouses (warehouse_name, location, country_id, capacity)
+  SELECT '${warehouseLocations[i]}', 'Warehouse ${i + 1}', country_id, ${50000 * scaleFactor}
+  FROM ${p}countries WHERE ROWNUM = 1;\n`;
+    }
+    script += `COMMIT;\n`;
+
+    // Categories
+    script += `\n-- Categories\n`;
+    for (const cat of CATEGORIES_DATA) {
+      if (!cat.parent) {
+        script += `INSERT INTO ${p}categories (category_name, description) VALUES ('${cat.name.replace(/'/g, "''")}', '${cat.name} category');\n`;
+      }
+    }
+    script += `COMMIT;\n`;
+
+    for (const cat of CATEGORIES_DATA) {
+      if (cat.parent) {
+        script += `INSERT INTO ${p}categories (category_name, parent_category_id, description)
+  SELECT '${cat.name.replace(/'/g, "''")}', category_id, '${cat.name} category' FROM ${p}categories WHERE category_name = '${cat.parent}';\n`;
+      }
+    }
+    script += `COMMIT;\n`;
+
+    // Generate bulk data using PL/SQL for performance
+    script += `\n-- ============================================
+-- POPULATE BULK DATA (using PL/SQL for performance)
+-- ============================================
+
+-- Products (${baseProducts} rows)
+DECLARE
+  TYPE t_varchar_arr IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_category_ids t_number_arr;
+  l_adjectives t_varchar_arr;
+  l_nouns t_varchar_arr;
+  l_cat_id NUMBER;
+  l_adj VARCHAR2(100);
+  l_noun VARCHAR2(100);
+  l_cat_count NUMBER;
+BEGIN
+  -- Get category IDs into associative array
+  FOR rec IN (SELECT category_id, ROWNUM rn FROM ${p}categories) LOOP
+    l_category_ids(rec.rn) := rec.category_id;
+  END LOOP;
+  l_cat_count := l_category_ids.COUNT;
+
+  -- Adjectives
+  l_adjectives(1) := 'Premium'; l_adjectives(2) := 'Professional'; l_adjectives(3) := 'Ultra';
+  l_adjectives(4) := 'Advanced'; l_adjectives(5) := 'Classic'; l_adjectives(6) := 'Modern';
+  l_adjectives(7) := 'Deluxe'; l_adjectives(8) := 'Essential'; l_adjectives(9) := 'Elite';
+  l_adjectives(10) := 'Pro';
+
+  -- Nouns
+  l_nouns(1) := 'Laptop'; l_nouns(2) := 'Phone'; l_nouns(3) := 'Tablet';
+  l_nouns(4) := 'Headphones'; l_nouns(5) := 'Speaker'; l_nouns(6) := 'Camera';
+  l_nouns(7) := 'Watch'; l_nouns(8) := 'Keyboard'; l_nouns(9) := 'Mouse';
+  l_nouns(10) := 'Monitor';
+
+  FOR i IN 1..${baseProducts} LOOP
+    l_adj := l_adjectives(MOD(i, 10) + 1);
+    l_noun := l_nouns(MOD(i, 10) + 1);
+    l_cat_id := l_category_ids(MOD(i, l_cat_count) + 1);
+
+    INSERT INTO ${p}products (product_name, description, category_id, unit_price, unit_cost, weight)
+    VALUES (
+      l_adj || ' ' || l_noun || ' ' || i,
+      'High quality product with premium features',
+      l_cat_id,
+      ROUND(DBMS_RANDOM.VALUE(10, 500), 2),
+      ROUND(DBMS_RANDOM.VALUE(5, 300), 2),
+      ROUND(DBMS_RANDOM.VALUE(0.5, 10), 2)
+    );
+    IF MOD(i, 1000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Products inserted: ' || i);
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Products complete: ${baseProducts} rows');
+END;
+/
+
+-- Customers (${baseCustomers} rows)
+DECLARE
+  TYPE t_varchar_arr IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_first_names t_varchar_arr;
+  l_last_names t_varchar_arr;
+  l_cities t_varchar_arr;
+  l_country_ids t_number_arr;
+  l_fn VARCHAR2(100);
+  l_ln VARCHAR2(100);
+  l_city VARCHAR2(100);
+  l_country_id NUMBER;
+  l_country_count NUMBER;
+BEGIN
+  -- First names
+  l_first_names(1) := 'James'; l_first_names(2) := 'John'; l_first_names(3) := 'Robert';
+  l_first_names(4) := 'Michael'; l_first_names(5) := 'William'; l_first_names(6) := 'David';
+  l_first_names(7) := 'Richard'; l_first_names(8) := 'Joseph'; l_first_names(9) := 'Thomas';
+  l_first_names(10) := 'Charles'; l_first_names(11) := 'Mary'; l_first_names(12) := 'Patricia';
+  l_first_names(13) := 'Jennifer'; l_first_names(14) := 'Linda'; l_first_names(15) := 'Elizabeth';
+  l_first_names(16) := 'Barbara'; l_first_names(17) := 'Susan'; l_first_names(18) := 'Jessica';
+  l_first_names(19) := 'Sarah'; l_first_names(20) := 'Karen';
+
+  -- Last names
+  l_last_names(1) := 'Smith'; l_last_names(2) := 'Johnson'; l_last_names(3) := 'Williams';
+  l_last_names(4) := 'Brown'; l_last_names(5) := 'Jones'; l_last_names(6) := 'Garcia';
+  l_last_names(7) := 'Miller'; l_last_names(8) := 'Davis'; l_last_names(9) := 'Rodriguez';
+  l_last_names(10) := 'Martinez'; l_last_names(11) := 'Hernandez'; l_last_names(12) := 'Lopez';
+  l_last_names(13) := 'Gonzalez'; l_last_names(14) := 'Wilson'; l_last_names(15) := 'Anderson';
+  l_last_names(16) := 'Thomas'; l_last_names(17) := 'Taylor'; l_last_names(18) := 'Moore';
+  l_last_names(19) := 'Jackson'; l_last_names(20) := 'Martin';
+
+  -- Cities
+  l_cities(1) := 'New York'; l_cities(2) := 'Los Angeles'; l_cities(3) := 'Chicago';
+  l_cities(4) := 'Houston'; l_cities(5) := 'Phoenix'; l_cities(6) := 'Philadelphia';
+  l_cities(7) := 'San Antonio'; l_cities(8) := 'San Diego'; l_cities(9) := 'Dallas';
+  l_cities(10) := 'San Jose';
+
+  -- Get country IDs
+  FOR rec IN (SELECT country_id, ROWNUM rn FROM ${p}countries) LOOP
+    l_country_ids(rec.rn) := rec.country_id;
+  END LOOP;
+  l_country_count := l_country_ids.COUNT;
+
+  FOR i IN 1..${baseCustomers} LOOP
+    l_fn := l_first_names(MOD(i, 20) + 1);
+    l_ln := l_last_names(MOD(i, 20) + 1);
+    l_city := l_cities(MOD(i, 10) + 1);
+    l_country_id := l_country_ids(MOD(i, l_country_count) + 1);
+
+    INSERT INTO ${p}customers (first_name, last_name, email, phone, address_line1, city, state_province, postal_code, country_id, credit_limit)
+    VALUES (
+      l_fn, l_ln,
+      LOWER(l_fn) || '.' || LOWER(l_ln) || '.' || i || '@example.com',
+      '+1-' || LPAD(FLOOR(DBMS_RANDOM.VALUE(100, 999)), 3, '0') || '-' || LPAD(FLOOR(DBMS_RANDOM.VALUE(1000, 9999)), 4, '0'),
+      FLOOR(DBMS_RANDOM.VALUE(1, 9999)) || ' Main Street',
+      l_city,
+      'State',
+      LPAD(FLOOR(DBMS_RANDOM.VALUE(10000, 99999)), 5, '0'),
+      l_country_id,
+      ROUND(DBMS_RANDOM.VALUE(1000, 10000), 2)
+    );
+    IF MOD(i, 1000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Customers inserted: ' || i);
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Customers complete: ${baseCustomers} rows');
+END;
+/
+
+-- Inventory
+DECLARE
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_product_ids t_number_arr;
+  l_warehouse_ids t_number_arr;
+  l_prod_id NUMBER;
+  l_wh_id NUMBER;
+  l_prod_count NUMBER;
+  l_wh_count NUMBER;
+BEGIN
+  FOR rec IN (SELECT product_id, ROWNUM rn FROM ${p}products) LOOP
+    l_product_ids(rec.rn) := rec.product_id;
+  END LOOP;
+  l_prod_count := l_product_ids.COUNT;
+
+  FOR rec IN (SELECT warehouse_id, ROWNUM rn FROM ${p}warehouses) LOOP
+    l_warehouse_ids(rec.rn) := rec.warehouse_id;
+  END LOOP;
+  l_wh_count := l_warehouse_ids.COUNT;
+
+  FOR p_idx IN 1..l_prod_count LOOP
+    l_prod_id := l_product_ids(p_idx);
+    FOR w_idx IN 1..l_wh_count LOOP
+      l_wh_id := l_warehouse_ids(w_idx);
+      INSERT INTO ${p}inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved, reorder_level)
+      VALUES (
+        l_prod_id,
+        l_wh_id,
+        FLOOR(DBMS_RANDOM.VALUE(100, 1000)),
+        FLOOR(DBMS_RANDOM.VALUE(0, 50)),
+        FLOOR(DBMS_RANDOM.VALUE(10, 30))
+      );
+    END LOOP;
+    IF MOD(p_idx, 100) = 0 THEN
+      COMMIT;
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Inventory complete');
+END;
+/
+
+-- Orders (${baseOrders} rows)
+DECLARE
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  TYPE t_varchar_arr IS TABLE OF VARCHAR2(50) INDEX BY PLS_INTEGER;
+  l_customer_ids t_number_arr;
+  l_warehouse_ids t_number_arr;
+  l_statuses t_varchar_arr;
+  l_shipping t_varchar_arr;
+  l_cust_id NUMBER;
+  l_wh_id NUMBER;
+  l_status VARCHAR2(20);
+  l_ship VARCHAR2(50);
+  l_cust_count NUMBER;
+  l_wh_count NUMBER;
+BEGIN
+  -- Statuses
+  l_statuses(1) := 'PENDING'; l_statuses(2) := 'PROCESSING'; l_statuses(3) := 'SHIPPED';
+  l_statuses(4) := 'DELIVERED'; l_statuses(5) := 'CANCELLED';
+
+  -- Shipping methods
+  l_shipping(1) := 'Standard'; l_shipping(2) := 'Express'; l_shipping(3) := 'Overnight';
+
+  FOR rec IN (SELECT customer_id, ROWNUM rn FROM ${p}customers) LOOP
+    l_customer_ids(rec.rn) := rec.customer_id;
+  END LOOP;
+  l_cust_count := l_customer_ids.COUNT;
+
+  FOR rec IN (SELECT warehouse_id, ROWNUM rn FROM ${p}warehouses) LOOP
+    l_warehouse_ids(rec.rn) := rec.warehouse_id;
+  END LOOP;
+  l_wh_count := l_warehouse_ids.COUNT;
+
+  FOR i IN 1..${baseOrders} LOOP
+    l_cust_id := l_customer_ids(MOD(i, l_cust_count) + 1);
+    l_status := l_statuses(MOD(i, 5) + 1);
+    l_wh_id := l_warehouse_ids(MOD(i, l_wh_count) + 1);
+    l_ship := l_shipping(MOD(i, 3) + 1);
+
+    INSERT INTO ${p}orders (customer_id, status, warehouse_id, shipping_method, notes)
+    VALUES (
+      l_cust_id,
+      l_status,
+      l_wh_id,
+      l_ship,
+      'Order ' || i
+    );
+    IF MOD(i, 5000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Orders inserted: ' || i);
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Orders complete: ${baseOrders} rows');
+END;
+/
+
+-- Order Items (1-3 per order)
+DECLARE
+  TYPE t_number_arr IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  l_order_ids t_number_arr;
+  l_product_ids t_number_arr;
+  l_order_id NUMBER;
+  l_prod_id NUMBER;
+  l_item_count NUMBER;
+  l_quantity NUMBER;
+  l_unit_price NUMBER;
+  l_counter NUMBER := 0;
+  l_order_count NUMBER;
+  l_prod_count NUMBER;
+BEGIN
+  FOR rec IN (SELECT order_id, ROWNUM rn FROM ${p}orders) LOOP
+    l_order_ids(rec.rn) := rec.order_id;
+  END LOOP;
+  l_order_count := l_order_ids.COUNT;
+
+  FOR rec IN (SELECT product_id, ROWNUM rn FROM ${p}products) LOOP
+    l_product_ids(rec.rn) := rec.product_id;
+  END LOOP;
+  l_prod_count := l_product_ids.COUNT;
+
+  FOR o_idx IN 1..l_order_count LOOP
+    l_order_id := l_order_ids(o_idx);
+    l_item_count := FLOOR(DBMS_RANDOM.VALUE(1, 4));
+    FOR j IN 1..l_item_count LOOP
+      l_quantity := FLOOR(DBMS_RANDOM.VALUE(1, 6));
+      l_unit_price := ROUND(DBMS_RANDOM.VALUE(10, 200), 2);
+      l_prod_id := l_product_ids(MOD(o_idx + j, l_prod_count) + 1);
+
+      INSERT INTO ${p}order_items (order_id, product_id, quantity, unit_price, line_total)
+      VALUES (
+        l_order_id,
+        l_prod_id,
+        l_quantity,
+        l_unit_price,
+        l_quantity * l_unit_price
+      );
+      l_counter := l_counter + 1;
+    END LOOP;
+    IF MOD(o_idx, 5000) = 0 THEN
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE('Order items processed for ' || o_idx || ' orders');
+    END IF;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Order items complete: ' || l_counter || ' rows');
+END;
+/
+
+`;
+
+    // RAC hot tables
+    script += `-- ============================================
+-- RAC CONTENTION TABLES
+-- ============================================\n`;
+
+    for (let tableNum = 1; tableNum <= racTableCount; tableNum++) {
+      const suffix = tableNum > 1 ? `_${tableNum}` : '';
+      script += `
+-- RAC Hot Block Table ${tableNum}
+BEGIN
+  FOR i IN 1..1000 LOOP
+    INSERT INTO ${p}rac_hotblock${suffix} (slot_id, counter, last_instance) VALUES (i, 0, 0);
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('rac_hotblock${suffix}: 1000 rows');
+END;
+/
+
+-- RAC Hot Index Table ${tableNum}
+BEGIN
+  FOR i IN 1..5000 LOOP
+    INSERT INTO ${p}rac_hotindex${suffix} (id, bucket, value) VALUES (i, MOD(i, 20) + 1, 0);
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('rac_hotindex${suffix}: 5000 rows');
+END;
+/
+`;
+    }
+
+    // Create indexes AFTER data load for much better performance
+    script += `
+-- ============================================
+-- CREATE INDEXES (after data load for performance)
+-- ============================================
+`;
+    for (const indexSql of indexes) {
+      script += indexSql + ';\n';
+    }
+
+    script += `
+-- ============================================
+-- SET TABLES TO LOGGING MODE
+-- ============================================
+`;
+
+    for (const tableName of Object.keys(tables)) {
+      script += `ALTER TABLE ${tableName} LOGGING;\n`;
+    }
+
+    script += `
+-- ============================================
+-- GATHER STATISTICS
+-- ============================================
+BEGIN
+  DBMS_STATS.GATHER_SCHEMA_STATS(USER, CASCADE => TRUE, DEGREE => 4);
+END;
+/
+
+PROMPT
+PROMPT ============================================
+PROMPT Schema creation complete!
+PROMPT ============================================
+PROMPT
+
+SET TIMING OFF
+SET ECHO OFF
+`;
+
+    return script;
   }
 }
 
