@@ -36,11 +36,11 @@ const getServerUrl = () => {
 const API_BASE = `${getServerUrl()}/api`;
 
 function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
-  // Configuration state - using correct DDL invalidation pattern
+  // Configuration state - using non-existent sequence pattern
   const [config, setConfig] = useState({
-    threads: 50,                    // Number of execution workers
-    invalidateInterval: 1000,       // How often to recompile (ms)
-    enableInvalidator: true         // Toggle DDL invalidator
+    threads: 50,                    // Number of workers
+    sequenceCount: 3,               // Number of non-existent sequences to query per iteration
+    loopDelay: 0                    // Delay between loops (ms), 0 = tight loop
   });
 
   // Runtime state
@@ -52,7 +52,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     tps: 0,
     avgResponseTime: 0,
     totalCalls: 0,
-    totalInvalidations: 0,
+    totalSelects: 0,
     errors: 0
   });
 
@@ -91,7 +91,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           tps: data.tps || 0,
           avgResponseTime: data.avgResponseTime || 0,
           totalCalls: data.totalCalls || 0,
-          totalInvalidations: data.totalInvalidations || 0,
+          totalSelects: data.totalSelects || 0,
           errors: data.errors || 0
         });
 
@@ -239,7 +239,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     setTpsHistory([]);
     setResponseTimeHistory([]);
     setLabels([]);
-    setMetrics({ tps: 0, avgResponseTime: 0, totalCalls: 0, totalInvalidations: 0, errors: 0 });
+    setMetrics({ tps: 0, avgResponseTime: 0, totalCalls: 0, totalSelects: 0, errors: 0 });
     setLibraryCacheEvents({});
     setTop10WaitEvents([]);
     setHardParses(0);
@@ -256,7 +256,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
   const tpsChartData = {
     labels,
     datasets: [{
-      label: 'Calls/sec',
+      label: 'Iterations/sec',
       data: tpsHistory,
       borderColor: '#f59e0b',
       backgroundColor: 'rgba(245, 158, 11, 0.2)',
@@ -426,13 +426,13 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           fontSize: '0.75rem',
           color: 'var(--text-muted)'
         }}>
-          <strong style={{ color: '#ef4444' }}>DDL Invalidation Pattern:</strong>
+          <strong style={{ color: '#ef4444' }}>Non-Existent Sequence Pattern:</strong>
           <ul style={{ margin: '0.25rem 0 0 0', paddingLeft: '1.2rem' }}>
-            <li>Execution workers: tight loop calling procedure</li>
-            <li>DDL invalidator: continuously recompiles procedure</li>
+            <li>Multiple sessions SELECT from non-existent sequences</li>
+            <li>ORA-02289 errors cause library cache lock contention</li>
           </ul>
           <div style={{ marginTop: '0.5rem', fontStyle: 'italic' }}>
-            Reproduces: library cache lock, cursor: pin S wait on X, hard parse storms
+            Reproduces: library cache lock, hard parse storms
           </div>
         </div>
 
@@ -461,9 +461,9 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           </select>
         </div>
 
-        {/* Number of Execution Workers */}
+        {/* Number of Workers */}
         <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Execution Workers:</label>
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Concurrent Sessions:</label>
           <input
             type="number"
             min="1"
@@ -482,20 +482,19 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             }}
           />
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Sessions calling procedure in tight loop
+            Number of parallel sessions
           </div>
         </div>
 
-        {/* Recompile Interval */}
+        {/* Sequence Count */}
         <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Recompile Interval (ms):</label>
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>SELECTs per Iteration:</label>
           <input
             type="number"
-            min="100"
-            max="10000"
-            step="100"
-            value={config.invalidateInterval}
-            onChange={(e) => setConfig(prev => ({ ...prev, invalidateInterval: Math.max(100, parseInt(e.target.value) || 1000) }))}
+            min="1"
+            max="10"
+            value={config.sequenceCount}
+            onChange={(e) => setConfig(prev => ({ ...prev, sequenceCount: Math.max(1, Math.min(10, parseInt(e.target.value) || 3)) }))}
             disabled={isRunning}
             style={{
               width: '100%',
@@ -508,27 +507,33 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             }}
           />
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            How often DDL invalidator recompiles (lower = more contention)
+            Number of non-existent sequences to query (customer had 3)
           </div>
         </div>
 
-        {/* Enable Invalidator Toggle */}
+        {/* Loop Delay */}
         <div className="form-group">
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={config.enableInvalidator}
-              onChange={(e) => setConfig(prev => ({ ...prev, enableInvalidator: e.target.checked }))}
-              disabled={isRunning}
-            />
-            <span style={{ fontWeight: '500', color: config.enableInvalidator ? '#ef4444' : 'var(--text-muted)' }}>
-              Enable DDL Invalidator
-            </span>
-          </label>
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem', marginLeft: '1.5rem' }}>
-            {config.enableInvalidator
-              ? 'Enabled - causes library cache lock contention'
-              : 'Disabled - no contention, baseline performance'}
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Loop Delay (ms):</label>
+          <input
+            type="number"
+            min="0"
+            max="5000"
+            step="100"
+            value={config.loopDelay}
+            onChange={(e) => setConfig(prev => ({ ...prev, loopDelay: Math.max(0, parseInt(e.target.value) || 0) }))}
+            disabled={isRunning}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              background: 'var(--bg-primary)',
+              border: '1px solid var(--border)',
+              borderRadius: '4px',
+              color: 'var(--text-primary)',
+              marginTop: '0.25rem'
+            }}
+          />
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            Delay between iterations (0 = tight loop, max contention)
           </div>
         </div>
 
@@ -629,7 +634,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             flexDirection: 'column'
           }}>
             <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#f59e0b' }}>
-              Procedure Calls/sec
+              Iterations/sec
             </h3>
             <div style={{ flex: 1, minHeight: '150px' }}>
               <Line data={tpsChartData} options={chartOptions} />
@@ -703,7 +708,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             <div style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>
               {metrics.tps.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Calls/sec</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Iterations/sec</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: '#ef4444' }}>
@@ -715,19 +720,19 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--accent-primary)' }}>
               {metrics.totalCalls.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Calls</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Iterations</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: '#a855f7' }}>
-              {metrics.totalInvalidations.toLocaleString()}
+              {metrics.totalSelects.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Invalidations</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>SELECTs (ORA-02289)</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: metrics.errors > 0 ? 'var(--accent-danger)' : 'var(--text-muted)' }}>
               {metrics.errors}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Errors</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Other Errors</div>
           </div>
         </div>
 
