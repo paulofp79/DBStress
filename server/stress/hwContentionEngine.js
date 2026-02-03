@@ -98,17 +98,27 @@ class HWContentionEngine {
     const tableName = `${p}HW_STRESS_TAB`;
     const partTableName = `${p}HW_STRESS_TAB_PART`;
 
-    this.io?.emit('hw-contention-status', { running: true, message: 'Setting up table...' });
+    this.io?.emit('hw-contention-status', { running: true, message: 'Dropping existing tables...' });
+
+    // Always drop BOTH tables to ensure clean start
+    try {
+      await db.execute(`DROP TABLE ${tableName} PURGE`);
+      console.log(`Dropped table: ${tableName}`);
+    } catch (err) {
+      // Table might not exist
+    }
+
+    try {
+      await db.execute(`DROP TABLE ${partTableName} PURGE`);
+      console.log(`Dropped table: ${partTableName}`);
+    } catch (err) {
+      // Table might not exist
+    }
+
+    this.io?.emit('hw-contention-status', { running: true, message: 'Creating fresh table...' });
 
     try {
       if (this.config.testMode === 'partitioned') {
-        // Drop and create partitioned table
-        try {
-          await db.execute(`DROP TABLE ${partTableName} PURGE`);
-        } catch (err) {
-          // Table might not exist
-        }
-
         // Create partitioned table by hash on timestamp
         const partitions = [];
         for (let i = 0; i < this.config.partitionCount; i++) {
@@ -134,13 +144,6 @@ class HWContentionEngine {
         this.io?.emit('hw-contention-status', { running: true, message: `Partitioned table ready (${this.config.partitionCount} partitions)` });
 
       } else {
-        // Drop and create regular table
-        try {
-          await db.execute(`DROP TABLE ${tableName} PURGE`);
-        } catch (err) {
-          // Table might not exist
-        }
-
         // Create regular table with small initial extent to force HW contention
         await db.execute(`
           CREATE TABLE ${tableName} (
