@@ -1,6 +1,12 @@
 // Library Cache Lock Demo Engine
-// Simulates library cache lock contention through repeated ALTER SESSION calls
-// Reproduces: library cache lock, cursor: pin S wait on X, hard parse storms
+// Simulates library cache lock contention through non-existent sequence lookups
+//
+// Pattern based on real customer issue:
+// - Multiple sessions executing SELECT statements against non-existent sequences
+// - 3 SELECTs in sequence that reference objects that don't exist
+// - This causes: library cache lock (not pin) as Oracle tries to resolve non-existent objects
+//
+// This causes: library cache lock, cursor: pin S wait on X, hard parse storms
 
 class LibraryCacheLockEngine {
   constructor() {
@@ -15,6 +21,7 @@ class LibraryCacheLockEngine {
     // Performance metrics
     this.stats = {
       totalCalls: 0,
+      totalSelects: 0,
       errors: 0,
       responseTimes: [],
       tps: 0
@@ -35,9 +42,9 @@ class LibraryCacheLockEngine {
     }
 
     this.config = {
-      threads: config.threads || 50,
-      callInterval: config.callInterval || 10000,  // Interval between calls in ms (default 10 seconds)
-      useAlterSession: config.useAlterSession !== false,  // Toggle ALTER SESSION statements
+      threads: config.threads || 50,              // Number of execution workers
+      sequenceCount: config.sequenceCount || 3,   // Number of non-existent sequences to query
+      loopDelay: config.loopDelay || 0,           // Delay between loops (ms), 0 = tight loop
       ...config
     };
 
@@ -49,6 +56,7 @@ class LibraryCacheLockEngine {
     // Reset stats
     this.stats = {
       totalCalls: 0,
+      totalSelects: 0,
       errors: 0,
       responseTimes: [],
       tps: 0
@@ -56,18 +64,16 @@ class LibraryCacheLockEngine {
     this.previousStats = { totalCalls: 0 };
     this._lastStatsTime = Date.now();
 
-    console.log(`Starting Library Cache Lock Demo with ${this.config.threads} threads`);
+    console.log(`Starting Library Cache Lock Demo with ${this.config.threads} workers`);
+    console.log(`Pattern: ${this.config.sequenceCount} SELECTs against non-existent sequences per iteration`);
 
     // Emit running status immediately
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Starting...' });
 
     // Create connection pool
-    this.pool = await db.createStressPool(this.config.threads + 5);
+    this.pool = await db.createStressPool(this.config.threads + 10);
 
-    // Create the procedure
-    await this.createProcedure(db);
-
-    // Start workers
+    // Start execution workers - each will query non-existent sequences
     for (let i = 0; i < this.config.threads; i++) {
       this.workers.push(this.runWorker(i));
     }
@@ -81,77 +87,21 @@ class LibraryCacheLockEngine {
     this.io?.emit('library-cache-lock-status', { running: true, message: 'Running...' });
   }
 
-  async createProcedure(db) {
-    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-    const procName = `${p}STRESS_SESSION_PROC`;
-
-    this.io?.emit('library-cache-lock-status', { running: true, message: 'Creating procedure...' });
-
-    try {
-      // Drop existing procedure if exists
-      try {
-        await db.execute(`DROP PROCEDURE ${procName}`);
-      } catch (err) {
-        // Procedure might not exist
-      }
-
-      // Create the procedure that causes library cache lock contention
-      // Based on a customer procedure pattern (PROCEDURE_LIBRARY_CACHE_FROM_CUSTOMER)
-      await db.execute(`
-        CREATE OR REPLACE PROCEDURE ${procName} (
-          pModuleName VARCHAR2
-        )
-        IS
-          pActionName      VARCHAR2(14);
-          pModuleName_mod  VARCHAR2(48);
-        BEGIN
-          -- Build action name
-          pActionName := 'STRESS_ONLINE';
-
-          -- Build modified module name (similar to original pattern)
-          pModuleName_mod := SUBSTR(pModuleName, 1, 22)
-                            || '0000000'
-                            || SUBSTR(pModuleName, 30);
-
-          -- DBMS_APPLICATION_INFO.SET_MODULE - populates v$session module and action
-          DBMS_APPLICATION_INFO.SET_MODULE(pModuleName_mod, pActionName);
-
-          -- DBMS_SESSION.SET_IDENTIFIER - populates client_identifier
-          DBMS_SESSION.SET_IDENTIFIER(pModuleName);
-
-          -- Multiple ALTER SESSION statements - these cause library cache lock contention
-          -- Each ALTER SESSION requires exclusive access to the library cache
-
-          -- Setup optimizer_mode
-          EXECUTE IMMEDIATE 'ALTER SESSION SET OPTIMIZER_MODE = first_rows_1';
-
-          -- Disable optimizer features (causes hard parsing)
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_use_feedback" = false';
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_adaptive_cursor_sharing" = false';
-          EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_extended_cursor_sharing_rel" = none';
-
-          -- Additional ALTER SESSION to increase contention
-          EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_DATE_FORMAT = ''YYYY-MM-DD HH24:MI:SS''';
-
-          -- DDL operation to cause library cache lock contention
-          -- Multiple sessions trying to compile the same procedure simultaneously
-          EXECUTE IMMEDIATE 'CREATE OR REPLACE PROCEDURE temp_stress_proc AS BEGIN NULL; END;';
-
-        END;
-      `);
-
-      console.log(`Created procedure: ${procName}`);
-      this.io?.emit('library-cache-lock-status', { running: true, message: 'Procedure ready' });
-    } catch (err) {
-      console.error('Error creating procedure:', err);
-      this.io?.emit('library-cache-lock-status', { running: true, message: `Procedure error: ${err.message}` });
-      throw err;
-    }
-  }
-
+  // Worker that executes SELECTs against non-existent sequences
+  // This pattern causes library cache lock as Oracle tries to resolve the objects
   async runWorker(workerId) {
     const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
-    const procName = `${p}STRESS_SESSION_PROC`;
+
+    // Generate unique non-existent sequence names for this worker
+    // Using timestamp + random to ensure they don't exist
+    const getSequenceNames = () => {
+      const names = [];
+      const ts = Date.now().toString(36);
+      for (let i = 0; i < this.config.sequenceCount; i++) {
+        names.push(`${p}NONEXIST_SEQ_${workerId}_${ts}_${i}`);
+      }
+      return names;
+    };
 
     while (this.isRunning) {
       if (!this.pool) {
@@ -164,30 +114,27 @@ class LibraryCacheLockEngine {
       try {
         connection = await this.pool.getConnection();
 
-        // Keep connection open and call procedure at regular intervals
-        // This simulates "Same session repeatedly calling a procedure"
+        // Tight loop - keep executing SELECTs against non-existent sequences
         while (this.isRunning) {
           const startTime = Date.now();
+          const sequenceNames = getSequenceNames();
 
           try {
-            // Generate a unique module name for each call
-            const timestamp = Date.now().toString(36);
-            const moduleName = `STRESS_W${workerId.toString().padStart(3, '0')}_${timestamp}_TESTMODULE`;
-
-            if (this.config.useAlterSession) {
-              // Call the procedure with ALTER SESSION statements
-              await connection.execute(
-                `BEGIN ${procName}(:moduleName); END;`,
-                { moduleName }
-              );
-            } else {
-              // Light version - only SET_MODULE, no ALTER SESSION
-              await connection.execute(
-                `BEGIN
-                   DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, 'STRESS_LIGHT');
-                 END;`,
-                { moduleName }
-              );
+            // Execute 3 SELECTs in sequence against non-existent sequences
+            // This is the pattern that caused library cache lock at customer
+            for (const seqName of sequenceNames) {
+              try {
+                await connection.execute(`SELECT ${seqName}.NEXTVAL FROM DUAL`);
+              } catch (err) {
+                // ORA-02289: sequence does not exist - THIS IS EXPECTED
+                // The error itself causes library cache lock contention
+                if (err.message.includes('ORA-02289')) {
+                  this.stats.totalSelects++;
+                  // This is the desired behavior - the lookup causes contention
+                } else {
+                  throw err;
+                }
+              }
             }
 
             const responseTime = Date.now() - startTime;
@@ -202,15 +149,13 @@ class LibraryCacheLockEngine {
           } catch (err) {
             this.stats.errors++;
             if (this.stats.errors % 100 === 1) {
-              console.log(`Library cache lock worker ${workerId} error:`, err.message);
+              console.log(`Worker ${workerId} error:`, err.message);
             }
-            // Break out of inner loop on error to get new connection
-            break;
           }
 
-          // Wait for call interval before next call
-          if (this.isRunning && this.config.callInterval > 0) {
-            await this.sleep(this.config.callInterval);
+          // Optional delay between loops
+          if (this.isRunning && this.config.loopDelay > 0) {
+            await this.sleep(this.config.loopDelay);
           }
         }
 
@@ -220,7 +165,7 @@ class LibraryCacheLockEngine {
             !err.message.includes('NJS-003') &&
             !err.message.includes('NJS-500')) {
           if (this.stats.errors % 100 === 1) {
-            console.log(`Library cache lock worker ${workerId} connection error:`, err.message);
+            console.log(`Worker ${workerId} connection error:`, err.message);
           }
         }
       } finally {
@@ -231,7 +176,7 @@ class LibraryCacheLockEngine {
 
       // Small delay before reconnecting after error
       if (this.isRunning) {
-        await this.sleep(1000);
+        await this.sleep(100);
       }
     }
   }
@@ -241,7 +186,7 @@ class LibraryCacheLockEngine {
     const elapsedSeconds = (now - this._lastStatsTime) / 1000;
     this._lastStatsTime = now;
 
-    // Calculate TPS
+    // Calculate TPS (iterations per second)
     const currentTotalCalls = this.stats.totalCalls;
     const callsDelta = currentTotalCalls - this.previousStats.totalCalls;
     const tps = elapsedSeconds > 0 ? Math.round(callsDelta / elapsedSeconds) : 0;
@@ -256,6 +201,7 @@ class LibraryCacheLockEngine {
       tps,
       avgResponseTime,
       totalCalls: this.stats.totalCalls,
+      totalSelects: this.stats.totalSelects,
       errors: this.stats.errors
     };
 
@@ -379,6 +325,7 @@ class LibraryCacheLockEngine {
     if (this.io) {
       this.io.emit('library-cache-lock-stopped', {
         totalCalls: this.stats.totalCalls,
+        totalSelects: this.stats.totalSelects,
         errors: this.stats.errors
       });
     }

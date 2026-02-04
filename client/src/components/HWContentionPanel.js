@@ -35,12 +35,14 @@ const getServerUrl = () => {
 
 const API_BASE = `${getServerUrl()}/api`;
 
-function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
-  // Configuration state - using non-existent sequence pattern
+function HWContentionPanel({ dbStatus, socket, schemas }) {
+  // Configuration state
   const [config, setConfig] = useState({
-    threads: 50,                    // Number of workers
-    sequenceCount: 3,               // Number of non-existent sequences to query per iteration
-    loopDelay: 0                    // Delay between loops (ms), 0 = tight loop
+    threads: 50,                    // Number of inserting sessions
+    testMode: 'no_prealloc',        // 'no_prealloc', 'prealloc', 'partitioned'
+    preAllocExtents: 100,           // Number of extents to pre-allocate
+    partitionCount: 8,              // Number of partitions
+    loopDelay: 0                    // Delay between inserts (ms)
   });
 
   // Runtime state
@@ -51,16 +53,14 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
   const [metrics, setMetrics] = useState({
     tps: 0,
     avgResponseTime: 0,
-    totalCalls: 0,
-    totalSelects: 0,
+    totalInserts: 0,
     errors: 0
   });
 
   // Wait events state
-  const [libraryCacheEvents, setLibraryCacheEvents] = useState({});
+  const [hwEvents, setHwEvents] = useState({});
   const [top10WaitEvents, setTop10WaitEvents] = useState([]);
-  const [hardParses, setHardParses] = useState(0);
-  const [parseCount, setParseCount] = useState(0);
+  const [segmentStats, setSegmentStats] = useState({});
 
   // Chart data - keep last 60 seconds
   const maxDataPoints = 60;
@@ -83,20 +83,19 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     }
   }, [schemas, selectedSchema]);
 
-  // Listen for library cache lock metrics
+  // Listen for HW contention metrics
   useEffect(() => {
     if (socket) {
-      socket.on('library-cache-lock-metrics', (data) => {
+      socket.on('hw-contention-metrics', (data) => {
         setMetrics({
           tps: data.tps || 0,
           avgResponseTime: data.avgResponseTime || 0,
-          totalCalls: data.totalCalls || 0,
-          totalSelects: data.totalSelects || 0,
+          totalInserts: data.totalInserts || 0,
           errors: data.errors || 0
         });
 
-        // Only update chart data if we have actual TPS
-        if (data.tps > 0) {
+        // Update chart data
+        if (data.tps > 0 || data.totalInserts > 0) {
           const now = new Date();
           const timeLabel = `${now.getMinutes()}:${now.getSeconds().toString().padStart(2, '0')}`;
 
@@ -117,29 +116,26 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
         }
       });
 
-      socket.on('library-cache-lock-status', (data) => {
+      socket.on('hw-contention-status', (data) => {
         setStatusMessage(data.message || '');
         if (data.running !== undefined) {
           setIsRunning(data.running);
         }
       });
 
-      socket.on('library-cache-lock-wait-events', (data) => {
-        if (data.libraryCacheEvents) {
-          setLibraryCacheEvents(data.libraryCacheEvents);
+      socket.on('hw-contention-wait-events', (data) => {
+        if (data.hwEvents) {
+          setHwEvents(data.hwEvents);
         }
         if (data.top10WaitEvents) {
           setTop10WaitEvents(data.top10WaitEvents);
         }
-        if (data.hardParses !== undefined) {
-          setHardParses(data.hardParses);
-        }
-        if (data.parseCount !== undefined) {
-          setParseCount(data.parseCount);
+        if (data.segmentStats) {
+          setSegmentStats(data.segmentStats);
         }
       });
 
-      socket.on('library-cache-lock-stopped', (data) => {
+      socket.on('hw-contention-stopped', (data) => {
         setIsRunning(false);
         setStatusMessage('Stopped');
       });
@@ -147,10 +143,10 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
 
     return () => {
       if (socket) {
-        socket.off('library-cache-lock-metrics');
-        socket.off('library-cache-lock-status');
-        socket.off('library-cache-lock-wait-events');
-        socket.off('library-cache-lock-stopped');
+        socket.off('hw-contention-metrics');
+        socket.off('hw-contention-status');
+        socket.off('hw-contention-wait-events');
+        socket.off('hw-contention-stopped');
       }
     };
   }, [socket]);
@@ -182,18 +178,19 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
 
   const handleStart = async () => {
     try {
-      setStatusMessage('Starting Library Cache Lock Demo...');
+      setStatusMessage('Starting HW Contention Demo...');
       // Clear chart data
       setTpsHistory([]);
       setResponseTimeHistory([]);
       setLabels([]);
-      setLibraryCacheEvents({});
+      setHwEvents({});
       setTop10WaitEvents([]);
+      setSegmentStats({});
 
       // Set running immediately for UI responsiveness
       setIsRunning(true);
 
-      const response = await fetch(`${API_BASE}/library-cache-lock/start`, {
+      const response = await fetch(`${API_BASE}/hw-contention/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -220,7 +217,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     try {
       setStatusMessage('Stopping...');
 
-      await fetch(`${API_BASE}/library-cache-lock/stop`, { method: 'POST' });
+      await fetch(`${API_BASE}/hw-contention/stop`, { method: 'POST' });
 
       setIsRunning(false);
       setStatusMessage('Stopped');
@@ -239,11 +236,10 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     setTpsHistory([]);
     setResponseTimeHistory([]);
     setLabels([]);
-    setMetrics({ tps: 0, avgResponseTime: 0, totalCalls: 0, totalSelects: 0, errors: 0 });
-    setLibraryCacheEvents({});
+    setMetrics({ tps: 0, avgResponseTime: 0, totalInserts: 0, errors: 0 });
+    setHwEvents({});
     setTop10WaitEvents([]);
-    setHardParses(0);
-    setParseCount(0);
+    setSegmentStats({});
   };
 
   const formatUptime = (seconds) => {
@@ -256,10 +252,10 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
   const tpsChartData = {
     labels,
     datasets: [{
-      label: 'Iterations/sec',
+      label: 'Inserts/sec',
       data: tpsHistory,
-      borderColor: '#f59e0b',
-      backgroundColor: 'rgba(245, 158, 11, 0.2)',
+      borderColor: '#10b981',
+      backgroundColor: 'rgba(16, 185, 129, 0.2)',
       fill: true,
       tension: 0.3,
       pointRadius: 0
@@ -272,8 +268,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     datasets: [{
       label: 'Response Time (ms)',
       data: responseTimeHistory,
-      borderColor: '#ef4444',
-      backgroundColor: 'rgba(239, 68, 68, 0.3)',
+      borderColor: '#f59e0b',
+      backgroundColor: 'rgba(245, 158, 11, 0.3)',
       fill: true,
       tension: 0.3,
       pointRadius: 0
@@ -374,23 +370,29 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
   const existingSchemas = schemas || [];
   const hasSchemas = existingSchemas.length > 0;
 
-  // Key library cache events to highlight
+  // Key HW contention events to highlight
   const keyEvents = [
-    'library cache lock',
-    'library cache pin',
-    'cursor: pin S wait on X',
-    'cursor: pin S',
-    'cursor: mutex S',
-    'cursor: mutex X',
-    'latch: shared pool',
-    'latch: library cache'
+    'enq: HW - contention',
+    'enq: TM - contention',
+    'enq: TX - row lock contention',
+    'enq: TX - index contention',
+    'buffer busy waits',
+    'free buffer waits',
+    'log file sync',
+    'log buffer space'
   ];
+
+  const testModeLabels = {
+    'no_prealloc': 'No Pre-allocation (Max HW contention)',
+    'prealloc': 'Pre-allocate Extents (Reduced HW)',
+    'partitioned': 'Partitioned Table (Distributed HW)'
+  };
 
   if (!dbStatus.connected) {
     return (
       <div className="panel" style={{ height: '100%' }}>
         <div className="panel-header">
-          <h2>Library Cache Lock Demo</h2>
+          <h2>HW Contention Demo</h2>
         </div>
         <div className="panel-content">
           <p style={{ color: 'var(--text-muted)' }}>Connect to database first</p>
@@ -403,7 +405,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
     <div style={{ display: 'flex', gap: '1rem', height: '100%', padding: '1rem' }}>
       {/* Left Panel - Controls */}
       <div style={{
-        width: '300px',
+        width: '320px',
         flexShrink: 0,
         background: 'var(--surface)',
         borderRadius: '8px',
@@ -414,26 +416,27 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
         overflowY: 'auto'
       }}>
         <h2 style={{ margin: 0, fontSize: '1.1rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.5rem' }}>
-          Library Cache Lock Demo
+          HW Contention Demo
         </h2>
 
         {/* Info Box */}
         <div style={{
           padding: '0.75rem',
-          background: 'rgba(239, 68, 68, 0.1)',
-          border: '1px solid rgba(239, 68, 68, 0.3)',
+          background: 'rgba(245, 158, 11, 0.1)',
+          border: '1px solid rgba(245, 158, 11, 0.3)',
           borderRadius: '4px',
           fontSize: '0.75rem',
           color: 'var(--text-muted)'
         }}>
-          <strong style={{ color: '#ef4444' }}>Non-Existent Sequence Pattern:</strong>
-          <ul style={{ margin: '0.25rem 0 0 0', paddingLeft: '1.2rem' }}>
-            <li>Multiple sessions SELECT from non-existent sequences</li>
-            <li>ORA-02289 errors cause library cache lock contention</li>
-          </ul>
-          <div style={{ marginTop: '0.5rem', fontStyle: 'italic' }}>
-            Reproduces: library cache lock, hard parse storms
+          <strong style={{ color: '#f59e0b' }}>enq: HW - contention</strong>
+          <div style={{ marginTop: '0.25rem' }}>
+            High Water Mark contention occurs when multiple sessions try to allocate space in the same segment.
           </div>
+          <ul style={{ margin: '0.5rem 0 0 0', paddingLeft: '1.2rem' }}>
+            <li><strong>Test 1:</strong> No pre-allocation (max contention)</li>
+            <li><strong>Test 2:</strong> Pre-allocate extents (reduced)</li>
+            <li><strong>Test 3:</strong> Partitioned table (distributed)</li>
+          </ul>
         </div>
 
         {/* Schema Selection */}
@@ -461,7 +464,33 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           </select>
         </div>
 
-        {/* Number of Workers */}
+        {/* Test Mode Selection */}
+        <div className="form-group">
+          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Test Mode:</label>
+          <select
+            value={config.testMode}
+            onChange={(e) => setConfig(prev => ({ ...prev, testMode: e.target.value }))}
+            disabled={isRunning}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              background: 'var(--bg-primary)',
+              border: '1px solid var(--border)',
+              borderRadius: '4px',
+              color: 'var(--text-primary)',
+              marginTop: '0.25rem'
+            }}
+          >
+            <option value="no_prealloc">1. No Pre-allocation (Max HW)</option>
+            <option value="prealloc">2. Pre-allocate Extents</option>
+            <option value="partitioned">3. Partitioned Table</option>
+          </select>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            {testModeLabels[config.testMode]}
+          </div>
+        </div>
+
+        {/* Number of Sessions */}
         <div className="form-group">
           <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Concurrent Sessions:</label>
           <input
@@ -481,35 +510,61 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
               marginTop: '0.25rem'
             }}
           />
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Number of parallel sessions
-          </div>
         </div>
 
-        {/* Sequence Count */}
-        <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>SELECTs per Iteration:</label>
-          <input
-            type="number"
-            min="1"
-            max="10"
-            value={config.sequenceCount}
-            onChange={(e) => setConfig(prev => ({ ...prev, sequenceCount: Math.max(1, Math.min(10, parseInt(e.target.value) || 3)) }))}
-            disabled={isRunning}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              marginTop: '0.25rem'
-            }}
-          />
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Number of non-existent sequences to query (customer had 3)
+        {/* Pre-alloc Extents (only for prealloc mode) */}
+        {config.testMode === 'prealloc' && (
+          <div className="form-group">
+            <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Pre-allocate Extents:</label>
+            <input
+              type="number"
+              min="10"
+              max="1000"
+              value={config.preAllocExtents}
+              onChange={(e) => setConfig(prev => ({ ...prev, preAllocExtents: Math.max(10, parseInt(e.target.value) || 100) }))}
+              disabled={isRunning}
+              style={{
+                width: '100%',
+                padding: '0.5rem',
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                color: 'var(--text-primary)',
+                marginTop: '0.25rem'
+              }}
+            />
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              ALTER TABLE ... ALLOCATE EXTENT
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* Partition Count (only for partitioned mode) */}
+        {config.testMode === 'partitioned' && (
+          <div className="form-group">
+            <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Number of Partitions:</label>
+            <input
+              type="number"
+              min="2"
+              max="64"
+              value={config.partitionCount}
+              onChange={(e) => setConfig(prev => ({ ...prev, partitionCount: Math.max(2, Math.min(64, parseInt(e.target.value) || 8)) }))}
+              disabled={isRunning}
+              style={{
+                width: '100%',
+                padding: '0.5rem',
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                color: 'var(--text-primary)',
+                marginTop: '0.25rem'
+              }}
+            />
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              Hash partitioned by ID
+            </div>
+          </div>
+        )}
 
         {/* Loop Delay */}
         <div className="form-group">
@@ -517,8 +572,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           <input
             type="number"
             min="0"
-            max="5000"
-            step="100"
+            max="1000"
+            step="10"
             value={config.loopDelay}
             onChange={(e) => setConfig(prev => ({ ...prev, loopDelay: Math.max(0, parseInt(e.target.value) || 0) }))}
             disabled={isRunning}
@@ -533,7 +588,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             }}
           />
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Delay between iterations (0 = tight loop, max contention)
+            0 = tight loop (max contention)
           </div>
         </div>
 
@@ -594,29 +649,25 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           </div>
         )}
 
-        {/* Parse Stats */}
+        {/* Segment Stats */}
         <div style={{
           padding: '0.75rem',
           background: 'var(--bg-primary)',
           borderRadius: '4px'
         }}>
-          <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Parse Statistics</h4>
+          <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Segment Statistics</h4>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-            <span>Hard Parses:</span>
-            <span style={{ fontWeight: '600', color: '#ef4444' }}>{hardParses.toLocaleString()}</span>
+            <span>Size:</span>
+            <span style={{ fontWeight: '600' }}>{(segmentStats.sizeMB || 0).toFixed(2)} MB</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-            <span>Total Parses:</span>
-            <span style={{ fontWeight: '600' }}>{parseCount.toLocaleString()}</span>
+            <span>Extents:</span>
+            <span style={{ fontWeight: '600', color: '#f59e0b' }}>{(segmentStats.extents || 0).toLocaleString()}</span>
           </div>
-          {parseCount > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-              <span>Hard Parse Ratio:</span>
-              <span style={{ fontWeight: '600', color: (hardParses / parseCount) > 0.1 ? '#ef4444' : '#10b981' }}>
-                {((hardParses / parseCount) * 100).toFixed(1)}%
-              </span>
-            </div>
-          )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+            <span>Blocks:</span>
+            <span style={{ fontWeight: '600' }}>{(segmentStats.blocks || 0).toLocaleString()}</span>
+          </div>
         </div>
       </div>
 
@@ -633,8 +684,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             display: 'flex',
             flexDirection: 'column'
           }}>
-            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#f59e0b' }}>
-              Iterations/sec
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#10b981' }}>
+              Inserts/sec
             </h3>
             <div style={{ flex: 1, minHeight: '150px' }}>
               <Line data={tpsChartData} options={chartOptions} />
@@ -650,7 +701,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             display: 'flex',
             flexDirection: 'column'
           }}>
-            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#ef4444' }}>
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#f59e0b' }}>
               Response Time (ms)
             </h3>
             <div style={{ flex: 1, minHeight: '150px' }}>
@@ -658,29 +709,37 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
             </div>
           </div>
 
-          {/* Library Cache Events Panel */}
+          {/* HW Contention Events Panel */}
           <div style={{
             width: '280px',
             background: 'var(--surface)',
             borderRadius: '8px',
             padding: '1rem'
           }}>
-            <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: '#ef4444' }}>
-              Library Cache Contention
+            <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: '#f59e0b' }}>
+              HW & Space Contention
             </h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {keyEvents.map(event => {
-                const eventData = libraryCacheEvents[event];
+                const eventData = hwEvents[event];
                 const timeSeconds = eventData?.timeSeconds || 0;
+                const isHW = event === 'enq: HW - contention';
                 return (
                   <div key={event} style={{
                     display: 'flex',
                     justifyContent: 'space-between',
                     fontSize: '0.75rem',
                     padding: '0.2rem 0',
-                    borderBottom: '1px solid var(--border)'
+                    borderBottom: '1px solid var(--border)',
+                    background: isHW && timeSeconds > 0 ? 'rgba(245, 158, 11, 0.1)' : 'transparent'
                   }}>
-                    <span style={{ color: 'var(--text-muted)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <span style={{
+                      color: isHW ? '#f59e0b' : 'var(--text-muted)',
+                      fontWeight: isHW ? '600' : '400',
+                      maxWidth: '180px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}>
                       {event}:
                     </span>
                     <span style={{
@@ -705,34 +764,28 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           padding: '1rem'
         }}>
           <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>
+            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>
               {metrics.tps.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Iterations/sec</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Inserts/sec</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#ef4444' }}>
+            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>
               {metrics.avgResponseTime.toFixed(2)}
             </div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Avg Response (ms)</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--accent-primary)' }}>
-              {metrics.totalCalls.toLocaleString()}
+              {metrics.totalInserts.toLocaleString()}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Iterations</div>
-          </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#a855f7' }}>
-              {metrics.totalSelects.toLocaleString()}
-            </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>SELECTs (ORA-02289)</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Inserts</div>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', fontWeight: '700', color: metrics.errors > 0 ? 'var(--accent-danger)' : 'var(--text-muted)' }}>
               {metrics.errors}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Other Errors</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Errors</div>
           </div>
         </div>
 
@@ -756,4 +809,4 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
   );
 }
 
-export default LibraryCacheLockPanel;
+export default HWContentionPanel;

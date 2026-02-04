@@ -11,6 +11,7 @@ const stressEngine = require('./stress/engine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const statsComparisonEngine = require('./stress/statsComparisonEngine');
+const hwContentionEngine = require('./stress/hwContentionEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -427,6 +428,40 @@ app.get('/api/stats-comparison/status', (req, res) => {
   res.json(statsComparisonEngine.getStatus());
 });
 
+// ============================================
+// HW Contention Demo API Routes
+// ============================================
+
+// Start HW contention demo
+app.post('/api/hw-contention/start', async (req, res) => {
+  const config = req.body;
+  try {
+    await hwContentionEngine.start(oracleDb, config, io);
+    res.json({ success: true, message: 'HW Contention demo started' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop HW contention demo
+app.post('/api/hw-contention/stop', async (req, res) => {
+  try {
+    const stats = await hwContentionEngine.stop();
+    res.json({ success: true, message: 'HW Contention demo stopped', stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get HW contention demo status
+app.get('/api/hw-contention/status', (req, res) => {
+  res.json({
+    isRunning: hwContentionEngine.isRunning,
+    config: hwContentionEngine.config,
+    stats: hwContentionEngine.stats
+  });
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -458,6 +493,7 @@ process.on('SIGTERM', async () => {
   indexContentionEngine.stop();
   libraryCacheLockEngine.stop();
   statsComparisonEngine.stop();
+  hwContentionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
@@ -469,6 +505,7 @@ process.on('SIGINT', async () => {
   indexContentionEngine.stop();
   libraryCacheLockEngine.stop();
   statsComparisonEngine.stop();
+  hwContentionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);

@@ -12,6 +12,7 @@ import GCWaitChart from './components/GCWaitChart';
 import IndexContentionPanel from './components/IndexContentionPanel';
 import LibraryCacheLockPanel from './components/LibraryCacheLockPanel';
 import StatsComparisonPanel from './components/StatsComparisonPanel';
+import HWContentionPanel from './components/HWContentionPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -395,6 +396,22 @@ function App() {
             Library Cache Lock Demo
           </button>
           <button
+            onClick={() => setActiveTab('hw-contention')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'hw-contention' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'hw-contention' ? '2px solid #f59e0b' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'hw-contention' ? '#f59e0b' : 'var(--text-muted)',
+              fontWeight: activeTab === 'hw-contention' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            HW Contention Demo
+          </button>
+          <button
             onClick={() => setActiveTab('stats-comparison')}
             style={{
               padding: '0.75rem 1.5rem',
@@ -477,6 +494,15 @@ function App() {
         {/* Library Cache Lock Demo Tab */}
         {activeTab === 'library-cache-lock' && (
           <LibraryCacheLockPanel
+            dbStatus={dbStatus}
+            socket={socket}
+            schemas={schemas}
+          />
+        )}
+
+        {/* HW Contention Demo Tab */}
+        {activeTab === 'hw-contention' && (
+          <HWContentionPanel
             dbStatus={dbStatus}
             socket={socket}
             schemas={schemas}
