@@ -417,6 +417,152 @@ class HWContentionEngine {
     }
   }
 
+  // Gather statistics with histogram options
+  // methodOpt: 'SIZE_254' = FOR ALL COLUMNS SIZE 254
+  //            'AUTO' = FOR ALL COLUMNS SIZE AUTO
+  async gatherStats(methodOpt = 'AUTO') {
+    if (!this.db) {
+      throw new Error('Database not connected');
+    }
+
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+    const tableName = this.config?.testMode === 'partitioned'
+      ? `${p}HW_STRESS_TAB_PART`
+      : `${p}HW_STRESS_TAB`;
+
+    const methodOptStr = methodOpt === 'SIZE_254'
+      ? 'FOR ALL COLUMNS SIZE 254'
+      : 'FOR ALL COLUMNS SIZE AUTO';
+
+    console.log(`Gathering statistics on ${tableName} with METHOD_OPT => '${methodOptStr}'`);
+    this.io?.emit('hw-contention-status', { running: this.isRunning, message: `Gathering stats (${methodOpt})...` });
+
+    const startTime = Date.now();
+
+    try {
+      await this.db.execute(`
+        BEGIN
+          DBMS_STATS.GATHER_TABLE_STATS(
+            ownname => USER,
+            tabname => :tabName,
+            method_opt => :methodOpt,
+            cascade => TRUE,
+            degree => 4
+          );
+        END;
+      `, {
+        tabName: tableName,
+        methodOpt: methodOptStr
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+      console.log(`Statistics gathered in ${elapsed}s`);
+      this.io?.emit('hw-contention-status', { running: this.isRunning, message: `Stats gathered in ${elapsed}s` });
+
+      // Fetch and emit histogram info
+      await this.reportHistogramInfo();
+
+      return { success: true, elapsed: parseFloat(elapsed) };
+    } catch (err) {
+      console.error('Error gathering stats:', err.message);
+      this.io?.emit('hw-contention-status', { running: this.isRunning, message: `Stats error: ${err.message}` });
+      throw err;
+    }
+  }
+
+  // Report histogram information from the database
+  async reportHistogramInfo() {
+    if (!this.db) return;
+
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+    const tableName = this.config?.testMode === 'partitioned'
+      ? `${p}HW_STRESS_TAB_PART`
+      : `${p}HW_STRESS_TAB`;
+
+    try {
+      // Query histogram info from USER_TAB_COL_STATISTICS (safer than SYS.HISTGRM$)
+      const histResult = await this.db.execute(`
+        SELECT
+          column_name,
+          num_distinct,
+          num_nulls,
+          num_buckets,
+          histogram
+        FROM user_tab_col_statistics
+        WHERE table_name = :tabName
+        ORDER BY column_name
+      `, { tabName: tableName });
+
+      const histogramInfo = [];
+      for (const row of histResult.rows) {
+        histogramInfo.push({
+          columnName: row.COLUMN_NAME,
+          numDistinct: row.NUM_DISTINCT || 0,
+          numNulls: row.NUM_NULLS || 0,
+          numBuckets: row.NUM_BUCKETS || 0,
+          histogramType: row.HISTOGRAM || 'NONE'
+        });
+      }
+
+      // Query row count from SYS.HISTGRM$ for histogram bucket details (if accessible)
+      let histgramRows = 0;
+      try {
+        const histgramResult = await this.db.execute(`
+          SELECT COUNT(*) as cnt
+          FROM sys.histgrm$ h, sys.obj$ o, sys.col$ c
+          WHERE o.name = :tabName
+            AND o.obj# = h.obj#
+            AND h.obj# = c.obj#
+            AND h.intcol# = c.intcol#
+        `, { tabName: tableName });
+        histgramRows = histgramResult.rows[0]?.CNT || 0;
+      } catch (e) {
+        // User might not have access to SYS tables
+        console.log('Cannot access SYS.HISTGRM$ (requires DBA privileges)');
+      }
+
+      // Get table stats summary
+      let tableStats = {};
+      try {
+        const tabStatResult = await this.db.execute(`
+          SELECT
+            num_rows,
+            blocks,
+            avg_row_len,
+            last_analyzed
+          FROM user_tables
+          WHERE table_name = :tabName
+        `, { tabName: tableName });
+
+        if (tabStatResult.rows.length > 0) {
+          const row = tabStatResult.rows[0];
+          tableStats = {
+            numRows: row.NUM_ROWS || 0,
+            blocks: row.BLOCKS || 0,
+            avgRowLen: row.AVG_ROW_LEN || 0,
+            lastAnalyzed: row.LAST_ANALYZED
+          };
+        }
+      } catch (e) {
+        // Silently fail
+      }
+
+      if (this.io) {
+        this.io.emit('hw-contention-histogram-info', {
+          tableName,
+          histogramInfo,
+          histgramRows,
+          tableStats
+        });
+      }
+
+      return { histogramInfo, histgramRows, tableStats };
+    } catch (err) {
+      console.log('Cannot query histogram info:', err.message);
+      return null;
+    }
+  }
+
   async stop() {
     console.log('Stopping HW Contention Demo...');
     this.isRunning = false;

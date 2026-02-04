@@ -62,6 +62,13 @@ function HWContentionPanel({ dbStatus, socket, schemas }) {
   const [top10WaitEvents, setTop10WaitEvents] = useState([]);
   const [segmentStats, setSegmentStats] = useState({});
 
+  // Histogram/Stats state
+  const [statsMethodOpt, setStatsMethodOpt] = useState('AUTO'); // 'AUTO' or 'SIZE_254'
+  const [histogramInfo, setHistogramInfo] = useState([]);
+  const [tableStats, setTableStats] = useState({});
+  const [histgramRows, setHistgramRows] = useState(0);
+  const [isGatheringStats, setIsGatheringStats] = useState(false);
+
   // Chart data - keep last 60 seconds
   const maxDataPoints = 60;
   const [tpsHistory, setTpsHistory] = useState([]);
@@ -139,6 +146,18 @@ function HWContentionPanel({ dbStatus, socket, schemas }) {
         setIsRunning(false);
         setStatusMessage('Stopped');
       });
+
+      socket.on('hw-contention-histogram-info', (data) => {
+        if (data.histogramInfo) {
+          setHistogramInfo(data.histogramInfo);
+        }
+        if (data.tableStats) {
+          setTableStats(data.tableStats);
+        }
+        if (data.histgramRows !== undefined) {
+          setHistgramRows(data.histgramRows);
+        }
+      });
     }
 
     return () => {
@@ -147,6 +166,7 @@ function HWContentionPanel({ dbStatus, socket, schemas }) {
         socket.off('hw-contention-status');
         socket.off('hw-contention-wait-events');
         socket.off('hw-contention-stopped');
+        socket.off('hw-contention-histogram-info');
       }
     };
   }, [socket]);
@@ -240,6 +260,34 @@ function HWContentionPanel({ dbStatus, socket, schemas }) {
     setHwEvents({});
     setTop10WaitEvents([]);
     setSegmentStats({});
+    setHistogramInfo([]);
+    setTableStats({});
+    setHistgramRows(0);
+  };
+
+  const handleGatherStats = async () => {
+    try {
+      setIsGatheringStats(true);
+      setStatusMessage(`Gathering stats (${statsMethodOpt})...`);
+
+      const response = await fetch(`${API_BASE}/hw-contention/gather-stats`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ methodOpt: statsMethodOpt })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to gather stats');
+      }
+
+      setStatusMessage(`Stats gathered in ${data.elapsed}s`);
+    } catch (err) {
+      setStatusMessage(`Stats error: ${err.message}`);
+    } finally {
+      setIsGatheringStats(false);
+    }
   };
 
   const formatUptime = (seconds) => {
@@ -669,6 +717,76 @@ function HWContentionPanel({ dbStatus, socket, schemas }) {
             <span style={{ fontWeight: '600' }}>{(segmentStats.blocks || 0).toLocaleString()}</span>
           </div>
         </div>
+
+        {/* Gather Statistics Section */}
+        <div style={{
+          padding: '0.75rem',
+          background: 'rgba(59, 130, 246, 0.1)',
+          border: '1px solid rgba(59, 130, 246, 0.3)',
+          borderRadius: '4px'
+        }}>
+          <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem', color: '#3b82f6' }}>Gather Statistics</h4>
+
+          {/* METHOD_OPT Selection */}
+          <div style={{ marginBottom: '0.5rem' }}>
+            <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>METHOD_OPT:</label>
+            <select
+              value={statsMethodOpt}
+              onChange={(e) => setStatsMethodOpt(e.target.value)}
+              disabled={isGatheringStats}
+              style={{
+                width: '100%',
+                padding: '0.4rem',
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                color: 'var(--text-primary)',
+                fontSize: '0.8rem',
+                marginTop: '0.25rem'
+              }}
+            >
+              <option value="AUTO">FOR ALL COLUMNS SIZE AUTO</option>
+              <option value="SIZE_254">FOR ALL COLUMNS SIZE 254</option>
+            </select>
+          </div>
+
+          <button
+            onClick={handleGatherStats}
+            disabled={isGatheringStats || !metrics.totalInserts}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              background: isGatheringStats ? 'var(--surface)' : '#3b82f6',
+              border: 'none',
+              borderRadius: '4px',
+              color: '#fff',
+              cursor: (isGatheringStats || !metrics.totalInserts) ? 'not-allowed' : 'pointer',
+              opacity: (isGatheringStats || !metrics.totalInserts) ? 0.5 : 1,
+              fontSize: '0.85rem',
+              fontWeight: '500'
+            }}
+          >
+            {isGatheringStats ? 'Gathering...' : 'DBMS_STATS.GATHER_TABLE_STATS'}
+          </button>
+
+          {/* Table Stats Summary */}
+          {tableStats.numRows !== undefined && (
+            <div style={{ marginTop: '0.5rem', fontSize: '0.75rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>Rows (stats):</span>
+                <span style={{ fontWeight: '600' }}>{(tableStats.numRows || 0).toLocaleString()}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>Avg Row Len:</span>
+                <span style={{ fontWeight: '600' }}>{tableStats.avgRowLen || 0}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>SYS.HISTGRM$ rows:</span>
+                <span style={{ fontWeight: '600', color: '#3b82f6' }}>{histgramRows.toLocaleString()}</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Right Panel - Charts and Metrics */}
@@ -801,6 +919,60 @@ function HWContentionPanel({ dbStatus, socket, schemas }) {
             </h3>
             <div style={{ height: '280px' }}>
               <Bar data={top10WaitEventsChartData} options={top10WaitEventsChartOptions} />
+            </div>
+          </div>
+        )}
+
+        {/* Histogram Info Table */}
+        {histogramInfo.length > 0 && (
+          <div style={{
+            background: 'var(--surface)',
+            borderRadius: '8px',
+            padding: '1rem'
+          }}>
+            <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: '#3b82f6' }}>
+              Column Statistics & Histograms
+            </h3>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: '0.8rem'
+              }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                    <th style={{ padding: '0.5rem', textAlign: 'left', color: 'var(--text-muted)' }}>Column</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'right', color: 'var(--text-muted)' }}>Distinct</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'right', color: 'var(--text-muted)' }}>Nulls</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'right', color: 'var(--text-muted)' }}>Buckets</th>
+                    <th style={{ padding: '0.5rem', textAlign: 'left', color: 'var(--text-muted)' }}>Histogram Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {histogramInfo.map((col, idx) => (
+                    <tr key={col.columnName} style={{
+                      borderBottom: '1px solid var(--border)',
+                      background: idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)'
+                    }}>
+                      <td style={{ padding: '0.4rem 0.5rem', fontWeight: '500' }}>{col.columnName}</td>
+                      <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{(col.numDistinct || 0).toLocaleString()}</td>
+                      <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{(col.numNulls || 0).toLocaleString()}</td>
+                      <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', color: col.numBuckets > 1 ? '#3b82f6' : 'var(--text-muted)' }}>
+                        {col.numBuckets || 0}
+                      </td>
+                      <td style={{
+                        padding: '0.4rem 0.5rem',
+                        color: col.histogramType === 'NONE' ? 'var(--text-muted)' :
+                               col.histogramType === 'FREQUENCY' ? '#10b981' :
+                               col.histogramType === 'HEIGHT BALANCED' ? '#f59e0b' :
+                               col.histogramType === 'HYBRID' ? '#a855f7' : '#3b82f6'
+                      }}>
+                        {col.histogramType || 'NONE'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

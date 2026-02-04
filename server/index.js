@@ -462,6 +462,29 @@ app.get('/api/hw-contention/status', (req, res) => {
   });
 });
 
+// Gather statistics with histogram options
+// methodOpt: 'SIZE_254' = FOR ALL COLUMNS SIZE 254
+//            'AUTO' = FOR ALL COLUMNS SIZE AUTO
+app.post('/api/hw-contention/gather-stats', async (req, res) => {
+  const { methodOpt = 'AUTO' } = req.body;
+  try {
+    const result = await hwContentionEngine.gatherStats(methodOpt);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get histogram info
+app.get('/api/hw-contention/histogram-info', async (req, res) => {
+  try {
+    const result = await hwContentionEngine.reportHistogramInfo();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
