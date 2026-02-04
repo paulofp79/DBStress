@@ -1,0 +1,247 @@
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  158.22 kB  build/static/js/main.ba202abb.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: Gk5mCBqT-BQ6hEMEAAAB
+Client connected: DZ9Wt_sXluZW-ca0AAAD
+Client disconnected: Gk5mCBqT-BQ6hEMEAAAB
+Oracle connection pool created
+Oracle connection pool closed
+Client disconnected: DZ9Wt_sXluZW-ca0AAAD
+Client connected: ku9366cEVsTcmpM3AAAF
+Client disconnected: ku9366cEVsTcmpM3AAAF
+Client connected: 8Qj0TSxNWd8eazFNAAAH
+Client disconnected: 8Qj0TSxNWd8eazFNAAAH
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  159.46 kB (+1.24 kB)  build/static/js/main.9f224d6d.js
+  2.13 kB               build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: An8mzFhO_XJBSN-sAAAB
+Oracle connection pool created
+Starting HW Contention Demo with 50 workers
+Test mode: no_prealloc
+Created table: NOCOMP_HW_STRESS_TAB
+Stopping HW Contention Demo...
+HW Contention Demo stopped
+Starting HW Contention Demo with 50 workers
+Test mode: prealloc
+Created table: NOCOMP_HW_STRESS_TAB
+Pre-allocated 100 extents
+Stopping HW Contention Demo...
+HW Contention Demo stopped
+Starting HW Contention Demo with 50 workers
+Test mode: partitioned
+Created partitioned table: NOCOMP_HW_STRESS_TAB_PART with 8 partitions
+Stopping HW Contention Demo...
+HW Contention Demo stopped
+Starting HW Contention Demo with 50 workers
+Test mode: no_prealloc
+Created table: NOCOMP_HW_STRESS_TAB
+Stopping HW Contention Demo...
+HW Contention Demo stopped
+Starting HW Contention Demo with 50 workers
+Test mode: prealloc
+Created table: NOCOMP_HW_STRESS_TAB
+Pre-allocated 100 extents
+Stopping HW Contention Demo...
+HW Contention Demo stopped
+Starting HW Contention Demo with 50 workers
+Test mode: partitioned
+Created partitioned table: NOCOMP_HW_STRESS_TAB_PART with 8 partitions
+Stopping HW Contention Demo...
+HW Contention Demo stopped
+Shutting down...
+Stopping all stress tests...
+Stopping Index Contention Demo...
+Stopping Library Cache Lock Demo...
+Stopping HW Contention Demo...
+Stopping metrics collection...
+Oracle connection pool closed
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  159.46 kB  build/static/js/main.9f224d6d.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: DEBPb8vKaFgfnK94AAAB
+Client connected: qKiOWeKYKntd3f-VAAAD
+Client disconnected: qKiOWeKYKntd3f-VAAAD
+Client disconnected: DEBPb8vKaFgfnK94AAAB
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  159.46 kB  build/static/js/main.9f224d6d.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: LBACSCh33ToAAnEQAAAB
+Oracle connection pool created
+Oracle connection pool closed
+Oracle connection pool created
+Starting HW Contention Demo with 50 workers
+Test mode: no_prealloc
+Dropped table: NOCOMP_HW_STRESS_TAB
+Dropped table: NOCOMP_HW_STRESS_TAB_PART
+Created table: NOCOMP_HW_STRESS_TAB
+Client disconnected: LBACSCh33ToAAnEQAAAB
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  159.46 kB  build/static/js/main.9f224d6d.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: QuBceC0pxPxhFhMBAAAB
+Client connected: vKKgp4vN43Jz-za2AAAD
+Oracle connection pool created
+Starting HW Contention Demo with 50 workers
+Test mode: no_prealloc
+Dropped table: NOCOMP_HW_STRESS_TAB
+Created table: NOCOMP_HW_STRESS_TAB
