@@ -10,6 +10,7 @@ const schemaManager = require('./db/schemaManager');
 const stressEngine = require('./stress/engine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
+const statsComparisonEngine = require('./stress/statsComparisonEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -393,6 +394,39 @@ app.get('/api/library-cache-lock/status', (req, res) => {
   });
 });
 
+// ============================================
+// Stats Comparison Demo API Routes
+// ============================================
+
+// Start stats comparison test
+app.post('/api/stats-comparison/start', async (req, res) => {
+  const config = req.body;
+  try {
+    // Don't await - let it run in background
+    statsComparisonEngine.start(oracleDb, config, io).catch(err => {
+      console.error('Stats comparison background error:', err);
+    });
+    res.json({ success: true, message: 'Stats Comparison test started' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop stats comparison test
+app.post('/api/stats-comparison/stop', async (req, res) => {
+  try {
+    const results = await statsComparisonEngine.stop();
+    res.json({ success: true, message: 'Stats Comparison test stopped', results });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get stats comparison status and results
+app.get('/api/stats-comparison/status', (req, res) => {
+  res.json(statsComparisonEngine.getStatus());
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -423,6 +457,7 @@ process.on('SIGTERM', async () => {
   stressEngine.stop();
   indexContentionEngine.stop();
   libraryCacheLockEngine.stop();
+  statsComparisonEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
@@ -433,6 +468,7 @@ process.on('SIGINT', async () => {
   stressEngine.stop();
   indexContentionEngine.stop();
   libraryCacheLockEngine.stop();
+  statsComparisonEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
