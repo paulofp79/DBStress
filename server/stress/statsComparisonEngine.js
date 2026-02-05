@@ -540,6 +540,129 @@ class StatsComparisonEngine {
     };
   }
 
+  // Manual gather stats for existing test tables
+  async gatherStats(methodOpt = 'AUTO') {
+    if (!this.db) {
+      throw new Error('Not connected to database');
+    }
+
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+    const methodOptStr = methodOpt === 'SIZE_254'
+      ? 'FOR ALL COLUMNS SIZE 254'
+      : 'FOR ALL COLUMNS SIZE AUTO';
+
+    const startTime = Date.now();
+
+    // Check if tables exist
+    const tableCheck = await this.db.execute(`
+      SELECT COUNT(*) as CNT FROM USER_TABLES WHERE TABLE_NAME LIKE '${p}TEST_TABLE_%'
+    `);
+
+    if (tableCheck.rows[0]?.CNT === 0) {
+      throw new Error('No test tables found. Run comparison test first.');
+    }
+
+    // Gather stats for all test tables
+    const tableCount = tableCheck.rows[0]?.CNT || 0;
+    for (let i = 1; i <= tableCount; i++) {
+      const tableName = `${p}TEST_TABLE_${i}`;
+
+      try {
+        await this.db.execute(`
+          BEGIN
+            DBMS_STATS.GATHER_TABLE_STATS(
+              ownname => USER,
+              tabname => :tabName,
+              method_opt => :methodOpt,
+              cascade => TRUE,
+              degree => 4
+            );
+          END;
+        `, { tabName: tableName, methodOpt: methodOptStr });
+      } catch (err) {
+        console.log(`Error gathering stats for ${tableName}:`, err.message);
+      }
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+
+    // Report histogram info after gathering
+    await this.reportHistogramInfo();
+
+    return { elapsed, methodOpt: methodOptStr };
+  }
+
+  // Report histogram information via socket
+  async reportHistogramInfo() {
+    if (!this.db) return;
+
+    const p = this.schemaPrefix ? `${this.schemaPrefix}_` : '';
+
+    // Get histogram info from USER_TAB_COL_STATISTICS
+    const histogramResult = await this.db.execute(`
+      SELECT
+        c.TABLE_NAME,
+        c.COLUMN_NAME,
+        c.NUM_DISTINCT,
+        c.NUM_NULLS,
+        c.NUM_BUCKETS,
+        c.HISTOGRAM
+      FROM USER_TAB_COL_STATISTICS c
+      WHERE c.TABLE_NAME LIKE '${p}TEST_TABLE_%'
+      ORDER BY c.TABLE_NAME, c.COLUMN_ID
+    `);
+
+    const histogramInfo = histogramResult.rows.map(row => ({
+      tableName: row.TABLE_NAME,
+      columnName: row.COLUMN_NAME,
+      numDistinct: row.NUM_DISTINCT || 0,
+      numNulls: row.NUM_NULLS || 0,
+      numBuckets: row.NUM_BUCKETS || 0,
+      histogramType: row.HISTOGRAM || 'NONE'
+    }));
+
+    // Get SYS.HISTGRM$ row count for our tables
+    let histgramRows = 0;
+    try {
+      const histResult = await this.db.execute(`
+        SELECT COUNT(*) as CNT
+        FROM SYS.HISTGRM$ h
+        JOIN SYS.OBJ$ o ON h.OBJ# = o.OBJ#
+        WHERE o.NAME LIKE '${p}TEST_TABLE_%'
+      `);
+      histgramRows = histResult.rows[0]?.CNT || 0;
+    } catch (err) {
+      console.log('Could not query SYS.HISTGRM$:', err.message);
+    }
+
+    // Get aggregated table stats
+    const tableStatsResult = await this.db.execute(`
+      SELECT
+        SUM(NUM_ROWS) as TOTAL_ROWS,
+        ROUND(AVG(AVG_ROW_LEN)) as AVG_ROW_LEN,
+        COUNT(*) as TABLE_COUNT
+      FROM USER_TABLES
+      WHERE TABLE_NAME LIKE '${p}TEST_TABLE_%'
+    `);
+
+    const tableStats = {
+      numRows: tableStatsResult.rows[0]?.TOTAL_ROWS || 0,
+      avgRowLen: tableStatsResult.rows[0]?.AVG_ROW_LEN || 0,
+      tableCount: tableStatsResult.rows[0]?.TABLE_COUNT || 0
+    };
+
+    // Emit via socket
+    if (this.io) {
+      this.io.emit('stats-comparison-histogram-info', {
+        histogramInfo,
+        histgramRows,
+        tableStats
+      });
+    }
+
+    return { histogramInfo, histgramRows, tableStats };
+  }
+
   async stop() {
     console.log('Stopping Stats Comparison Test...');
     this.isRunning = false;

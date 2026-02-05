@@ -428,6 +428,29 @@ app.get('/api/stats-comparison/status', (req, res) => {
   res.json(statsComparisonEngine.getStatus());
 });
 
+// Gather statistics with histogram options for stats comparison tables
+// methodOpt: 'SIZE_254' = FOR ALL COLUMNS SIZE 254
+//            'AUTO' = FOR ALL COLUMNS SIZE AUTO
+app.post('/api/stats-comparison/gather-stats', async (req, res) => {
+  const { methodOpt = 'AUTO' } = req.body;
+  try {
+    const result = await statsComparisonEngine.gatherStats(methodOpt);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get histogram info for stats comparison tables
+app.get('/api/stats-comparison/histogram-info', async (req, res) => {
+  try {
+    const result = await statsComparisonEngine.reportHistogramInfo();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ============================================
 // HW Contention Demo API Routes
 // ============================================
