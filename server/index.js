@@ -12,6 +12,7 @@ const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const statsComparisonEngine = require('./stress/statsComparisonEngine');
 const hwContentionEngine = require('./stress/hwContentionEngine');
+const skewDetectionEngine = require('./stress/skewDetectionEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -508,6 +509,78 @@ app.get('/api/hw-contention/histogram-info', async (req, res) => {
   }
 });
 
+// ============================================
+// Skew Detection Demo API Routes
+// ============================================
+
+// Create test tables for skew detection
+app.post('/api/skew-detection/create-tables', async (req, res) => {
+  try {
+    await skewDetectionEngine.start(oracleDb, {}, io);
+    res.json({ success: true, message: 'Skew detection test tables created' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Drop test tables
+app.post('/api/skew-detection/drop-tables', async (req, res) => {
+  try {
+    const result = await skewDetectionEngine.dropTables();
+    res.json({ success: true, message: 'Skew detection test tables dropped', ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Analyze skew in all test tables
+app.post('/api/skew-detection/analyze', async (req, res) => {
+  try {
+    const results = await skewDetectionEngine.analyzeSkew();
+    res.json({ success: true, results });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Gather stats for a specific table
+app.post('/api/skew-detection/gather-stats', async (req, res) => {
+  const { tableName, methodOpt = 'SIZE AUTO' } = req.body;
+  try {
+    const result = await skewDetectionEngine.gatherStats(tableName, methodOpt);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get histogram info for a specific table
+app.get('/api/skew-detection/histogram-info', async (req, res) => {
+  const { tableName } = req.query;
+  try {
+    if (tableName) {
+      const result = await skewDetectionEngine.getHistogramInfo(tableName);
+      res.json({ success: true, ...result });
+    } else {
+      const result = await skewDetectionEngine.getAllHistogramInfo();
+      res.json({ success: true, tables: result });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get skew detection status
+app.get('/api/skew-detection/status', async (req, res) => {
+  try {
+    // Check if tables exist
+    await skewDetectionEngine.checkTablesExist();
+    res.json(skewDetectionEngine.getStatus());
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -540,6 +613,7 @@ process.on('SIGTERM', async () => {
   libraryCacheLockEngine.stop();
   statsComparisonEngine.stop();
   hwContentionEngine.stop();
+  skewDetectionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);
@@ -552,6 +626,7 @@ process.on('SIGINT', async () => {
   libraryCacheLockEngine.stop();
   statsComparisonEngine.stop();
   hwContentionEngine.stop();
+  skewDetectionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
   process.exit(0);

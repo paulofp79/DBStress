@@ -13,6 +13,7 @@ import IndexContentionPanel from './components/IndexContentionPanel';
 import LibraryCacheLockPanel from './components/LibraryCacheLockPanel';
 import StatsComparisonPanel from './components/StatsComparisonPanel';
 import HWContentionPanel from './components/HWContentionPanel';
+import SkewDetectionPanel from './components/SkewDetectionPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -427,6 +428,22 @@ function App() {
           >
             Stats Comparison
           </button>
+          <button
+            onClick={() => setActiveTab('skew-detection')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'skew-detection' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'skew-detection' ? '2px solid #8b5cf6' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'skew-detection' ? '#8b5cf6' : 'var(--text-muted)',
+              fontWeight: activeTab === 'skew-detection' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            Skew Detection
+          </button>
         </div>
 
         {/* Stress Test Tab */}
@@ -512,6 +529,14 @@ function App() {
         {/* Stats Comparison Tab */}
         {activeTab === 'stats-comparison' && (
           <StatsComparisonPanel
+            dbStatus={dbStatus}
+            socket={socket}
+          />
+        )}
+
+        {/* Skew Detection Tab */}
+        {activeTab === 'skew-detection' && (
+          <SkewDetectionPanel
             dbStatus={dbStatus}
             socket={socket}
           />
