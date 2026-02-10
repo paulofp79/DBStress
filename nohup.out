@@ -580,3 +580,56 @@ Help: https://docs.oracle.com/error-help/db/ora-00904/
 Unable to query V$SQLSTATS: ORA-00904: "MODULE": invalid identifier
 Help: https://docs.oracle.com/error-help/db/ora-00904/
 Using V$SQL for TDE comparison metrics
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  172.36 kB (+3.82 kB)  build/static/js/main.92675d7e.js
+  2.52 kB (+391 B)      build/static/css/main.8b15312a.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: oLcp_3N5vYH8jPD8AAAB
+Client connected: 8_R2jUgjIJ7GcZuFAAAD
+Client connected: rkgzG6WBMDqEYA7jAAAF
+Client connected: z1s982nFhr6oe3e8AAAH
+Client connected: sZLv2wD6wCEvVtjJAAAJ
+Client disconnected: oLcp_3N5vYH8jPD8AAAB
+Client connected: Yzdyz7ThskxjK9JdAAAL
+Oracle connection pool created
+Client disconnected: 8_R2jUgjIJ7GcZuFAAAD
+Client disconnected: rkgzG6WBMDqEYA7jAAAF
+Client disconnected: z1s982nFhr6oe3e8AAAH
+Client disconnected: sZLv2wD6wCEvVtjJAAAJ
+Client disconnected: Yzdyz7ThskxjK9JdAAAL
+Client connected: KB03KuguwawvP-yaAAAN
+Client connected: GqmF4KqybvIyONuKAAAP
+Client connected: bbK4QEsIYqTCzp0dAAAR
+Client connected: Lhofu3NEq6E_lJBXAAAU
+Client connected: OfTgTgMyzxpdGsnqAAAV

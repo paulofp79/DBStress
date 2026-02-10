@@ -12,6 +12,7 @@ import GCWaitChart from './components/GCWaitChart';
 import IndexContentionPanel from './components/IndexContentionPanel';
 import LibraryCacheLockPanel from './components/LibraryCacheLockPanel';
 import StatsComparisonPanel from './components/StatsComparisonPanel';
+import MetricExplorerPanel from './components/MetricExplorerPanel';
 import HWContentionPanel from './components/HWContentionPanel';
 import SkewDetectionPanel from './components/SkewDetectionPanel';
 import TDEComparisonPanel from './components/TDEComparisonPanel';
@@ -445,6 +446,22 @@ function App() {
           >
             Skew Detection
           </button>
+          <button
+            onClick={() => setActiveTab('metric-explorer')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'metric-explorer' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'metric-explorer' ? '2px solid var(--accent-secondary)' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'metric-explorer' ? 'var(--accent-secondary)' : 'var(--text-muted)',
+              fontWeight: activeTab === 'metric-explorer' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            Metric Explorer
+          </button>
 
           <button
             onClick={() => setActiveTab('tde-comparison')}
@@ -558,6 +575,11 @@ function App() {
             dbStatus={dbStatus}
             socket={socket}
           />
+        )}
+
+        {/* Metric Explorer Tab */}
+        {activeTab === 'metric-explorer' && (
+          <MetricExplorerPanel />
         )}
 
         {/* TDE Comparison Tab */}
