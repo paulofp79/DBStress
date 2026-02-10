@@ -19,8 +19,10 @@ class SkewDetectionEngine {
     this.currentPhase = '';
     this.progress = 0;
 
+    this.config = {};
+
     // Test table definitions with skew patterns
-    this.testTables = [
+    this.baseTestTables = [
       {
         name: 'SKEW_TEST_ORDERS',
         rows: 100000,
@@ -211,6 +213,8 @@ class SkewDetectionEngine {
         ]
       }
     ];
+
+    this.resetTestTables();
   }
 
   emitStatus(message, progress) {
@@ -239,6 +243,8 @@ class SkewDetectionEngine {
     this.emitStatus('Creating test tables...', 0);
 
     try {
+      this.applyConfig(config);
+
       await this.createTestTables();
       this.tablesCreated = true;
       this.emitStatus('Test tables created successfully!', 100);
@@ -714,11 +720,19 @@ class SkewDetectionEngine {
       tablesCreated: this.tablesCreated,
       currentPhase: this.currentPhase,
       progress: this.progress,
-      testTables: this.testTables.map(t => ({
-        name: t.name,
-        rows: t.rows,
-        columnCount: t.columns.length
-      }))
+      testTables: this.testTables.map(t => {
+        const base = this.baseTestTables.find(b => b.name === t.name);
+        return {
+          name: t.name,
+          rows: t.rows,
+          columnCount: t.columns.length,
+          defaultRows: base ? base.rows : t.rows
+        };
+      }),
+      config: {
+        rowsPerTable: this.config.rowsPerTable || null,
+        tableRowCounts: this.config.tableRowCounts || {}
+      }
     };
   }
 
@@ -740,6 +754,63 @@ class SkewDetectionEngine {
     } catch (err) {
       return false;
     }
+  }
+
+  resetTestTables() {
+    this.testTables = this.baseTestTables.map(table => this.cloneTableDefinition(table));
+  }
+
+  cloneTableDefinition(tableDef) {
+    return {
+      ...tableDef,
+      columns: tableDef.columns.map(col => ({
+        ...col,
+        distribution: Array.isArray(col.distribution)
+          ? col.distribution.map(item => ({ ...item }))
+          : col.distribution
+      }))
+    };
+  }
+
+  applyConfig(config = {}) {
+    this.resetTestTables();
+    this.config = config || {};
+
+    const { rowsPerTable, tableRowCounts } = this.config;
+    const defaultRowCount = this.parseRowCount(rowsPerTable);
+
+    if (defaultRowCount) {
+      this.testTables.forEach(table => {
+        table.rows = defaultRowCount;
+      });
+    }
+
+    if (tableRowCounts && typeof tableRowCounts === 'object') {
+      this.testTables.forEach(table => {
+        const override = this.parseRowCount(tableRowCounts[table.name]);
+        if (override) {
+          table.rows = override;
+        }
+      });
+    }
+  }
+
+  parseRowCount(value) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return null;
+    }
+
+    const intVal = Math.floor(num);
+    if (intVal <= 0) {
+      return null;
+    }
+
+    return intVal;
   }
 }
 

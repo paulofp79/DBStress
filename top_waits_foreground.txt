@@ -1,0 +1,36 @@
+SQL> select cur.event_name as event,
+  2         cur.wait_class,
+  3         sum(cur.time_waited_micro - prev.time_waited_micro)/1e6 as time_waited_s,
+  4         sum(cur.total_waits - prev.total_waits) as total_waits
+  5    from dba_hist_system_event cur
+  6    join dba_hist_system_event prev
+  7      on cur.dbid = prev.dbid
+  8     and cur.instance_number = prev.instance_number
+  9     and cur.event_id = prev.event_id
+ 10   where cur.dbid = 1276751934
+ 11     and cur.snap_id = 1839
+ 12     and prev.snap_id = 1838
+ 13     and cur.wait_class not in ('Idle')
+ 14     and cur.event_name not like 'rdbms ipc message%'
+ 15     and cur.event_name not like 'SQL*Net message from client%'
+ 16   group by cur.event_name, cur.wait_class
+ 17   having sum(cur.time_waited_micro - prev.time_waited_micro) > 0
+ 18   order by time_waited_s desc
+ 19   fetch first 10 rows only;
+
+EVENT                                    WAIT_CLASS             TIME_WAITED_S  TOTAL_WAITS                                                                                                              
+---------------------------------------- -------------------- --------------- ------------                                                                                                              
+enq: PS - contention                     Other                       7,917.49      225,100                                                                                                              
+gc current block 3-way                   Cluster                     6,551.32   30,307,313                                                                                                              
+gc cr grant 2-way                        Cluster                     4,371.34   35,143,247                                                                                                              
+cell single block physical read: RDMA    Other                       3,660.05   40,491,889                                                                                                              
+enq: TX - row lock contention            Application                 3,148.08        7,054                                                                                                              
+reliable message                         Other                       2,117.35       98,280                                                                                                              
+library cache: mutex X                   Concurrency                 1,917.86      870,067                                                                                                              
+db file parallel write                   System I/O                  1,801.05   11,472,920                                                                                                              
+oradebug request completion              Other                       1,795.06          372                                                                                                              
+cell disk open                           Other                       1,580.51    3,450,874                                                                                                              
+
+10 rows selected.
+
+SQL> spool off

@@ -1,0 +1,32 @@
+SQL> select cur.event_name as event,
+  2         cur.wait_class,
+  3         sum(cur.time_waited_micro - prev.time_waited_micro)/1e6 as time_waited_s,
+  4         sum(cur.total_waits - prev.total_waits) as total_waits
+  5    from dba_hist_system_event cur
+  6    join dba_hist_system_event prev
+  7      on cur.dbid = prev.dbid
+  8     and cur.instance_number = prev.instance_number
+  9     and cur.event_id = prev.event_id
+ 10     and cur.snap_id = 1839
+ 11     and prev.snap_id = 1838
+ 12   where cur.dbid = 1276751934
+ 13     and cur.event_name not like 'rdbms ipc message%'
+ 14     and cur.event_name not like 'SQL*Net message from client%'
+ 15   group by cur.event_name, cur.wait_class
+ 16   having sum(cur.time_waited_micro - prev.time_waited_micro) > 0
+ 17   order by time_waited_s desc
+ 18   fetch first 10 rows only;
+
+EVENT                                    WAIT_CLASS             TIME_WAITED_S  TOTAL_WAITS                                                                                                              
+---------------------------------------- -------------------- --------------- ------------                                                                                                              
+PX Idle Wait                             Idle                    1,924,530.15       48,767                                                                                                              
+Space Manager: slave idle wait           Idle                      459,081.69      139,425                                                                                                              
+LMS CR slave timer                       Idle                      158,934.94   15,847,559                                                                                                              
+gcs yield cpu                            Idle                      158,330.81    5,303,844                                                                                                              
+gcs remote message                       Idle                      152,287.12  471,081,381                                                                                                              
+PX Deq: Execute Reply                    Idle                       73,204.16    4,139,778                                                                                                              
+class slave wait                         Idle                       69,229.16       83,365                                                                                                              
+pmon timer                               Idle                       49,584.91       20,509                                                                                                              
+EMON slave idle wait                     Idle                       36,132.16       10,008                                                                                                              
+watchdog main loop                       Idle                       28,926.98        9,642                                                                                                              
+SQL> spool off

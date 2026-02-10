@@ -245,3 +245,338 @@ Starting HW Contention Demo with 50 workers
 Test mode: no_prealloc
 Dropped table: NOCOMP_HW_STRESS_TAB
 Created table: NOCOMP_HW_STRESS_TAB
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  166.83 kB (+494 B)  build/static/js/main.1452d850.js
+  2.13 kB             build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: sxruhAx83qukRlDrAAAB
+Client connected: mfmdNJC4JqHBsqcSAAAD
+Client connected: vLesaFv_Km0gZ-7kAAAF
+Client disconnected: sxruhAx83qukRlDrAAAB
+Client connected: -D5ycpIlt3GQHMSLAAAH
+Oracle connection pool created
+Starting Skew Detection Demo - Creating test tables...
+Created table: SKEW_TEST_ORDERS
+Populated table: SKEW_TEST_ORDERS with 200000 rows
+Created table: SKEW_TEST_AUDIT_LOGS
+Populated table: SKEW_TEST_AUDIT_LOGS with 200000 rows
+Created table: SKEW_TEST_PRODUCTS
+Populated table: SKEW_TEST_PRODUCTS with 200000 rows
+Created table: SKEW_TEST_TRANSACTIONS
+Populated table: SKEW_TEST_TRANSACTIONS with 200000 rows
+Gathering stats for SKEW_TEST_ORDERS with METHOD_OPT => 'FOR ALL COLUMNS SIZE AUTO'
+Stats gathered in 0.21s
+Gathering stats for SKEW_TEST_ORDERS with METHOD_OPT => 'FOR ALL COLUMNS SIZE 254'
+Stats gathered in 0.49s
+Analyzing skew in test tables...
+Client disconnected: mfmdNJC4JqHBsqcSAAAD
+Client disconnected: vLesaFv_Km0gZ-7kAAAF
+Client disconnected: -D5ycpIlt3GQHMSLAAAH
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  168.54 kB (+1.71 kB)  build/static/js/main.0e2cf990.js
+  2.13 kB               build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: 0d3RzC1tnUVhtkJfAAAB
+Client connected: m5aqeTAp5O4KmjcOAAAD
+Client disconnected: 0d3RzC1tnUVhtkJfAAAB
+Client connected: 4yMoiDe2jgY-qYJFAAAG
+Oracle connection pool created
+TDE comparison error: Error: ORA-06550: line 3, column 29:
+PLS-00103: Encountered the symbol "SELECT" when expecting one of the following:
+
+   ( - + case for mod new not null <an identifier>
+   <a double-quoted delimited-identifier> <a bind variable>
+   continue avg count current exists max min prior sql stddev
+   sum variance execute forall merge time timestamp interval
+   date <a string literal with character set specification>
+   <a number> <a single-quoted SQL string> pipe
+   <an alternatively-quoted string literal with character set specification>
+   <an alte
+ORA-06550: line 3, column 70:
+PLS-00103: Encountered the symbol ")" when expecting one of the following:
+
+   . , @ ; for <an identifier>
+   <a double-quoted delimited-identifier> group having intersect
+   minus order partition start subpartition union where connect
+   sample
+ORA-06550: line 16, column 8:
+PLS-00103: Encountered the symbol "end-of-file" when expecting one of the following:
+
+   ( begin case declare end exception exit for goto if loop mod
+   null pragma raise return select update while with
+   <an identifier> <a double-quoted delimited-identifier>
+   <a bind variable> << continue close current delete fetch lock
+   insert open rollback savepoint set sql execute commit forall
+   merge pipe purge json_object
+Help: https://docs.oracle.com/error-help/db/ora-06550/
+    at Protocol._processMessage (/home/paportug/DBStress/node_modules/oracledb/lib/thin/protocol/protocol.js:204:17)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async ThinConnectionImpl._execute (/home/paportug/DBStress/node_modules/oracledb/lib/thin/connection.js:218:7)
+    at async ThinConnectionImpl.execute (/home/paportug/DBStress/node_modules/oracledb/lib/thin/connection.js:1109:14)
+    at async Connection.execute (/home/paportug/DBStress/node_modules/oracledb/lib/connection.js:1002:16)
+    at async Connection.execute (/home/paportug/DBStress/node_modules/oracledb/lib/util.js:298:16)
+    at async TdeComparisonEngine.measurePlsql (/home/paportug/DBStress/server/stress/tdeComparisonEngine.js:343:5)
+    at async TdeComparisonEngine.runWorkload (/home/paportug/DBStress/server/stress/tdeComparisonEngine.js:288:33)
+    at async TdeComparisonEngine.guardedStep (/home/paportug/DBStress/server/stress/tdeComparisonEngine.js:122:20)
+    at async TdeComparisonEngine.start (/home/paportug/DBStress/server/stress/tdeComparisonEngine.js:76:28) {
+  offset: 47,
+  errorNum: 6550,
+  isRecoverable: false,
+  code: 'ORA-06550'
+}
+Client connected: NtGmXgF1zDMLl_8RAAAI
+Starting Skew Detection Demo - Creating test tables...
+Created table: SKEW_TEST_ORDERS
+Populated table: SKEW_TEST_ORDERS with 100000 rows
+Created table: SKEW_TEST_AUDIT_LOGS
+Populated table: SKEW_TEST_AUDIT_LOGS with 50000 rows
+Created table: SKEW_TEST_PRODUCTS
+Populated table: SKEW_TEST_PRODUCTS with 20000 rows
+Created table: SKEW_TEST_TRANSACTIONS
+Populated table: SKEW_TEST_TRANSACTIONS with 80000 rows
+Gathering stats for SKEW_TEST_ORDERS with METHOD_OPT => 'FOR ALL COLUMNS SIZE AUTO'
+Stats gathered in 0.15s
+Gathering stats for SKEW_TEST_ORDERS with METHOD_OPT => 'FOR ALL COLUMNS SIZE 254'
+Stats gathered in 0.50s
+Analyzing skew in test tables...
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  168.54 kB  build/static/js/main.0e2cf990.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: Z1Ic0UHjKYLzy9wvAAAB
+Client connected: ZLQoh2dJple87d_oAAAD
+Client connected: 2fIJbVY2_ksW2GoGAAAF
+Client disconnected: 2fIJbVY2_ksW2GoGAAAF
+Client disconnected: Z1Ic0UHjKYLzy9wvAAAB
+Client connected: zKaSSupt5uJdhiXdAAAH
+Oracle connection pool created
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Client connected: -3VKgO-uI51Zt1mTAAAJ
+Shutting down...
+Stopping all stress tests...
+Stopping Index Contention Demo...
+Stopping Library Cache Lock Demo...
+Stopping Stats Comparison Test...
+Stopping HW Contention Demo...
+Stopping Skew Detection Demo...
+Stopping metrics collection...
+Oracle connection pool closed
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  168.54 kB  build/static/js/main.0e2cf990.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: aBH4y6iCIt2VLwIyAAAB
+Client connected: VvPnCjlzpbA_zfPaAAAD
+Client connected: 67Un1Aan1F4HYK-iAAAF
+Client disconnected: 67Un1Aan1F4HYK-iAAAF
+Client connected: f9X3KoT9blkbCfe8AAAH
+Oracle connection pool created
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQLSTATS: ORA-00904: "MODULE": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Using V$SQL for TDE comparison metrics
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQLSTATS: ORA-00904: "MODULE": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Using V$SQL for TDE comparison metrics
+Shutting down...
+Stopping all stress tests...
+Stopping Index Contention Demo...
+Stopping Library Cache Lock Demo...
+Stopping Stats Comparison Test...
+Stopping HW Contention Demo...
+Stopping Skew Detection Demo...
+Stopping metrics collection...
+Oracle connection pool closed
+
+> dbstress@1.0.0 start
+> npm run build && node server/index.js
+
+
+> dbstress@1.0.0 build
+> cd client && npm run build
+
+
+> dbstress-client@1.0.0 build
+> react-scripts build
+
+Creating an optimized production build...
+Compiled successfully.
+
+File sizes after gzip:
+
+  168.54 kB  build/static/js/main.0e2cf990.js
+  2.13 kB    build/static/css/main.e56afd67.css
+
+The project was built assuming it is hosted at /.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+You may serve it with a static server:
+
+  npm install -g serve
+  serve -s build
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+
+DBStress server running on port 3001
+API available at http://localhost:3001/api
+Client connected: z0nRnw7ZEzyqx-TdAAAB
+Client connected: suBLwB3LFGhC7y4WAAAD
+Client connected: ninOsry9hY7tSNDgAAAF
+Client disconnected: ninOsry9hY7tSNDgAAAF
+Client connected: fDqx2I1HmzgNogmrAAAH
+Oracle connection pool created
+Unable to capture session snapshot: ORA-00904: "N"."STAT_NAME": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to capture session snapshot: ORA-00904: "N"."STAT_NAME": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQLSTATS: ORA-00904: "MODULE": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Using V$SQL for TDE comparison metrics
+Unable to capture session snapshot: ORA-00904: "N"."STAT_NAME": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to capture session snapshot: ORA-00904: "N"."STAT_NAME": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQL_MONITOR: ORA-00904: "M"."EXECUTIONS": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Unable to query V$SQLSTATS: ORA-00904: "MODULE": invalid identifier
+Help: https://docs.oracle.com/error-help/db/ora-00904/
+Using V$SQL for TDE comparison metrics

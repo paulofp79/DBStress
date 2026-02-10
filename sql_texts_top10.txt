@@ -1,0 +1,151 @@
+SQL> select dbid, sql_id, sql_text from dba_hist_sqltext where dbid = 1276751934 and sql_id in ('4w5q6gaj8nq2x','21nv41rh2n4dw','09dg8x6g2r1zc','2jqathuuh644q','bgnv11mqvft9n','dtdqrwscm91kd','d1frrub43dbb3','6tt3f5mxx08cp','01a4qsdbxkpu9','9nhcn2gb229sg');
+
+      DBID SQL_ID        SQL_TEXT                                                                                                                                                                       
+---------- ------------- --------------------------------------------------------------------------------                                                                                               
+1276751934 01a4qsdbxkpu9 select  VALCONT INTO :b1  FROM MPDT069 WHERE CODENT = :b2  AND CLACONT = :b3                                                                                                   
+1276751934 21nv41rh2n4dw update  BGDTWCN SET ULTI_NUME_PROP = :b1  , ENTIDAD_UMO = :b2  , CENTRO_UMO = :b                                                                                               
+                         3  , USERID_UMO = :b4  , NETNAME_UMO = :b5  , TIMEST_UMO = SYSTIMESTAMP WHERE EN                                                                                               
+                         TIDAD = :b6                                                                                                                                                                    
+                                                                                                                                                                                                        
+1276751934 2jqathuuh644q select  COUNT ( * ) INTO :b1:i1  FROM PGDT070 WHERE CD_BANC_DEBT = :b2  AND CD_A                                                                                               
+                         GEN_DEBT = :b3  AND NR_CNTA_DEBT = :b4  AND NR_DOCT_FAVD = :b5  AND TP_DOCT_FAVD                                                                                               
+                          = :b6                                                                                                                                                                         
+                                                                                                                                                                                                        
+1276751934 6tt3f5mxx08cp select  BGECMIR INTO :b1  FROM BGDTMFU WHERE ENTIDAD = :b2  AND CENTRO_ALTA = :b                                                                                               
+                         3  AND CUENTA = :b4  AND DIVISA = :b5  AND TIPO_MOV = :b6  AND ESTADO = :b7  AND                                                                                               
+                          FECHA_PROCESO = :b8                                                                                                                                                           
+                                                                                                                                                                                                        
+1276751934 bgnv11mqvft9n select  OBSERVACIONES INTO :b1  FROM BGDTOBS WHERE ENTIDAD = :b2  AND CENTRO_ALT                                                                                               
+                         A = :b3  AND CUENTA = :b4  AND DIVISA = :b5  AND NUMER_MOV = :b6                                                                                                               
+                                                                                                                                                                                                        
+1276751934 d1frrub43dbb3 select  C . ENTIDAD , C . CENTRO_ALTA , C . CUENTA , C . NUMER_MOV , C . CODIGO                                                                                                
+                         , C . CONCEPTO , C . FEC_VALOR , C . FEC_OPERA , C . IMPORTE , C . COD_APLICACIO                                                                                               
+                         N , C . TERM_NIO , C . FECHA_NIO , C . HORA_NIO , C . TIMEST_UMO , B . FECHA_PRO                                                                                               
+                         VEN FROM BGDTCAP A , BGDTIPF B , BGDTRIE C WHERE A . ENTIDAD_MAE = :b1  AND A .                                                                                                
+                         CENTRO_MAE = :b2  AND A . CUENTA_MAE = :b3  AND A . DIVISA = 'BRL' AND B . ENTID                                                                                               
+                         AD = A . ENTIDAD AND B . CENTRO_ALTA = A . CENTRO_ALTA AND B . CUENTA = A . CUEN                                                                                               
+                         TA AND C . ENTIDAD = A . ENTIDAD AND C . CENTRO_ALTA = A . CENTRO_ALTA AND C . C                                                                                               
+                         UENTA = A . CUENTA AND B . SUBPRODU = '0556' AND C . IMPORTE <> 0 AND C . CONCEP                                                                                               
+                         TO IN ( 'INTP' , 'RINT' , 'IIOF' , 'IIRD' ) AND C . COD_EVENTO <> 'JUD' AND C .                                                                                                
+                         IND_ANULADO IN ( 'N' , 'C' ) AND ( C . FEC_VALOR BETWEEN :b4  AND :b5  ) AND C .                                                                                               
+                          FEC_VALOR >= :b6  ORDER BY C . FEC_VALOR                                                                                                                                      
+                                                                                                                                                                                                        
+1276751934 dtdqrwscm91kd select  GEN_DATOS INTO :b1  FROM TCDTGEN WHERE GEN_TABLA = :b2  AND GEN_ENTIDAD                                                                                                
+                         = :b3  AND GEN_IDIOMA = :b4  AND GEN_CLAVE = :b5                                                                                                                               
+                                                                                                                                                                                                        
+1276751934 9nhcn2gb229sg insert into PGDTCQ1(ENTIDAD,CENTRO_CONT,CANAL,FECHA_CONTAB,REFER_OPER,CENTRO_OPE                                                                                               
+                         R,COD_APLIC_NIO,TERM_OPER_NIO,FECHA_OPER_NIO,HORA_OPER_NIO,IND_ON_OFF,IND_CONT,I                                                                                               
+                         ND_TOT,TRANSACCION,COD_MEDIO_PAGO,CUENTA_DEBITO,CUENTA_CREDITO,PRODUCTO,SUBPRODU                                                                                               
+                         ,IMPORTE_OPER,DIVISA_OPER,COD_HIST,NUM_DOCUM,DESCRIPCION,OBSERVACIONES,NIO_RELAC                                                                                               
+                         ,ENTIDAD_REG,CENTRO_REG,USERID_REG,NETNAME_REG,TIMEST_REG,ESTADO_OPER,COD_OPCION                                                                                               
+                         ,ENTIDAD_UMO,CENTRO_UMO,USERID_UMO,NETNAME_UMO,TIMEST_UMO,NR_AUTE,CD_MODU_EXEC_T                                                                                               
+                         RAN,TP_TERN_CNAL,NR_PAB_ALTAIR,NR_VERS_CNAL,NR_TERN,SG_USUA_TERN,NR_OPED_TERN,CD                                                                                               
+                         _MATR_OPED,NR_SPVR,CD_MATR_SPVR,CD_MAC_MESG,CD_TRAN_MAINFRAME,CD_TRAN_ULTI_ALTR,                                                                                               
+                         CD_BANC_ESTO,CD_AGEN_ESTO,CD_USUA_ESTO,CD_REDE_ESTO,DH_ESTO,CD_NSU_ESTO,CD_BANC_                                                                                               
+                         CON_CAN_ES,CD_AGEN_CON_CAN_ES,CD_USUA_CON_CAN_ES,CD_REDE_CON_CAN_ES,DH_CONF_CANC                                                                                               
+                         _ESTO,QT_TRAN_EXEC,IN_TRAN_AGND,DT_AGND_TRAN,DT_FINA_PROG,IN_ENVI_CMPV,IN_DEBT,C                                                                                               
+                         D_AVIS,CD_MOTI_SMS_TOKE,NM_PROG_COOR,CD_COEF_CNAL,CD_COEF_TRAN,CD_MODO_CRTO,IN_A                                                                                               
+                         UTZ,IN_MESM_TITL,IN_VINC_CNTA,CD_PESS,CD_USUA_TERN_2,CD_IDEF_PLAT_BIOM,NR_CRTO_C                                                                                               
+                         LIE,CD_CLIE_IDEF,CD_AUTE_CLIE,IN_AUTE_CNAL,QT_NSU_DUPC,TP_CHAV_ENDE_FAVD,CD_CHAV                                                                                               
+                         _ENDE_FAVD,CD_ISPB_FAVD) values (:b1,:b2,:b3,:b4,:b5,:b6,:b7,:b8,:b9,:b10,:b11,:                                                                                               
+                         b12,:b13,:b14,:b15,:b16,:b17,:b18,:b19,:b20,:b21,:b22,:b23,:b24,:b25,:b26,:b27,:                                                                                               
+                         b28,:b29,:b30,:b31,:b32,:b33,:b34,:b35,:b36,:b37,:b38,:b39,:b40,:b41,:b42,:b43,:                                                                                               
+                         b44,:b45,:b46,:b47,:b48,:b49,:b50,:b51,:b52,:b53,:b54,:b55,:b56,:b57,:b58,:b59,:                                                                                               
+                         b60,:b61,:b62,:b63,:b64,:b65,:b66,:b67,:b68,:b69,:b70,:b71,:b72,:b73,:b74,:b75,:                                                                                               
+                         b76,:b77,:b78,:b79,:b80,:b81,:b82,:b83,:b84,:b85,:b86,:b87,:b88,:b89)                                                                                                          
+                                                                                                                                                                                                        
+1276751934 4w5q6gaj8nq2x /* SQL Analyze(1) */ select /*+  full(t)    parallel(t,8) parallel_index(t,8) db                                                                                               
+                         ms_stats cursor_sharing_exact use_weak_name_resl dynamic_sampling(0) no_monitori                                                                                               
+                         ng xmlindex_sel_idx_tbl opt_param('optimizer_inmemory_aware' 'false') no_substrb                                                                                               
+                         _pad  */to_char(count("SYS_NC00043$")),substrb(dump(min("SYS_NC00043$"),16,0,64)                                                                                               
+                         ,1,240),substrb(dump(max("SYS_NC00043$"),16,0,64),1,240),to_char(count("SYS_NC00                                                                                               
+                         044$")),substrb(dump(min("SYS_NC00044$"),16,0,64),1,240),substrb(dump(max("SYS_N                                                                                               
+                         C00044$"),16,0,64),1,240),to_char(count("VL_TOTL_PGTO_QRCD")),substrb(dump(min("                                                                                               
+                         VL_TOTL_PGTO_QRCD"),16,0,64),1,240),substrb(dump(max("VL_TOTL_PGTO_QRCD"),16,0,6                                                                                               
+                         4),1,240),to_char(count("NM_RECD")),substrb(dump(min("NM_RECD"),16,0,64),1,240),                                                                                               
+                         substrb(dump(max("NM_RECD"),16,0,64),1,240),to_char(count("NM_FANT_RECD")),subst                                                                                               
+                         rb(dump(min("NM_FANT_RECD"),16,0,64),1,240),substrb(dump(max("NM_FANT_RECD"),16,                                                                                               
+                         0,64),1,240),to_char(count("NM_LOGR_RECD")),substrb(dump(min("NM_LOGR_RECD"),16,                                                                                               
+                         0,64),1,240),substrb(dump(max("NM_LOGR_RECD"),16,0,64),1,240),to_char(count("NM_                                                                                               
+                         CIDA_RECD")),substrb(dump(min("NM_CIDA_RECD"),16,0,64),1,240),substrb(dump(max("                                                                                               
+                         NM_CIDA_RECD"),16,0,64),1,240),to_char(count("SG_UNID_FEDR_RECD")),substrb(dump(                                                                                               
+                         min("SG_UNID_FEDR_RECD"),16,0,64),1,240),substrb(dump(max("SG_UNID_FEDR_RECD"),1                                                                                               
+                         6,0,64),1,240),to_char(count("CD_ENDE_PSTL_RECD")),substrb(dump(min("CD_ENDE_PST                                                                                               
+                         L_RECD"),16,0,64),1,240),substrb(dump(max("CD_ENDE_PSTL_RECD"),16,0,64),1,240),t                                                                                               
+                         o_char(count("DT_PROP_PGTO")),substrb(dump(min("DT_PROP_PGTO"),16,0,64),1,240),s                                                                                               
+                         ubstrb(dump(max("DT_PROP_PGTO"),16,0,64),1,240),to_char(count("CD_IBGE_MUNI_PGTO                                                                                               
+                         ")),substrb(dump(min("CD_IBGE_MUNI_PGTO"),16,0,64),1,240),substrb(dump(max("CD_I                                                                                               
+                         BGE_MUNI_PGTO"),16,0,64),1,240),to_char(count("CD_SITU_PGTO")),substrb(dump(min(                                                                                               
+                         "CD_SITU_PGTO"),16,0,64),1,240),substrb(dump(max("CD_SITU_PGTO"),16,0,64),1,240)                                                                                               
+                         ,to_char(count("CD_USUA_ULTI_ATLZ")),substrb(dump(min("CD_USUA_ULTI_ATLZ"),16,0,                                                                                               
+                         64),1,240),substrb(dump(max("CD_USUA_ULTI_ATLZ"),16,0,64),1,240),to_char(count("                                                                                               
+                         DH_ULTI_ATLZ")),substrb(dump(min("DH_ULTI_ATLZ"),16,0,64),1,240),substrb(dump(ma                                                                                               
+                         x("DH_ULTI_ATLZ"),16,0,64),1,240),to_char(count("CD_FIND_QRCD")),substrb(dump(mi                                                                                               
+                         n("CD_FIND_QRCD"),16,0,64),1,240),substrb(dump(max("CD_FIND_QRCD"),16,0,64),1,24                                                                                               
+                         0),to_char(count("IN_ALTR_VALO_ORIG")),substrb(dump(min("IN_ALTR_VALO_ORIG"),16,                                                                                               
+                         0,64),1,240),substrb(dump(max("IN_ALTR_VALO_ORIG"),16,0,64),1,240),to_char(count                                                                                               
+                         ("VL_SAQU_QRCD")),substrb(dump(min("VL_SAQU_QRCD"),16,0,64),1,240),substrb(dump(                                                                                               
+                         max("VL_SAQU_QRCD"),16,0,64),1,240),to_char(count("IN_ALTR_VALO_SAQU")),substrb(                                                                                               
+                         dump(min("IN_ALTR_VALO_SAQU"),16,0,64),1,240),substrb(dump(max("IN_ALTR_VALO_SAQ                                                                                               
+                         U"),16,0,64),1,240),to_char(count("CD_MODA_AGET_SAQU")),substrb(dump(min("CD_MOD                                                                                               
+                         A_AGET_SAQU"),16,0,64),1,240),substrb(dump(max("CD_MODA_AGET_SAQU"),16,0,64),1,2                                                                                               
+                         40),to_char(count("CD_ISPB_SERV_SAQU")),substrb(dump(min("CD_ISPB_SERV_SAQU"),16                                                                                               
+                         ,0,64),1,240),substrb(dump(max("CD_ISPB_SERV_SAQU"),16,0,64),1,240),to_char(coun                                                                                               
+                         t("VL_TROC_QRCD")),substrb(dump(min("VL_TROC_QRCD"),16,0,64),1,240),substrb(dump                                                                                               
+                         (max("VL_TROC_QRCD"),16,0,64),1,240),to_char(count("CD_MODA_AGET_TROC")),substrb                                                                                               
+                         (dump(min("CD_MODA_AGET_TROC"),16,0,64),1,240),substrb(dump(max("CD_MODA_AGET_TR                                                                                               
+                         OC"),16,0,64),1,240),to_char(count("CD_ISPB_SERV_TROC")),substrb(dump(min("CD_IS                                                                                               
+                         PB_SERV_TROC"),16,0,64),1,240),substrb(dump(max("CD_ISPB_SERV_TROC"),16,0,64),1,                                                                                               
+                         240),to_char(count("IN_ALTR_VALO_TROC")),substrb(dump(min("IN_ALTR_VALO_TROC"),1                                                                                               
+                         6,0,64),1,240),substrb(dump(max("IN_ALTR_VALO_TROC"),16,0,64),1,240),to_char(cou                                                                                               
+                         nt("CD_QRCD_EXTE")),substrb(dump(min("CD_QRCD_EXTE"),16,0,64),1,240),substrb(dum                                                                                               
+                         p(max("CD_QRCD_EXTE"),16,0,64),1,240),to_char(count("NR_CPF_CNPJ_RECD")),substrb                                                                                               
+                         (dump(min("NR_CPF_CNPJ_RECD"),16,0,64),1,240),substrb(dump(max("NR_CPF_CNPJ_RECD                                                                                               
+                         "),16,0,64),1,240),to_char(count("CD_ISPB_ORIG_QRCD")),substrb(dump(min("CD_ISPB                                                                                               
+                         _ORIG_QRCD"),16,0,64),1,240),substrb(dump(max("CD_ISPB_ORIG_QRCD"),16,0,64),1,24                                                                                               
+                         0),to_char(count("CD_TRAN_PGTO")),substrb(dump(min("CD_TRAN_PGTO"),16,0,64),1,24                                                                                               
+                         0),substrb(dump(max("CD_TRAN_PGTO"),16,0,64),1,240),to_char(count("DH_GERA_QRCD"                                                                                               
+                         )),substrb(dump(min("DH_GERA_QRCD"),16,0,64),1,240),substrb(dump(max("DH_GERA_QR                                                                                               
+                         CD"),16,0,64),1,240),to_char(count("DH_APRE_QRCD")),substrb(dump(min("DH_APRE_QR                                                                                               
+                         CD"),16,0,64),1,240),substrb(dump(max("DH_APRE_QRCD"),16,0,64),1,240),to_char(co                                                                                               
+                         unt("QT_SEGU_EXPI_QRCD")),substrb(dump(min("QT_SEGU_EXPI_QRCD"),16,0,64),1,240),                                                                                               
+                         substrb(dump(max("QT_SEGU_EXPI_QRCD"),16,0,64),1,240),to_char(count("NR_REVI_DOC                                                                                               
+                         T")),substrb(dump(min("NR_REVI_DOCT"),16,0,64),1,240),substrb(dump(max("NR_REVI_                                                                                               
+                         DOCT"),16,0,64),1,240),to_char(count("CD_SITU_QRCD")),substrb(dump(min("CD_SITU_                                                                                               
+                         QRCD"),16,0,64),1,240),substrb(dump(max("CD_SITU_QRCD"),16,0,64),1,240),to_char(                                                                                               
+                         count("VL_ORIG_QRCD")),substrb(dump(min("VL_ORIG_QRCD"),16,0,64),1,240),substrb(                                                                                               
+                         dump(max("VL_ORIG_QRCD"),16,0,64),1,240),to_char(count("CD_ENDE_CADR_BACEN")),su                                                                                               
+                         bstrb(dump(min("CD_ENDE_CADR_BACEN"),16,0,64),1,240),substrb(dump(max("CD_ENDE_C                                                                                               
+                         ADR_BACEN"),16,0,64),1,240),to_char(count("TX_INFO_PGAD")),substrb(dump(min("TX_                                                                                               
+                         INFO_PGAD"),16,0,64),1,240),substrb(dump(max("TX_INFO_PGAD"),16,0,64),1,240),to_                                                                                               
+                         char(count("NR_CPF_CNPJ_DEVE")),substrb(dump(min("NR_CPF_CNPJ_DEVE"),16,0,64),1,                                                                                               
+                         240),substrb(dump(max("NR_CPF_CNPJ_DEVE"),16,0,64),1,240),to_char(count("NM_DEVE                                                                                               
+                         _ORIG")),substrb(dump(min("NM_DEVE_ORIG"),16,0,64),1,240),substrb(dump(max("NM_D                                                                                               
+                         EVE_ORIG"),16,0,64),1,240),to_char(count("DT_VENC_PGTO_QRCD")),substrb(dump(min(                                                                                               
+                         "DT_VENC_PGTO_QRCD"),16,0,64),1,240),substrb(dump(max("DT_VENC_PGTO_QRCD"),16,0,                                                                                               
+                         64),1,240),to_char(count("QT_DIA_APOS_VENC")),substrb(dump(min("QT_DIA_APOS_VENC                                                                                               
+                         "),16,0,64),1,240),substrb(dump(max("QT_DIA_APOS_VENC"),16,0,64),1,240),to_char(                                                                                               
+                         count("VL_ABAT_QRCD")),substrb(dump(min("VL_ABAT_QRCD"),16,0,64),1,240),substrb(                                                                                               
+                         dump(max("VL_ABAT_QRCD"),16,0,64),1,240),to_char(count("VL_DESC_QRCD")),substrb(                                                                                               
+                         dump(min("VL_DESC_QRCD"),16,0,64),1,240),substrb(dump(max("VL_DESC_QRCD"),16,0,6                                                                                               
+                         4),1,240),to_char(count("VL_JURO_QRCD")),substrb(dump(min("VL_JURO_QRCD"),16,0,6                                                                                               
+                         4),1,240),substrb(dump(max("VL_JURO_QRCD"),16,0,64),1,240),to_char(count("VL_MUL                                                                                               
+                         T_QRCD")),substrb(dump(min("VL_MULT_QRCD"),16,0,64),1,240),substrb(dump(max("VL_                                                                                               
+                         MULT_QRCD"),16,0,64),1,240),count(rowidtochar(rowid)) from "BALP"."PZDT013" t  /                                                                                               
+                         * TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,                                                                                               
+                         TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TO                                                                                               
+                         PN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN                                                                                               
+                         ,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,N                                                                                               
+                         IL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL                                                                                               
+                         ,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,N                                                                                               
+                         IL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL,TOPN,NIL,NIL                                                                                               
+                         ,TOPN,NIL,NIL,RWID,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U                                                                                               
+                         254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U                                                                                               
+                         254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254,U254U*                                                                                               
+                         /                                                                                                                                                                              
+                                                                                                                                                                                                        
+1276751934 09dg8x6g2r1zc ALTER DATABASE ADD SUPPLEMENTAL LOG DATA                                                                                                                                       
+
+10 rows selected.
+
+SQL> spool off

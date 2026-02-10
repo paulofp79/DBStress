@@ -14,6 +14,7 @@ import LibraryCacheLockPanel from './components/LibraryCacheLockPanel';
 import StatsComparisonPanel from './components/StatsComparisonPanel';
 import HWContentionPanel from './components/HWContentionPanel';
 import SkewDetectionPanel from './components/SkewDetectionPanel';
+import TDEComparisonPanel from './components/TDEComparisonPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -444,6 +445,23 @@ function App() {
           >
             Skew Detection
           </button>
+
+          <button
+            onClick={() => setActiveTab('tde-comparison')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'tde-comparison' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'tde-comparison' ? '2px solid #ef4444' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'tde-comparison' ? '#ef4444' : 'var(--text-muted)',
+              fontWeight: activeTab === 'tde-comparison' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            TDE Comparison
+          </button>
         </div>
 
         {/* Stress Test Tab */}
@@ -537,6 +555,14 @@ function App() {
         {/* Skew Detection Tab */}
         {activeTab === 'skew-detection' && (
           <SkewDetectionPanel
+            dbStatus={dbStatus}
+            socket={socket}
+          />
+        )}
+
+        {/* TDE Comparison Tab */}
+        {activeTab === 'tde-comparison' && (
+          <TDEComparisonPanel
             dbStatus={dbStatus}
             socket={socket}
           />

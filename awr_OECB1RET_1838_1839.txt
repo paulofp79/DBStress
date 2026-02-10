@@ -1,0 +1,9 @@
+SQL> select output from table(dbms_workload_repository.awr_global_report_text(1276751934, 1838, 1839));
+select output from table(dbms_workload_repository.awr_global_report_text(1276751934, 1838, 1839))
+                         *
+ERROR at line 1:
+ORA-06553: PLS-306: wrong number or types of arguments in call to 'AWR_GLOBAL_REPORT_TEXT'
+Help: https://docs.oracle.com/error-help/db/ora-06553/
+
+
+SQL> spool off

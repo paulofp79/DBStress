@@ -12,6 +12,7 @@ Oracle Database Stress Testing Tool with Real-time Monitoring
   - DML Operations per Second (INSERT, UPDATE, DELETE)
   - Top 10 Wait Events from Oracle V$SYSTEM_EVENT
 - **Live Configuration**: Modify workload parameters while the stress test is running
+- **Demo Modules**: Specialized engines for contention, statistics, skew analysis, and Transparent Data Encryption (TDE) comparisons
 
 ## Architecture
 
@@ -155,6 +156,19 @@ While the stress test is running, monitor:
 - **Operations chart**: Shows INSERT, UPDATE, DELETE rates
 - **Wait Events table**: Top 10 non-idle wait events from the database
 - **Session statistics**: Active/inactive/blocked sessions
+
+### Transparent Data Encryption (TDE) Comparison Demo
+
+The TDE demo compares encrypted versus non-encrypted tables using identical workloads:
+
+1. Connect and open the **TDE Comparison** tab.
+2. Configure row count, batch size, and workload phases.
+3. Start the comparison to:
+   - Create plain and AES-256 encrypted tables using the schema prefix.
+   - Populate both tables and optionally gather optimizer statistics.
+   - Run SELECT, INSERT, and UPDATE workloads (toggle each phase as needed).
+4. Review operation timings and SQL Monitor metrics (buffer gets, CPU, elapsed, disk reads).
+5. Use **Stop** to cancel a running comparison gracefully.
 
 ## Schema Details
 

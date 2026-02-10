@@ -13,6 +13,7 @@ const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const statsComparisonEngine = require('./stress/statsComparisonEngine');
 const hwContentionEngine = require('./stress/hwContentionEngine');
 const skewDetectionEngine = require('./stress/skewDetectionEngine');
+const tdeComparisonEngine = require('./stress/tdeComparisonEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -516,7 +517,8 @@ app.get('/api/hw-contention/histogram-info', async (req, res) => {
 // Create test tables for skew detection
 app.post('/api/skew-detection/create-tables', async (req, res) => {
   try {
-    await skewDetectionEngine.start(oracleDb, {}, io);
+    const config = req.body || {};
+    await skewDetectionEngine.start(oracleDb, config, io);
     res.json({ success: true, message: 'Skew detection test tables created' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -576,6 +578,33 @@ app.get('/api/skew-detection/status', async (req, res) => {
     // Check if tables exist
     await skewDetectionEngine.checkTablesExist();
     res.json(skewDetectionEngine.getStatus());
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
+// TDE Comparison Demo API Routes
+// ============================================
+
+app.post('/api/tde-comparison/start', async (req, res) => {
+  const config = req.body || {};
+  try {
+    const results = await tdeComparisonEngine.start(oracleDb, config, io);
+    res.json({ success: true, results });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/tde-comparison/status', (req, res) => {
+  res.json(tdeComparisonEngine.getStatus());
+});
+
+app.post('/api/tde-comparison/stop', (req, res) => {
+  try {
+    const result = tdeComparisonEngine.stop();
+    res.json({ success: true, result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

@@ -26,6 +26,8 @@ function SkewDetectionPanel({ dbStatus, socket }) {
 
   // Test tables info from backend
   const [testTables, setTestTables] = useState([]);
+  const [rowsPerTable, setRowsPerTable] = useState('');
+  const [tableRowCounts, setTableRowCounts] = useState({});
 
   // Fetch status on mount
   useEffect(() => {
@@ -73,10 +75,21 @@ function SkewDetectionPanel({ dbStatus, socket }) {
       const response = await fetch(`${API_BASE}/skew-detection/status`);
       const data = await response.json();
       setTablesCreated(data.tablesCreated || false);
-      setTestTables(data.testTables || []);
-      if (data.testTables && data.testTables.length > 0) {
-        setSelectedTable(data.testTables[0].name);
-      }
+      const tables = data.testTables || [];
+      setTestTables(tables);
+
+      const initialSelected = tables.length > 0 ? tables[0].name : '';
+      setSelectedTable(initialSelected);
+
+      const config = data.config || {};
+      setRowsPerTable(config.rowsPerTable ? String(config.rowsPerTable) : '');
+
+      const initialOverrides = tables.reduce((acc, table) => {
+        const overrideValue = config.tableRowCounts?.[table.name];
+        acc[table.name] = overrideValue ? String(overrideValue) : '';
+        return acc;
+      }, {});
+      setTableRowCounts(initialOverrides);
     } catch (err) {
       console.error('Error fetching skew detection status:', err);
     }
@@ -90,9 +103,12 @@ function SkewDetectionPanel({ dbStatus, socket }) {
       setAnalysisResults([]);
       setHistogramInfo({});
 
+      const config = buildConfigPayload();
+
       const response = await fetch(`${API_BASE}/skew-detection/create-tables`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
       });
 
       const data = await response.json();
@@ -109,6 +125,39 @@ function SkewDetectionPanel({ dbStatus, socket }) {
     } finally {
       setIsCreating(false);
     }
+  };
+
+  const buildConfigPayload = () => {
+    const payload = {};
+
+    const parsedDefault = parseInt(rowsPerTable, 10);
+    if (!Number.isNaN(parsedDefault) && parsedDefault > 0) {
+      payload.rowsPerTable = parsedDefault;
+    }
+
+    const overrides = {};
+    testTables.forEach(table => {
+      const value = tableRowCounts[table.name];
+      if (!value) return;
+
+      const parsed = parseInt(value, 10);
+      if (!Number.isNaN(parsed) && parsed > 0) {
+        overrides[table.name] = parsed;
+      }
+    });
+
+    if (Object.keys(overrides).length > 0) {
+      payload.tableRowCounts = overrides;
+    }
+
+    return payload;
+  };
+
+  const handleOverrideChange = (tableName, value) => {
+    setTableRowCounts(prev => ({
+      ...prev,
+      [tableName]: value
+    }));
   };
 
   const handleDropTables = async () => {
@@ -459,16 +508,58 @@ function SkewDetectionPanel({ dbStatus, socket }) {
             borderRadius: '4px'
           }}>
             <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Test Tables</h4>
+            <div style={{ marginBottom: '0.5rem', fontSize: '0.75rem' }}>
+              <label style={{ color: 'var(--text-muted)' }}>Default rows per table</label>
+              <input
+                type="number"
+                min="1"
+                placeholder="Leave blank to use defaults"
+                value={rowsPerTable}
+                onChange={(e) => setRowsPerTable(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '0.4rem',
+                  background: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '4px',
+                  color: 'var(--text-primary)',
+                  fontSize: '0.8rem',
+                  marginTop: '0.25rem'
+                }}
+              />
+            </div>
             {testTables.map(t => (
               <div key={t.name} style={{
                 display: 'flex',
-                justifyContent: 'space-between',
+                flexDirection: 'column',
+                gap: '0.25rem',
                 fontSize: '0.75rem',
                 padding: '0.25rem 0',
                 borderBottom: '1px solid var(--border)'
               }}>
-                <span>{t.name.replace('SKEW_TEST_', '')}</span>
-                <span style={{ color: 'var(--text-muted)' }}>{t.rows.toLocaleString()} rows</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>{t.name.replace('SKEW_TEST_', '')}</span>
+                  <span style={{ color: 'var(--text-muted)' }}>{t.rows.toLocaleString()} rows</span>
+                </div>
+                <div>
+                  <label style={{ color: 'var(--text-muted)' }}>Override rows</label>
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder={`Default ${t.defaultRows.toLocaleString()}`}
+                    value={tableRowCounts[t.name] || ''}
+                    onChange={(e) => handleOverrideChange(t.name, e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '0.35rem',
+                      background: 'var(--bg-primary)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '4px',
+                      color: 'var(--text-primary)',
+                      fontSize: '0.75rem'
+                    }}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -696,12 +787,12 @@ function SkewDetectionPanel({ dbStatus, socket }) {
             <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.1rem', color: '#8b5cf6' }}>
               Skew Detection Demo
             </h3>
-            <p>Click "Create Test Tables" to generate 4 test tables with various skew patterns:</p>
+            <p>Click "Create Test Tables" to generate skewed datasets. Customize the row counts above or use the defaults:</p>
             <ul style={{ textAlign: 'left', maxWidth: '500px', margin: '1rem auto', paddingLeft: '2rem' }}>
-              <li><strong>ORDERS</strong>: 100K rows with EXTREME (STATUS), NONE (ORDER_TYPE), MODERATE (REGION) skew</li>
-              <li><strong>AUDIT_LOGS</strong>: 50K rows with EXTREME skew (99% INFO, 99% LOW)</li>
-              <li><strong>PRODUCTS</strong>: 20K rows with evenly distributed data (NO skew)</li>
-              <li><strong>TRANSACTIONS</strong>: 80K rows with HIGH skew (90% USD, 85% USA)</li>
+              <li><strong>ORDERS</strong>: {(testTables.find(t => t.name === 'SKEW_TEST_ORDERS')?.defaultRows || 100000).toLocaleString()} default rows with EXTREME (STATUS), NONE (ORDER_TYPE), MODERATE (REGION) skew</li>
+              <li><strong>AUDIT_LOGS</strong>: {(testTables.find(t => t.name === 'SKEW_TEST_AUDIT_LOGS')?.defaultRows || 50000).toLocaleString()} default rows with EXTREME skew (99% INFO, 99% LOW)</li>
+              <li><strong>PRODUCTS</strong>: {(testTables.find(t => t.name === 'SKEW_TEST_PRODUCTS')?.defaultRows || 20000).toLocaleString()} default rows with evenly distributed data (NO skew)</li>
+              <li><strong>TRANSACTIONS</strong>: {(testTables.find(t => t.name === 'SKEW_TEST_TRANSACTIONS')?.defaultRows || 80000).toLocaleString()} default rows with HIGH skew (90% USD, 85% USA)</li>
             </ul>
           </div>
         )}
