@@ -14,7 +14,6 @@ const statsComparisonEngine = require('./stress/statsComparisonEngine');
 const hwContentionEngine = require('./stress/hwContentionEngine');
 const skewDetectionEngine = require('./stress/skewDetectionEngine');
 const tdeComparisonEngine = require('./stress/tdeComparisonEngine');
-const gcCongestionEngine = require('./stress/gcCongestionEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -611,67 +610,6 @@ app.post('/api/tde-comparison/stop', (req, res) => {
   }
 });
 
-// ============================================
-// GC Congestion Demo API Routes
-// ============================================
-
-// Prepare demo tables and load scaled data
-app.post('/api/gc-congestion/prepare', async (req, res) => {
-  const config = req.body || {};
-  try {
-    const result = await gcCongestionEngine.prepare(oracleDb, config, io);
-    res.json({ success: true, result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Start GC congestion workload
-app.post('/api/gc-congestion/start', async (req, res) => {
-  const config = req.body || {};
-  try {
-    await gcCongestionEngine.start(oracleDb, config, io);
-    res.json({ success: true, message: 'GC congestion workload started' });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Stop GC congestion workload
-app.post('/api/gc-congestion/stop', async (req, res) => {
-  try {
-    const stats = await gcCongestionEngine.stop();
-    res.json({ success: true, message: 'GC congestion workload stopped', stats });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Drop generated demo tables
-app.post('/api/gc-congestion/drop', async (req, res) => {
-  try {
-    const result = await gcCongestionEngine.dropTables(req.body || {}, oracleDb);
-    res.json({ success: true, ...result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get current demo status
-app.get('/api/gc-congestion/status', (req, res) => {
-  res.json(gcCongestionEngine.getStatus());
-});
-
-// List available GC wait events for filtering
-app.get('/api/gc-congestion/wait-events', async (req, res) => {
-  try {
-    const events = await gcCongestionEngine.listAvailableWaitEvents(oracleDb);
-    res.json({ success: true, events });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -697,24 +635,28 @@ server.listen(PORT, () => {
 });
 
 // Graceful shutdown
-const shutdown = async (signal) => {
-  console.log(`Received ${signal}. Running shutdown sequence...`);
+process.on('SIGTERM', async () => {
+  console.log('Shutting down...');
   stressEngine.stop();
   indexContentionEngine.stop();
   libraryCacheLockEngine.stop();
   statsComparisonEngine.stop();
   hwContentionEngine.stop();
   skewDetectionEngine.stop();
-  gcCongestionEngine.stop();
   metricsCollector.stop();
   await oracleDb.close();
+  process.exit(0);
+});
 
-  // Only exit when running interactively (e.g., foreground dev server)
-  if (!process.env.KEEP_ALIVE || process.env.KEEP_ALIVE !== 'true') {
-    process.exit(0);
-  }
-};
-
-['SIGTERM', 'SIGINT'].forEach(signal => {
-  process.on(signal, () => shutdown(signal));
+process.on('SIGINT', async () => {
+  console.log('Shutting down...');
+  stressEngine.stop();
+  indexContentionEngine.stop();
+  libraryCacheLockEngine.stop();
+  statsComparisonEngine.stop();
+  hwContentionEngine.stop();
+  skewDetectionEngine.stop();
+  metricsCollector.stop();
+  await oracleDb.close();
+  process.exit(0);
 });

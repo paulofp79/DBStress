@@ -16,6 +16,7 @@ import MetricExplorerPanel from './components/MetricExplorerPanel';
 import HWContentionPanel from './components/HWContentionPanel';
 import SkewDetectionPanel from './components/SkewDetectionPanel';
 import TDEComparisonPanel from './components/TDEComparisonPanel';
+import GCCongestionPanel from './components/GCCongestionPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -479,6 +480,23 @@ function App() {
           >
             TDE Comparison
           </button>
+
+          <button
+            onClick={() => setActiveTab('gc-congestion')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'gc-congestion' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'gc-congestion' ? '2px solid #ef4444' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'gc-congestion' ? '#ef4444' : 'var(--text-muted)',
+              fontWeight: activeTab === 'gc-congestion' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem'
+            }}
+          >
+            GC Congestion Demo
+          </button>
         </div>
 
         {/* Stress Test Tab */}
@@ -585,6 +603,13 @@ function App() {
         {/* TDE Comparison Tab */}
         {activeTab === 'tde-comparison' && (
           <TDEComparisonPanel
+            dbStatus={dbStatus}
+            socket={socket}
+          />
+        )}
+
+        {activeTab === 'gc-congestion' && (
+          <GCCongestionPanel
             dbStatus={dbStatus}
             socket={socket}
           />
