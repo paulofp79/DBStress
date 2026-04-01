@@ -17,6 +17,9 @@ import HWContentionPanel from './components/HWContentionPanel';
 import SkewDetectionPanel from './components/SkewDetectionPanel';
 import TDEComparisonPanel from './components/TDEComparisonPanel';
 import GCCongestionPanel from './components/GCCongestionPanel';
+import GCBenchmarkPanel from './components/GCBenchmarkPanel';
+import HomePanel from './components/HomePanel';
+import MonitorPanel from './components/MonitorPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -40,7 +43,7 @@ function App() {
   const [dbStatus, setDbStatus] = useState({ connected: false });
   const [stressStatus, setStressStatus] = useState({ isRunning: false });
   const [schemas, setSchemas] = useState([]);
-  const [activeTab, setActiveTab] = useState('stress'); // 'stress' or 'index-contention'
+  const [activeTab, setActiveTab] = useState('home');
   const [metrics, setMetrics] = useState({
     tps: [],
     operations: [],
@@ -349,8 +352,43 @@ function App() {
           display: 'flex',
           gap: '0',
           marginBottom: '1rem',
-          borderBottom: '2px solid var(--border)'
+          borderBottom: '2px solid var(--border)',
+          overflowX: 'auto'
         }}>
+          <button
+            onClick={() => setActiveTab('home')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'home' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'home' ? '2px solid #22c55e' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'home' ? '#22c55e' : 'var(--text-muted)',
+              fontWeight: activeTab === 'home' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            Home
+          </button>
+          <button
+            onClick={() => setActiveTab('monitor')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'monitor' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'monitor' ? '2px solid #38bdf8' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'monitor' ? '#38bdf8' : 'var(--text-muted)',
+              fontWeight: activeTab === 'monitor' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            Monitor
+          </button>
           <button
             onClick={() => setActiveTab('stress')}
             style={{
@@ -497,6 +535,31 @@ function App() {
           >
             GC Congestion Demo
           </button>
+          <button
+            onClick={() => setActiveTab('gc-benchmark')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'gc-benchmark' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'gc-benchmark' ? '2px solid #22c55e' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'gc-benchmark' ? '#22c55e' : 'var(--text-muted)',
+              fontWeight: activeTab === 'gc-benchmark' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            GC Benchmark
+          </button>
+        </div>
+
+        {activeTab === 'home' && (
+          <HomePanel onOpenTab={setActiveTab} />
+        )}
+
+        <div style={{ display: activeTab === 'monitor' ? 'block' : 'none' }}>
+          <MonitorPanel dbStatus={dbStatus} />
         </div>
 
         {/* Stress Test Tab */}
@@ -614,6 +677,10 @@ function App() {
             socket={socket}
           />
         )}
+
+        <div style={{ display: activeTab === 'gc-benchmark' ? 'block' : 'none' }}>
+          <GCBenchmarkPanel />
+        </div>
       </main>
     </div>
   );

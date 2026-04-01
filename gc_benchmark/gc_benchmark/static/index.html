@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GC Benchmark</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+
+<div class="app-layout">
+
+    <!-- ============================================================ -->
+    <!-- Sidebar                                                      -->
+    <!-- ============================================================ -->
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <div class="brand-icon">&#9881;</div>
+            <h1>GC Benchmark</h1>
+            <div class="brand-sub">Oracle RAC Wait Event Tool</div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <div class="nav-section-label">Setup</div>
+            <button class="nav-item active" data-tab="connection">
+                <div class="nav-icon">&#9889;</div>
+                <span class="nav-label">Connection</span>
+            </button>
+            <button class="nav-item" data-tab="schema">
+                <div class="nav-icon">&#9638;</div>
+                <span class="nav-label">Schema Setup</span>
+            </button>
+
+            <div class="nav-section-label">Benchmark</div>
+            <button class="nav-item" data-tab="workload">
+                <div class="nav-icon">&#9654;</div>
+                <span class="nav-label">Run Workload</span>
+            </button>
+            <button class="nav-item" data-tab="results">
+                <div class="nav-icon">&#9776;</div>
+                <span class="nav-label">Results</span>
+                <span class="nav-badge" id="run-count" style="display:none">0</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="ws-indicator">
+                <span class="ws-dot" id="ws-dot"></span>
+                <span id="ws-label">Disconnected</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ============================================================ -->
+    <!-- Main Content                                                 -->
+    <!-- ============================================================ -->
+    <div class="main-content">
+
+        <div class="content-header">
+            <h2 id="page-title">Connection</h2>
+            <div class="header-actions" id="header-actions"></div>
+        </div>
+
+        <div class="content-body">
+
+            <!-- ====================================================== -->
+            <!-- TAB 1: Connection                                      -->
+            <!-- ====================================================== -->
+            <section id="tab-connection" class="tab-panel active">
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-blue">&#9889;</span>
+                            Oracle Database Connection
+                        </div>
+                    </div>
+
+                    <!-- Recent Connections -->
+                    <div id="recent-conns-section" style="display:none">
+                        <div class="recent-conns-header">
+                            <span class="recent-conns-title">&#128337; Recent Connections</span>
+                            <span class="recent-conns-hint">Click a row to fill the form — password always stays empty</span>
+                        </div>
+                        <ul id="recent-conns-list" class="recent-conns-list"></ul>
+                        <div class="recent-conns-divider"></div>
+                    </div>
+
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label class="form-label">Host</label>
+                            <input type="text" id="conn-host" placeholder="rac-node1.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Port</label>
+                            <input type="number" id="conn-port" value="1521">
+                        </div>
+                    </div>
+
+                    <div class="form-grid mt-16">
+                        <div class="form-group">
+                            <label class="form-label">Service Name</label>
+                            <input type="text" id="conn-service" placeholder="orclpdb1">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Driver Mode</label>
+                            <select id="conn-mode">
+                                <option value="thin">Thin (no Instant Client)</option>
+                                <option value="thick">Thick (Instant Client)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-grid mt-16">
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" id="conn-user" placeholder="benchmark_user">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" id="conn-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
+                        </div>
+                    </div>
+
+                    <div class="btn-group mt-16">
+                        <button class="btn btn-primary" id="btn-test-conn">Test Connection</button>
+                        <button class="btn btn-secondary" id="btn-check-privs">Check Privileges</button>
+                        <button class="btn btn-secondary" id="btn-save-conn">Save Settings</button>
+                    </div>
+
+                    <div id="conn-status"></div>
+                    <div id="priv-status"></div>
+                </div>
+
+            </section>
+
+            <!-- ====================================================== -->
+            <!-- TAB 2: Schema Setup                                    -->
+            <!-- ====================================================== -->
+            <section id="tab-schema" class="tab-panel">
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-purple">&#9638;</span>
+                            Schema Configuration
+                        </div>
+                    </div>
+
+                    <!-- Table Count -->
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Number of Tables</span>
+                            <span class="field-desc">ORDER-like tables with indexes. Enter the exact count you want to create.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="schema-table-count" min="1" step="1" value="10" style="width:160px;text-align:right">
+                        </div>
+                    </div>
+
+                    <!-- Table Prefix -->
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Table Prefix</span>
+                            <span class="field-desc">Tables named {PREFIX}_ORDER_01 .. _NN</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="text" id="schema-prefix" value="GCB" style="width:120px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Rows per Table</span>
+                            <span class="field-desc">Bulk-load target for each table during schema creation. Use large values for multi-TB tests.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="schema-seed-rows" value="500" min="0" step="1000" style="width:220px;text-align:right">
+                        </div>
+                    </div>
+
+                    <!-- Partition Type -->
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Partition Type</span>
+                            <span class="field-desc">Partitioning strategy for each table</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="segment-control">
+                                <label><input type="radio" name="partition" value="NONE" checked><span class="seg-label">None</span></label>
+                                <label><input type="radio" name="partition" value="HASH"><span class="seg-label">Hash</span></label>
+                                <label><input type="radio" name="partition" value="RANGE"><span class="seg-label">Range</span></label>
+                                <label><input type="radio" name="partition" value="LIST"><span class="seg-label">List</span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Hash count (conditional) -->
+                    <div class="field-inline conditional" id="hash-options">
+                        <div class="field-left">
+                            <span class="field-name">Hash Partitions</span>
+                            <span class="field-desc">Number of hash partitions per table</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="segment-control">
+                                <label><input type="radio" name="hashcount" value="4"><span class="seg-label">4</span></label>
+                                <label><input type="radio" name="hashcount" value="8" checked><span class="seg-label">8</span></label>
+                                <label><input type="radio" name="hashcount" value="16"><span class="seg-label">16</span></label>
+                                <label><input type="radio" name="hashcount" value="32"><span class="seg-label">32</span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Range interval (conditional) -->
+                    <div class="field-inline conditional" id="range-options">
+                        <div class="field-left">
+                            <span class="field-name">Range Interval</span>
+                            <span class="field-desc">Interval partitioning period on order_date</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="segment-control">
+                                <label><input type="radio" name="rangeinterval" value="MONTHLY" checked><span class="seg-label">Monthly</span></label>
+                                <label><input type="radio" name="rangeinterval" value="QUARTERLY"><span class="seg-label">Quarterly</span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Compression -->
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Compression</span>
+                            <span class="field-desc">Table compression method</span>
+                        </div>
+                        <div class="field-right">
+                            <select id="schema-compression" style="width:220px">
+                                <option value="NONE">None</option>
+                                <option value="BASIC">Basic</option>
+                                <option value="ADVANCED">Advanced (OLTP)</option>
+                                <option value="HCC_QUERY_LOW">HCC Query Low</option>
+                                <option value="HCC_QUERY_HIGH">HCC Query High</option>
+                                <option value="HCC_ARCHIVE_LOW">HCC Archive Low</option>
+                                <option value="HCC_ARCHIVE_HIGH">HCC Archive High</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="hcc-warning" class="status-box status-warning" style="display:none">
+                        <span class="badge badge-warning">HCC</span>
+                        Requires Exadata or compatible storage. DDL will be generated but may fail on standard systems.
+                    </div>
+
+                    <div class="btn-group mt-16">
+                        <button class="btn btn-secondary" id="btn-preview-ddl">Preview DDL</button>
+                        <button class="btn btn-primary" id="btn-create-schema">Create Schema</button>
+                        <button class="btn btn-danger" id="btn-drop-schema">Drop Schema</button>
+                    </div>
+
+                    <div class="field-inline mt-16">
+                        <div class="field-left">
+                            <span class="field-name">Drop Existing by Prefix</span>
+                            <span class="field-desc">Enter a prefix like GCN1 to drop all tables named GCN1_ORDER_% in the current schema.</span>
+                        </div>
+                        <div class="field-right" style="display:flex;gap:10px;align-items:center">
+                            <input type="text" id="schema-drop-prefix" placeholder="GCN1" style="width:140px;text-align:center">
+                            <button class="btn btn-danger" id="btn-drop-prefix">Drop Matching Tables</button>
+                        </div>
+                    </div>
+
+                    <div class="field-inline mt-16">
+                        <div class="field-left">
+                            <span class="field-name">Kill Sessions by User</span>
+                            <span class="field-desc">Kill all active non-background sessions for a table owner like PP before starting a new workload.</span>
+                        </div>
+                        <div class="field-right" style="display:flex;gap:10px;align-items:center">
+                            <input type="text" id="schema-kill-user" value="PP" placeholder="PP" style="width:140px;text-align:center">
+                            <button class="btn btn-danger" id="btn-kill-user-sessions">Kill User Sessions</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="log-panel" id="schema-log" style="display:none"></div>
+
+            </section>
+
+            <!-- ====================================================== -->
+            <!-- TAB 3: Run Workload                                    -->
+            <!-- ====================================================== -->
+            <section id="tab-workload" class="tab-panel">
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-green">&#9654;</span>
+                            Workload Configuration
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" id="btn-start-workload">Start Run</button>
+                            <button class="btn btn-danger" id="btn-stop-workload" disabled>Stop</button>
+                        </div>
+                    </div>
+
+                    <!-- Active schema info — auto-populated from last "Create Schema" run -->
+                    <div class="active-schema-bar">
+                        <span class="active-schema-label">Active Schema:</span>
+                        <span id="active-schema-info">
+                            <span class="schema-badge schema-badge-none">No schema created yet — go to Schema Setup first</span>
+                        </span>
+                    </div>
+
+                    <div id="running-workload-banner" class="status-box status-warning" style="display:none; margin-top:12px"></div>
+
+                    <!-- Contention Mode -->
+                    <div class="field-inline field-inline-top">
+                        <div class="field-left">
+                            <span class="field-name">Contention Mode</span>
+                            <span class="field-desc">Controls how threads generate GC pressure</span>
+                        </div>
+                        <div class="field-right contention-mode-group">
+                            <label class="radio-card" id="cm-normal-card">
+                                <input type="radio" name="contention_mode" value="NORMAL" checked>
+                                <div class="radio-card-body">
+                                    <span class="radio-card-title">Normal</span>
+                                    <span class="radio-card-desc">Mixed INSERT / UPDATE / DELETE spread across all tables</span>
+                                </div>
+                            </label>
+                            <label class="radio-card" id="cm-hammer-card">
+                                <input type="radio" name="contention_mode" value="HAMMER">
+                                <div class="radio-card-body">
+                                    <span class="radio-card-title">⚡ Hammer</span>
+                                    <span class="radio-card-desc">SELECT FOR UPDATE + UPDATE on same 10 rows — overloads LMS</span>
+                                </div>
+                            </label>
+                            <label class="radio-card" id="cm-lms-card">
+                                <input type="radio" name="contention_mode" value="LMS_STRESS">
+                                <div class="radio-card-body">
+                                    <span class="radio-card-title">🔥 LMS Stress</span>
+                                    <span class="radio-card-desc">Rapid-fire UPDATEs on 5 rows, commit every op — floods LMS queue</span>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field-inline" id="normal-mix-row">
+                        <div class="field-left">
+                            <span class="field-name">Normal Mode Mix</span>
+                            <span class="field-desc">Relative weights for INSERT, UPDATE, DELETE and SELECT in Normal mode.</span>
+                        </div>
+                        <div class="field-right" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                            <label>INS <input type="number" id="wl-insert-pct" value="40" min="0" max="1000" style="width:68px;text-align:center"></label>
+                            <label>UPD <input type="number" id="wl-update-pct" value="40" min="0" max="1000" style="width:68px;text-align:center"></label>
+                            <label>DEL <input type="number" id="wl-delete-pct" value="20" min="0" max="1000" style="width:68px;text-align:center"></label>
+                            <label>SEL <input type="number" id="wl-select-pct" value="0" min="0" max="1000" style="width:68px;text-align:center"></label>
+                        </div>
+                    </div>
+
+                    <!-- Lock Hold Duration (Hammer only) -->
+                    <div class="field-inline" id="lock-hold-row" style="display:none">
+                        <div class="field-left">
+                            <span class="field-name">Lock Hold Duration</span>
+                            <span class="field-desc">ms to hold FOR UPDATE lock before UPDATE (longer = more queueing behind LMS)</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="slider-group">
+                                <input type="range" id="wl-lock-hold" min="0" max="500" step="10" value="0" style="width:160px">
+                                <span class="range-value" id="lock-hold-val">0 ms</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Oracle tuning tips (shown in Hammer / LMS Stress) -->
+                    <div class="tuning-tips-card" id="tuning-tips" style="display:none">
+                        <div class="tuning-tips-header">
+                            💡 Boost congestion further — Oracle &amp; OS parameters
+                            <span class="tuning-tips-warn">⚠ TEST environments only · Requires ALTER SYSTEM privilege</span>
+                        </div>
+                        <div class="tuning-tips-body">
+                            <div class="tuning-tip-row">
+                                <code>ALTER SYSTEM SET "_lm_lms" = 1 SCOPE=MEMORY;</code>
+                                <span>Reduce LMS processes to 1 — smallest drain capacity, queue fills fastest</span>
+                            </div>
+                            <div class="tuning-tip-row">
+                                <code>ALTER SYSTEM SET "_gc_defer_time" = 0 SCOPE=MEMORY;</code>
+                                <span>Disable GC deferral — every block request hits LMS immediately</span>
+                            </div>
+                            <div class="tuning-tip-row">
+                                <code>ALTER SYSTEM SET "_db_block_max_cr_dba" = 0 SCOPE=MEMORY;</code>
+                                <span>Force current-block mode — stops CR optimisation, maximises gc current block requests</span>
+                            </div>
+                            <div class="tuning-tip-row os-tip">
+                                <code>tc qdisc add dev &lt;interconnect-nic&gt; root netem delay 5ms</code>
+                                <span>Linux: add 5 ms latency to the private interconnect — simulates slower LMS response time</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Concurrent Threads</span>
+                            <span class="field-desc">Number of parallel DB sessions (2 - 10000)</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="slider-group">
+                                <input type="range" id="wl-threads" min="2" max="10000" value="8" style="width:160px">
+                                <span class="range-value" id="thread-count-val">8</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Duration</span>
+                            <span class="field-desc">Run time in seconds</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="wl-duration" value="60" min="10" max="600" style="width:100px;text-align:center">
+                            <span class="text-muted text-sm">sec</span>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Hot Row Percentage</span>
+                            <span class="field-desc">% of rows targeted for contention (1 - 10)</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="slider-group">
+                                <input type="range" id="wl-hotrow" min="1" max="10" value="5" style="width:160px">
+                                <span class="range-value" id="hot-row-val">5</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Schema</span>
+                            <span class="field-desc">Select an existing benchmark schema to run against</span>
+                        </div>
+                        <div class="field-right schema-select-group">
+                            <select id="wl-schema-select">
+                                <option value="">— click ↻ to load schemas —</option>
+                            </select>
+                            <button class="btn btn-ghost btn-sm" id="btn-refresh-schemas" title="Refresh schema list from Oracle">&#8635;</button>
+                        </div>
+                    </div>
+
+                    <!-- Hidden fields populated by schema select — still sent to the backend -->
+                    <input type="hidden" id="wl-prefix"         value="GCB">
+                    <input type="hidden" id="wl-table-count"    value="10">
+                    <input type="hidden" id="wl-partition-type" value="NONE">
+                    <input type="hidden" id="wl-partition-detail" value="">
+                    <input type="hidden" id="wl-compression"    value="NONE">
+                </div>
+
+                <!-- Oracle GC Stress Parameters panel -->
+                <div class="gc-params-panel">
+                    <div class="gc-params-header">
+                        <span class="gc-params-title">🔬 Oracle GC Stress Parameters</span>
+                        <span class="gc-params-sub">Applied with SCOPE=MEMORY — auto-revert on DB restart · Requires ALTER SYSTEM privilege</span>
+                        <div class="gc-params-actions">
+                            <button class="btn btn-sm btn-ghost" id="btn-refresh-gc-params">↻ Refresh</button>
+                            <button class="btn btn-sm btn-warning" id="btn-apply-gc-stress">⚡ Apply Stress Settings</button>
+                            <button class="btn btn-sm btn-danger-outline" id="btn-reset-gc-params">↩ Reset Defaults</button>
+                        </div>
+                    </div>
+                    <div id="gc-params-body">
+                        <div class="gc-params-loading">Click ↻ Refresh to load current Oracle parameter values</div>
+                    </div>
+                    <div id="gc-params-msg" class="gc-params-msg" style="display:none"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-blue">&#9635;</span>
+                            Database Activity
+                        </div>
+                        <span class="badge badge-info" id="db-activity-sampled-at">Waiting...</span>
+                    </div>
+
+                    <div class="field-inline" style="margin-bottom:16px">
+                        <div class="field-left">
+                            <span class="field-name">Session Username Filter</span>
+                            <span class="field-desc">Show only sessions for one database user. Leave empty to show all sessions.</span>
+                        </div>
+                        <div class="field-right" style="display:flex;gap:10px;align-items:center">
+                            <input type="text" id="db-session-username" placeholder="PP" style="width:140px;text-align:center">
+                            <button class="btn btn-secondary btn-sm" id="btn-apply-db-session-filter">Apply</button>
+                        </div>
+                    </div>
+
+                    <div class="metric-grid">
+                        <div class="metric-card">
+                            <div class="metric-label">Processes</div>
+                            <div class="metric-value" id="db-process-total">-</div>
+                            <div class="metric-label" id="db-process-detail">No data yet</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label" id="db-session-label">Sessions</div>
+                            <div class="metric-value" id="db-session-total">-</div>
+                            <div class="metric-label" id="db-session-detail">No data yet</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Transactions</div>
+                            <div class="metric-value" id="db-transaction-total">-</div>
+                            <div class="metric-label" id="db-transaction-detail">No data yet</div>
+                        </div>
+                    </div>
+
+                    <div id="db-activity-status"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-blue">&#9635;</span>
+                            Connection Pool Stats
+                        </div>
+                        <span class="badge badge-info" id="cpool-stats-sampled-at">Waiting...</span>
+                    </div>
+
+                    <div class="field-inline" style="margin-bottom:16px">
+                        <div class="field-left">
+                            <span class="field-name">CDB Connection</span>
+                            <span class="field-desc">Dedicated CDB connection for querying GV$CPOOL_STATS.</span>
+                        </div>
+                        <div class="field-right" style="display:grid;grid-template-columns:repeat(3, minmax(120px, 1fr));gap:10px;max-width:520px">
+                            <input type="text" id="cpool-host" placeholder="Host">
+                            <input type="number" id="cpool-port" value="1521" placeholder="Port">
+                            <input type="text" id="cpool-service" placeholder="CDB service">
+                            <input type="text" id="cpool-user" placeholder="User">
+                            <input type="password" id="cpool-password" placeholder="Password">
+                            <select id="cpool-mode">
+                                <option value="thin">Thin</option>
+                                <option value="thick">Thick</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="recent-cpool-conns-section" style="display:none; margin-bottom:12px">
+                        <div class="recent-conns-header">
+                            <span class="recent-conns-title">&#128337; Recent CDB Connections</span>
+                            <span class="recent-conns-hint">Click a row to fill the form — password always stays empty</span>
+                        </div>
+                        <ul id="recent-cpool-conns-list" class="recent-conns-list"></ul>
+                        <div class="recent-conns-divider"></div>
+                    </div>
+
+                    <div class="btn-group" style="margin-bottom:12px">
+                        <button class="btn btn-secondary btn-sm" id="btn-test-cpool-conn">Test CDB Connection</button>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th class="text-col">Pool Name</th>
+                                    <th>Open Servers</th>
+                                    <th>Busy Servers</th>
+                                    <th>Hits</th>
+                                    <th>Misses</th>
+                                    <th>Purged</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cpool-stats-body">
+                                <tr>
+                                    <td colspan="6" class="text-col">No data yet</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div id="cpool-conn-status"></div>
+                    <div id="cpool-stats-status"></div>
+                </div>
+
+                <!-- Live Dashboard -->
+                <div id="live-dashboard" style="display:none">
+
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <span class="title-icon icon-blue">&#8987;</span>
+                                Live Progress
+                            </div>
+                            <span class="badge badge-info" id="elapsed-badge">0s / 60s</span>
+                        </div>
+
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+                        </div>
+                        <div class="progress-info">
+                            <span id="progress-text">Waiting...</span>
+                            <span class="progress-pct" id="progress-pct">0%</span>
+                        </div>
+                    </div>
+
+                    <div class="metric-grid">
+                        <div class="metric-card m-insert">
+                            <div class="metric-label">Inserts</div>
+                            <div class="metric-value" id="counter-inserts">0</div>
+                        </div>
+                        <div class="metric-card m-update">
+                            <div class="metric-label">Updates</div>
+                            <div class="metric-value" id="counter-updates">0</div>
+                        </div>
+                        <div class="metric-card m-delete">
+                            <div class="metric-label">Deletes</div>
+                            <div class="metric-value" id="counter-deletes">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Selects</div>
+                            <div class="metric-value" id="counter-selects">0</div>
+                        </div>
+                        <div class="metric-card m-error">
+                            <div class="metric-label">Errors</div>
+                            <div class="metric-value" id="counter-errors">0</div>
+                        </div>
+                    </div>
+
+                    <div class="progress-info" style="margin-top:8px">
+                        <span id="ops-per-sec">INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0</span>
+                    </div>
+
+                    <div class="chart-wrap">
+                        <div class="chart-title">GC Wait Events (live avg ms)</div>
+                        <div class="chart-area">
+                            <canvas id="gc-chart"></canvas>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Workload-specific warnings / errors (separate from schema log) -->
+                <div id="workload-notices" style="display:none; margin-top:12px; max-height:180px; overflow-y:auto;"></div>
+
+                <div id="workload-summary"></div>
+
+            </section>
+
+            <!-- ====================================================== -->
+            <!-- TAB 4: Results & Comparison                            -->
+            <!-- ====================================================== -->
+            <section id="tab-results" class="tab-panel">
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-orange">&#9776;</span>
+                            Benchmark Results
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary btn-sm" id="btn-compare-all">Compare All Runs</button>
+                            <button class="btn btn-secondary btn-sm" id="btn-compare">Compare Selected</button>
+                            <button class="btn btn-secondary btn-sm" id="btn-export-csv">Export CSV</button>
+                            <button class="btn btn-ghost btn-sm" id="btn-refresh-results">Refresh</button>
+                        </div>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table class="data-table" id="results-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:36px"><input type="checkbox" id="select-all"></th>
+                                    <th>Run</th>
+                                    <th>Date</th>
+                                    <th>Tables</th>
+                                    <th class="text-col">Partition</th>
+                                    <th class="text-col">Compress</th>
+                                    <th>Threads</th>
+                                    <th>Dur</th>
+                                    <th class="num col-primary" title="gc current block congested — primary comparison metric">gc curr congested ★</th>
+                                    <th class="num">gc curr 3-way</th>
+                                    <th class="num">gc cr congested</th>
+                                    <th style="width:70px"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="results-body">
+                                <tr><td colspan="12">
+                                    <div class="empty-state">
+                                        <div class="empty-icon">&#128202;</div>
+                                        No benchmark runs yet.<br>Complete a workload run to see results here.
+                                    </div>
+                                </td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="chart-wrap" id="compare-chart-container" style="display:none">
+                    <div class="chart-title">
+                        gc current block congested — Waits Comparison
+                        <span class="chart-subtitle">One bar per run · labelled by Partition / Compression / Threads / Duration · 🟢 low &nbsp; 🟡 mid &nbsp; 🔴 high</span>
+                    </div>
+                    <div class="chart-area" id="compare-chart-area">
+                        <canvas id="compare-chart"></canvas>
+                    </div>
+                </div>
+
+            </section>
+
+        </div><!-- .content-body -->
+    </div><!-- .main-content -->
+</div><!-- .app-layout -->
+
+<!-- ============================================================ -->
+<!-- DDL Preview Modal                                            -->
+<!-- ============================================================ -->
+<div class="modal-overlay hidden" id="ddl-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>DDL Preview</h3>
+            <button class="modal-close" id="ddl-modal-close">&#10005;</button>
+        </div>
+        <div class="modal-body">
+            <pre id="ddl-preview-content"></pre>
+        </div>
+    </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

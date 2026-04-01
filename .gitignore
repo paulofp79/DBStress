@@ -22,6 +22,19 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+._*
 
 # Test coverage
 coverage/
+
+# Runtime / generated artifacts
+.run/
+**/.venv/
+**/__pycache__/
+*.pyc
+gc_benchmark/gc_benchmark/results.db
+gc_benchmark/gc_benchmark/config.ini
+gc_benchmark/gc_benchmark/connections.json
+gc_benchmark/gc_benchmark/cpool_connections.json
+
+.nfs*

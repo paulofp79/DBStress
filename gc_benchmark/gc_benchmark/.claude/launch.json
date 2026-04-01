@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gc-benchmark",
+      "runtimeExecutable": "/Users/pporacle/Documents/GitHub/Simulate_GC_Events_Project1/gc_benchmark/.venv/bin/uvicorn",
+      "runtimeArgs": ["main:app", "--reload", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

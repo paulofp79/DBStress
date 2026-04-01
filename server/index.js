@@ -53,6 +53,120 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.get('/api/gc-benchmark/status', async (req, res) => {
+  const host = req.hostname === 'localhost' ? 'localhost' : req.hostname;
+  const protocol = req.protocol || 'http';
+  const targetUrl = `${protocol}://${host}:8000`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch(targetUrl, {
+      method: 'GET',
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    res.json({
+      success: true,
+      reachable: response.ok,
+      targetUrl
+    });
+  } catch (error) {
+    res.json({
+      success: true,
+      reachable: false,
+      targetUrl,
+      message: error.message
+    });
+  }
+});
+
+app.get('/api/monitor/waits', async (req, res) => {
+  const limit = Math.max(5, Math.min(50, parseInt(req.query.limit, 10) || 15));
+  const scope = String(req.query.scope || 'all').toLowerCase();
+  const waitClass = String(req.query.waitClass || '').trim();
+  const search = String(req.query.search || '').trim().toLowerCase();
+
+  const buildResponse = (rows, sourceName) => {
+    let waits = (rows || []).map((row) => ({
+      instId: row.INST_ID || 1,
+      event: row.EVENT,
+      waitClass: row.WAIT_CLASS,
+      totalWaits: Number(row.TOTAL_WAITS || 0),
+      timeWaitedSeconds: Number(row.TIME_WAITED_SECONDS || 0),
+      averageWaitMs: Number(row.AVERAGE_WAIT_MS || 0)
+    }));
+
+    if (scope === 'gc') {
+      waits = waits.filter((row) => row.event && row.event.toLowerCase().startsWith('gc '));
+    }
+    if (waitClass) {
+      waits = waits.filter((row) => row.waitClass === waitClass);
+    }
+    if (search) {
+      waits = waits.filter((row) => row.event && row.event.toLowerCase().includes(search));
+    }
+
+    waits.sort((a, b) => b.timeWaitedSeconds - a.timeWaitedSeconds);
+    waits = waits.slice(0, limit);
+
+    return {
+      success: true,
+      source: sourceName,
+      timestamp: Date.now(),
+      waits
+    };
+  };
+
+  try {
+    const result = await oracleDb.execute(`
+      SELECT
+        inst_id,
+        event,
+        wait_class,
+        total_waits,
+        time_waited_micro / 1000000 AS time_waited_seconds,
+        CASE
+          WHEN total_waits > 0
+          THEN time_waited_micro / total_waits / 1000
+          ELSE 0
+        END AS average_wait_ms
+      FROM gv$system_event
+      WHERE wait_class <> 'Idle'
+        AND total_waits > 0
+    `);
+
+    res.json(buildResponse(result.rows, 'gv$system_event'));
+  } catch (error) {
+    try {
+      const fallback = await oracleDb.execute(`
+        SELECT
+          1 AS inst_id,
+          event,
+          wait_class,
+          total_waits,
+          time_waited_micro / 1000000 AS time_waited_seconds,
+          CASE
+            WHEN total_waits > 0
+            THEN time_waited_micro / total_waits / 1000
+            ELSE 0
+          END AS average_wait_ms
+        FROM v$system_event
+        WHERE wait_class <> 'Idle'
+          AND total_waits > 0
+      `);
+
+      res.json(buildResponse(fallback.rows, 'v$system_event'));
+    } catch (fallbackError) {
+      res.status(500).json({
+        success: false,
+        message: fallbackError.message
+      });
+    }
+  }
+});
+
 // Test database connection
 app.post('/api/db/test-connection', async (req, res) => {
   const { user, password, connectionString } = req.body;

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 // Auto-detect server URL
 const getServerUrl = () => {
@@ -9,6 +9,7 @@ const getServerUrl = () => {
 };
 
 function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
+  const RECENT_CONNECTIONS_KEY = 'dbstress_recent_connections';
   const [credentials, setCredentials] = useState({
     user: '',
     password: '',
@@ -16,6 +17,43 @@ function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
   });
   const [testing, setTesting] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [recentConnections, setRecentConnections] = useState([]);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(RECENT_CONNECTIONS_KEY);
+      const parsed = saved ? JSON.parse(saved) : [];
+      setRecentConnections(Array.isArray(parsed) ? parsed : []);
+    } catch (err) {
+      setRecentConnections([]);
+    }
+  }, []);
+
+  const saveRecentConnection = (nextCredentials) => {
+    const record = {
+      user: nextCredentials.user,
+      connectionString: nextCredentials.connectionString,
+      savedAt: Date.now()
+    };
+
+    setRecentConnections((prev) => {
+      const filtered = prev.filter((item) =>
+        !(item.user === record.user && item.connectionString === record.connectionString)
+      );
+      const updated = [record, ...filtered].slice(0, 5);
+      window.localStorage.setItem(RECENT_CONNECTIONS_KEY, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const applyRecentConnection = (record) => {
+    setCredentials((prev) => ({
+      ...prev,
+      user: record.user || '',
+      password: '',
+      connectionString: record.connectionString || ''
+    }));
+  };
 
   const handleChange = (e) => {
     setCredentials(prev => ({
@@ -28,6 +66,7 @@ function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
     e.preventDefault();
     setConnecting(true);
     await onConnect(credentials);
+    saveRecentConnection(credentials);
     setConnecting(false);
   };
 
@@ -45,6 +84,7 @@ function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
       });
       const data = await response.json();
       if (data.success) {
+        saveRecentConnection(credentials);
         alert(`Connection successful!\n\nVersion: ${data.version}\nInstance: ${data.instance}\nHost: ${data.host}`);
       } else {
         alert(`Connection failed: ${data.message}`);
@@ -68,6 +108,44 @@ function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
       <div className="panel-content">
         {!dbStatus.connected ? (
           <form onSubmit={handleConnect}>
+            {recentConnections.length > 0 && (
+              <div style={{ marginBottom: '1rem' }}>
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '0.5rem'
+                }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                    Recent Connections
+                  </span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    password is never saved
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gap: '0.5rem' }}>
+                  {recentConnections.map((item, index) => (
+                    <button
+                      key={`${item.user}-${item.connectionString}-${index}`}
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => applyRecentConnection(item)}
+                      style={{
+                        justifyContent: 'space-between',
+                        textAlign: 'left',
+                        fontWeight: 400
+                      }}
+                    >
+                      <span>{item.user}@{item.connectionString}</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        Use
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="form-group">
               <label htmlFor="user">Username</label>
               <input
