@@ -332,6 +332,9 @@ function MonitorPanel({ dbStatus }) {
           color: 'var(--text-secondary)'
         }}>
           Real-time top waits from Oracle. Includes per-instance breakdown from `gv$` when available and delta charting between polls.
+          <span style={{ display: 'block', marginTop: '0.4rem' }}>
+            Observation: Avg wait in this tab is cumulative since instance startup, so it is better for understanding overall database behavior than the immediate effect of one workload.
+          </span>
           {lastUpdated && (
             <span style={{ marginLeft: '0.75rem', color: 'var(--text-muted)' }}>
               Last updated: {new Date(lastUpdated).toLocaleTimeString()}

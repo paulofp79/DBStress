@@ -14,6 +14,7 @@ import random
 import string
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -72,6 +73,8 @@ class WorkloadStatus:
     errors: int = 0
     elapsed: float = 0.0
     running: bool = False
+    phase: str = "IDLE"
+    status_message: str = ""
     last_error: str = ""
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False,
@@ -89,6 +92,11 @@ class WorkloadStatus:
             self.errors += 1
             self.last_error = message
 
+    def set_phase(self, phase: str, message: str = "") -> None:
+        with self._lock:
+            self.phase = phase
+            self.status_message = message
+
     def to_dict(self, duration: int = 0) -> dict:
         """Return a JSON-serialisable snapshot of the counters."""
         with self._lock:
@@ -100,6 +108,8 @@ class WorkloadStatus:
                 "errors": self.errors,
                 "elapsed": round(self.elapsed, 1),
                 "running": self.running,
+                "phase": self.phase,
+                "status_message": self.status_message,
                 "duration": duration,
                 "last_error": self.last_error,
             }
@@ -153,24 +163,26 @@ class WorkloadRunner:
 
     # ---- public interface -------------------------------------------------
 
-    def start(
+    def prepare(
         self,
         config: WorkloadConfig,
-        progress_callback: Optional[Callable[[dict], None]] = None,
+        prepare_callback: Optional[Callable[[dict], None]] = None,
     ) -> None:
-        """Begin the workload run.
-
-        *progress_callback* is invoked every ~2 s with a status dict.
-        """
+        """Build pool, prepare metadata, and warm sessions before timed run."""
         if self.is_running:
             raise RuntimeError("Workload already running.")
 
         self._config = config
         self._worker_count = max(1, min(config.thread_count, _MAX_PHYSICAL_WORKERS))
         self._stop_event.clear()
-        self.status = WorkloadStatus(running=True)
+        self.status = WorkloadStatus(running=True, phase="PREPARING")
         self.status.elapsed = 0.0
         self._start_time = 0.0
+
+        def emit(message: str, phase: str) -> None:
+            self.status.set_phase(phase, message)
+            if prepare_callback:
+                prepare_callback(self.status.to_dict(duration=self._config.duration_seconds))
 
         # Initialise thick mode if needed
         if config.mode.lower() == "thick":
@@ -187,14 +199,32 @@ class WorkloadRunner:
             dsn=config.dsn,
             min=1,
             max=self._worker_count,
-            increment=max(1, min(8, self._worker_count)),
+            increment=max(1, min(32, self._worker_count)),
         )
 
-        # Seed data and identify hot rows
-        self._prepare_seed_data()
+        emit(
+            f"Preparing schema metadata for {config.table_count} tables and {config.seed_rows} rows/table...",
+            "PREPARING",
+        )
+        self._prepare_seed_data_parallel(prepare_callback)
+        emit(
+            f"Warming up {self._worker_count} worker sessions before timed run...",
+            "WARMING",
+        )
+        self._warm_sessions_parallel(prepare_callback)
+
+    def start(
+        self,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+    ) -> None:
+        """Launch worker threads and start the timed workload window."""
+        if not self._config or not self._pool:
+            raise RuntimeError("Workload must be prepared before start.")
+        config = self._config
 
         # Start the measured workload window only after startup preparation completes.
         self._start_time = time.monotonic()
+        self.status.set_phase("RUNNING", "Timed workload running.")
 
         # Choose worker function based on contention mode
         mode = config.contention_mode.upper()
@@ -230,6 +260,12 @@ class WorkloadRunner:
     def stop(self, timeout: float = 10.0) -> dict:
         """Signal workers to stop and wait for them to finish."""
         self._stop_event.set()
+        if self.status.phase in ("PREPARING", "WARMING") and not self._threads:
+            self.status.running = False
+            self.status.set_phase("STOPPING", "Stopping preparation...")
+            return self.status.to_dict(
+                duration=self._config.duration_seconds if self._config else 0,
+            )
         for t in self._threads:
             t.join(timeout=timeout)
         self._threads.clear()
@@ -654,61 +690,108 @@ class WorkloadRunner:
 
     # ---- seed data --------------------------------------------------------
 
-    def _prepare_seed_data(self) -> None:
-        """Ensure each table has seed rows and cache PKs + hot set."""
+    def _prepare_table_seed(self, table_idx: int) -> None:
+        """Prepare one table and cache its row metadata."""
         assert self._config is not None
         assert self._pool is not None
         cfg = self._config
+        if self._stop_event.is_set():
+            return
 
         conn = self._pool.acquire()
         try:
             cursor = conn.cursor()
-            for table_idx in range(1, cfg.table_count + 1):
-                tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
+            tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
 
-                # Count existing rows
-                cursor.execute(f"SELECT COUNT(*) FROM {tname}")
-                existing = int(cursor.fetchone()[0])
+            cursor.execute(f"SELECT COUNT(*) FROM {tname}")
+            existing = int(cursor.fetchone()[0])
+            missing = max(cfg.seed_rows - existing, 0)
+            if missing > 0:
+                batch_size = 100
+                for batch_start in range(0, missing, batch_size):
+                    batch_end = min(batch_start + batch_size, missing)
+                    rows = []
+                    for _ in range(batch_end - batch_start):
+                        rows.append((
+                            _random_ref(),
+                            _random_name(),
+                            _random_status(),
+                            round(random.uniform(10, 5000), 2),
+                            random.randint(1, 100),
+                            round(random.uniform(0, 50), 2),
+                            _random_payload(100),
+                        ))
+                    cursor.executemany(
+                        f"INSERT INTO {tname} "
+                        f"(order_ref, customer_name, status, amount, quantity, discount, payload) "
+                        f"VALUES (:1, :2, :3, :4, :5, :6, :7)",
+                        rows,
+                    )
+                conn.commit()
 
-                # Seed if needed
-                missing = max(cfg.seed_rows - existing, 0)
-                if missing > 0:
-                    batch_size = 100
-                    for batch_start in range(0, missing, batch_size):
-                        batch_end = min(batch_start + batch_size, missing)
-                        rows = []
-                        for _ in range(batch_end - batch_start):
-                            rows.append((
-                                _random_ref(),
-                                _random_name(),
-                                _random_status(),
-                                round(random.uniform(10, 5000), 2),
-                                random.randint(1, 100),
-                                round(random.uniform(0, 50), 2),
-                                _random_payload(100),
-                            ))
-                        cursor.executemany(
-                            f"INSERT INTO {tname} "
-                            f"(order_ref, customer_name, status, amount, quantity, discount, payload) "
-                            f"VALUES (:1, :2, :3, :4, :5, :6, :7)",
-                            rows,
-                        )
-                    conn.commit()
-
-                # Cache all PKs
-                cursor.execute(
-                    f"SELECT order_id FROM {tname} "
-                    f"ORDER BY order_id FETCH FIRST :lim ROWS ONLY",
-                    {"lim": cfg.seed_rows},
-                )
-                all_pks = [int(r[0]) for r in cursor.fetchall()]
-                self._all_rows[table_idx] = all_pks
-
-                # Identify hot rows. Keep a broader hot set so workloads
-                # contend on blocks/index leaves without over-targeting one row.
-                hot_count = max(32, len(all_pks) * cfg.hot_row_pct // 100)
-                self._hot_rows[table_idx] = all_pks[:min(len(all_pks), hot_count)]
-
+            cursor.execute(
+                f"SELECT order_id FROM {tname} "
+                f"ORDER BY order_id FETCH FIRST :lim ROWS ONLY",
+                {"lim": cfg.seed_rows},
+            )
+            all_pks = [int(r[0]) for r in cursor.fetchall()]
+            self._all_rows[table_idx] = all_pks
+            hot_count = max(32, len(all_pks) * cfg.hot_row_pct // 100)
+            self._hot_rows[table_idx] = all_pks[:min(len(all_pks), hot_count)]
             cursor.close()
         finally:
             self._pool.release(conn)
+
+    def _prepare_seed_data_parallel(self, prepare_callback: Optional[Callable[[dict], None]] = None) -> None:
+        """Ensure each table has seed rows and cache PKs + hot set in parallel."""
+        assert self._config is not None
+        cfg = self._config
+        total = max(1, cfg.table_count)
+        done = 0
+        done_lock = threading.Lock()
+
+        def run_one(table_idx: int) -> None:
+            nonlocal done
+            if self._stop_event.is_set():
+                return
+            self._prepare_table_seed(table_idx)
+            if prepare_callback:
+                with done_lock:
+                    done += 1
+                    self.status.set_phase("PREPARING", f"Prepared table {done}/{total}")
+                    prepare_callback(self.status.to_dict(duration=cfg.duration_seconds))
+
+        max_workers = max(1, min(total, 32))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(run_one, range(1, total + 1)))
+
+    def _warm_sessions_parallel(self, prepare_callback: Optional[Callable[[dict], None]] = None) -> None:
+        """Open and release worker sessions before the timed workload starts."""
+        assert self._pool is not None
+        assert self._config is not None
+        total = self._worker_count
+        warmed = 0
+        warmed_lock = threading.Lock()
+
+        def warm_one(_: int) -> None:
+            nonlocal warmed
+            if self._stop_event.is_set():
+                return
+            conn = self._pool.acquire()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM dual")
+                cur.fetchone()
+                cur.close()
+            finally:
+                self._pool.release(conn)
+            if prepare_callback:
+                with warmed_lock:
+                    warmed += 1
+                    if warmed == total or warmed % max(1, min(25, total // 8 or 1)) == 0:
+                        self.status.set_phase("WARMING", f"Warmed {warmed}/{total} sessions")
+                        prepare_callback(self.status.to_dict(duration=self._config.duration_seconds))
+
+        max_workers = max(1, min(total, 64))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(warm_one, range(total)))

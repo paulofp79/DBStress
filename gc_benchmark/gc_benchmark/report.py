@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     started_at      TEXT    NOT NULL,
     finished_at     TEXT,
     duration_secs   REAL,
+    schema_name     TEXT,
     table_prefix    TEXT,
     table_count     INTEGER,
     partition_type  TEXT,
@@ -58,6 +59,8 @@ async def init_db(db_path: str) -> None:
         cursor = await db.execute("PRAGMA table_info(benchmark_runs)")
         cols = await cursor.fetchall()
         col_names = {row[1] for row in cols}
+        if "schema_name" not in col_names:
+            await db.execute("ALTER TABLE benchmark_runs ADD COLUMN schema_name TEXT")
         if "table_prefix" not in col_names:
             await db.execute("ALTER TABLE benchmark_runs ADD COLUMN table_prefix TEXT")
         await db.execute("PRAGMA journal_mode=WAL")
@@ -74,6 +77,7 @@ async def save_run(
     started_at: str,
     finished_at: str,
     duration_secs: float,
+    schema_name: str,
     table_prefix: str,
     table_count: int,
     partition_type: str,
@@ -100,14 +104,14 @@ async def save_run(
         cursor = await db.execute(
             """
             INSERT INTO benchmark_runs
-                (started_at, finished_at, duration_secs, table_prefix, table_count,
+                (started_at, finished_at, duration_secs, schema_name, table_prefix, table_count,
                  partition_type, partition_detail, compression,
                  thread_count, hot_row_pct, inserts, updates, deletes,
                  errors, gc_metrics)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                started_at, finished_at, duration_secs, table_prefix, table_count,
+                started_at, finished_at, duration_secs, schema_name, table_prefix, table_count,
                 partition_type, partition_detail, compression,
                 thread_count, hot_row_pct, inserts, updates, deletes,
                 errors, gc_metrics_json,
@@ -241,9 +245,10 @@ async def compare_runs(db_path: str, run_ids: list[int]) -> dict:
             comp     = r.get("compression")    or "NONE"
             threads  = r.get("thread_count")   or "?"
             dur      = int(r.get("duration_secs") or 0)
+            schema   = r.get("schema_name")    or "?"
 
             # Short label shown on the chart axis
-            label = f"#{rid} | {part} / {comp} / {threads}t / {dur}s"
+            label = f"#{rid} | {schema} | {part} / {comp} / {threads}t / {dur}s"
             labels.append(label)
 
             congested = delta_agg.get(TARGET_EVENT, 0)
@@ -251,6 +256,7 @@ async def compare_runs(db_path: str, run_ids: list[int]) -> dict:
 
             details.append({
                 "run_id":       rid,
+                "schema_name":  schema,
                 "partition":    part,
                 "compression":  comp,
                 "threads":      threads,
@@ -282,7 +288,7 @@ async def export_csv(db_path: str) -> str:
 
     # Header
     header = [
-        "run_id", "started_at", "finished_at", "duration_secs",
+        "run_id", "started_at", "finished_at", "duration_secs", "schema_name",
         "table_count", "partition_type", "partition_detail", "compression",
         "thread_count", "hot_row_pct", "inserts", "updates", "deletes", "errors",
         "gc_curr_congested", "gc_curr_3way", "gc_cr_congested",
@@ -300,6 +306,7 @@ async def export_csv(db_path: str) -> str:
             r.get("started_at"),
             r.get("finished_at"),
             r.get("duration_secs"),
+            r.get("schema_name"),
             r.get("table_count"),
             r.get("partition_type"),
             r.get("partition_detail"),

@@ -316,6 +316,7 @@
      * Called when the user changes the schema <select>.
      */
     function applySelectedSchema(s) {
+        $('wl-schema-name').value      = s.label           || s.prefix || 'GCB';
         $('wl-prefix').value           = s.prefix          || 'GCB';
         $('wl-table-count').value      = s.table_count     || 10;
         $('wl-partition-type').value   = s.partition_type  || 'NONE';
@@ -444,8 +445,10 @@
         if (!container) return;
         container.style.display = 'block';
         var div = document.createElement('div');
-        div.className = 'status-box status-' + (type === 'warning' ? 'warning' : 'error');
-        div.textContent = (type === 'warning' ? '⚠ ' : '✖ ') + message;
+        var level = (type === 'warning' || type === 'success' || type === 'info') ? type : 'error';
+        var prefix = level === 'warning' ? '⚠ ' : (level === 'info' ? 'ℹ ' : (level === 'success' ? '✓ ' : '✖ '));
+        div.className = 'status-box status-' + level;
+        div.textContent = prefix + message;
         container.appendChild(div);
         container.scrollTop = container.scrollHeight;
     }
@@ -523,6 +526,7 @@
         var lockHold = $('wl-lock-hold') ? parseInt($('wl-lock-hold').value) || 0 : 0;
         return {
             table_prefix:     $('wl-prefix').value               || 'GCB',
+            schema_name:      $('wl-schema-name').value          || $('wl-prefix').value || 'GCB',
             table_count:      parseInt($('wl-table-count').value) || 10,
             thread_count:     parseInt($('wl-threads').value),
             duration_seconds: parseInt($('wl-duration').value)    || 60,
@@ -541,6 +545,32 @@
         };
     }
 
+    async function restartPdb() {
+        var pdbName = (($('wl-pdb-name') || {}).value || '').trim();
+        if (!pdbName) {
+            appendWorkloadNotice('Enter a PDB name first.', 'error');
+            return;
+        }
+
+        var notices = $('workload-notices');
+        if (notices) {
+            notices.innerHTML = '';
+            notices.style.display = 'block';
+        }
+        appendWorkloadNotice('Restarting PDB ' + pdbName.toUpperCase() + ' using the configured CDB Connection...', 'info');
+
+        var result = await api('POST', '/api/db/pdb-restart', { pdb_name: pdbName });
+        if (!result.ok) {
+            appendWorkloadNotice(result.message || 'PDB restart failed.', 'error');
+            return;
+        }
+
+        (result.steps || []).forEach(function (step) {
+            appendWorkloadNotice(step, 'info');
+        });
+        appendWorkloadNotice(result.message || ('PDB ' + pdbName.toUpperCase() + ' restarted.'), 'success');
+    }
+
     async function startWorkload() {
         if (workloadRunning) return;
 
@@ -557,9 +587,9 @@
         $('counter-errors').textContent = '0';
         $('ops-per-sec').textContent = 'INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0';
         $('progress-fill').style.width = '0%';
-        $('progress-text').textContent = 'Running...';
+        $('progress-text').textContent = 'Preparing workload...';
         $('progress-pct').textContent = '0%';
-        $('elapsed-badge').textContent = '0s / ' + ($('wl-duration').value || 60) + 's';
+        $('elapsed-badge').textContent = 'Preparing';
 
         initGCChart();
 
@@ -605,6 +635,8 @@
         var elapsed = Number(data.elapsed || 0).toFixed(1);
         var duration = Number(data.duration || 0).toLocaleString();
         var mode = data.contention_mode || 'NORMAL';
+        var phase = data.phase || 'RUNNING';
+        var statusMessage = data.status_message || '';
 
         el.innerHTML =
             '<b>RUNNING workload</b> ' +
@@ -612,8 +644,11 @@
             'Tables <b>' + escapeHtml(tables) + '</b> · ' +
             'Requested Threads <b>' + escapeHtml(requestedThreads) + '</b> · ' +
             'Physical Workers/Sessions <b>' + escapeHtml(physicalWorkers) + '</b> · ' +
+            'Phase <b>' + escapeHtml(phase) + '</b> · ' +
             'Mode <b>' + escapeHtml(mode) + '</b> · ' +
-            'Elapsed <b>' + escapeHtml(elapsed) + 's / ' + escapeHtml(duration) + 's</b>';
+            (phase === 'RUNNING'
+                ? ('Elapsed <b>' + escapeHtml(elapsed) + 's / ' + escapeHtml(duration) + 's</b>')
+                : ('Status <b>' + escapeHtml(statusMessage || 'Preparing...') + '</b>'));
         el.style.display = 'block';
     }
 
@@ -770,6 +805,15 @@
 
         var elapsed = data.elapsed || 0;
         var duration = data.duration || 60;
+        var phase = data.phase || 'RUNNING';
+        if (phase !== 'RUNNING') {
+            $('ops-per-sec').textContent = 'Waiting for timed run to start...';
+            $('progress-fill').style.width = '100%';
+            $('progress-pct').textContent = phase;
+            $('progress-text').textContent = data.status_message || ('Preparing workload (' + phase + ')');
+            $('elapsed-badge').textContent = phase;
+            return;
+        }
         var pct = Math.min(100, (elapsed / duration) * 100);
         var denom = elapsed > 0 ? elapsed : 1;
         $('ops-per-sec').textContent =
@@ -991,6 +1035,9 @@
                 case 'schema_progress': appendSchemaLog(msg.message); break;
                 case 'schema_complete': appendSchemaLog(msg.message); loadSchemaState(); loadSchemas(); break;
                 case 'complete':        showCompletionSummary(msg); break;
+                case 'info':
+                    appendWorkloadNotice(msg.message, 'info');
+                    break;
                 case 'warning':
                     if (msg.source === 'schema') {
                         appendSchemaLog('WARNING: ' + msg.message);
@@ -1056,7 +1103,7 @@
         }
 
         if (runs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="12"><div class="empty-state">' +
+            tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">' +
                 '<div class="empty-icon">&#128202;</div>' +
                 'No benchmark runs yet.<br>Complete a workload run to see results here.' +
                 '</div></td></tr>';
@@ -1090,6 +1137,7 @@
                 '<td><input type="checkbox" class="run-check" value="' + r.run_id + '"></td>' +
                 '<td>#' + r.run_id + '</td>' +
                 '<td class="text-col">' + escapeHtml(date) + '</td>' +
+                '<td class="text-col">' + escapeHtml(r.schema_name || '-') + '</td>' +
                 '<td>' + (r.table_count || '-') + '</td>' +
                 '<td class="text-col">' + escapeHtml(r.partition_type || '-') + '</td>' +
                 '<td class="text-col">' + escapeHtml(r.compression || '-') + '</td>' +
@@ -1264,14 +1312,44 @@
     // Slider bindings
     // ================================================================
 
-    function bindSlider(sliderId, displayId) {
+    function bindSlider(sliderId, displayId, inputId) {
         var slider = $(sliderId);
         var display = $(displayId);
+        var input = inputId ? $(inputId) : null;
         if (!slider || !display) return;
-        display.textContent = slider.value;
+
+        function clampValue(raw) {
+            var n = parseInt(raw, 10);
+            if (Number.isNaN(n)) n = parseInt(slider.value, 10) || parseInt(slider.min, 10) || 0;
+            var min = parseInt(slider.min, 10);
+            var max = parseInt(slider.max, 10);
+            if (!Number.isNaN(min)) n = Math.max(min, n);
+            if (!Number.isNaN(max)) n = Math.min(max, n);
+            return n;
+        }
+
+        function syncFrom(raw) {
+            var value = String(clampValue(raw));
+            slider.value = value;
+            display.textContent = value;
+            if (input) input.value = value;
+        }
+
+        syncFrom(slider.value);
         slider.addEventListener('input', function () {
-            display.textContent = slider.value;
+            syncFrom(slider.value);
         });
+        if (input) {
+            input.addEventListener('input', function () {
+                display.textContent = input.value || slider.value;
+            });
+            input.addEventListener('change', function () {
+                syncFrom(input.value);
+            });
+            input.addEventListener('blur', function () {
+                syncFrom(input.value);
+            });
+        }
     }
 
     // ================================================================
@@ -1359,7 +1437,7 @@
         loadSchemas();
 
         // Sliders
-        bindSlider('wl-threads', 'thread-count-val');
+        bindSlider('wl-threads', 'thread-count-val', 'wl-threads-input');
         bindSlider('wl-hotrow', 'hot-row-val');
 
         // Partition radio change
@@ -1432,6 +1510,7 @@
         $('btn-reset-gc-params').addEventListener('click', resetGCParams);
         $('btn-apply-db-session-filter').addEventListener('click', loadDbActivity);
         $('btn-test-cpool-conn').addEventListener('click', testCpoolConnection);
+        $('btn-restart-pdb').addEventListener('click', restartPdb);
 
         // Workload buttons
         $('btn-start-workload').addEventListener('click', startWorkload);

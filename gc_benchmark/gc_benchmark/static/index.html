@@ -403,6 +403,7 @@
                             <div class="slider-group">
                                 <input type="range" id="wl-threads" min="2" max="10000" value="8" style="width:160px">
                                 <span class="range-value" id="thread-count-val">8</span>
+                                <input type="number" id="wl-threads-input" min="2" max="10000" value="8" style="width:110px;text-align:center">
                             </div>
                         </div>
                     </div>
@@ -444,8 +445,20 @@
                         </div>
                     </div>
 
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">PDB Action</span>
+                            <span class="field-desc">Use the CDB Connection below to close and reopen one PDB as a separate action.</span>
+                        </div>
+                        <div class="field-right" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                            <input type="text" id="wl-pdb-name" placeholder="PDB name" style="width:180px;text-align:center">
+                            <button class="btn btn-secondary btn-sm" id="btn-restart-pdb">Restart PDB</button>
+                        </div>
+                    </div>
+
                     <!-- Hidden fields populated by schema select — still sent to the backend -->
                     <input type="hidden" id="wl-prefix"         value="GCB">
+                    <input type="hidden" id="wl-schema-name"    value="GCB">
                     <input type="hidden" id="wl-table-count"    value="10">
                     <input type="hidden" id="wl-partition-type" value="NONE">
                     <input type="hidden" id="wl-partition-detail" value="">
@@ -627,6 +640,9 @@
                         <div class="chart-area">
                             <canvas id="gc-chart"></canvas>
                         </div>
+                        <div class="chart-subtitle" style="margin-top:8px">
+                            Observation: this chart uses delta average wait since workload start, so it is better for seeing what the current run is doing in real time.
+                        </div>
                     </div>
 
                 </div>
@@ -664,6 +680,7 @@
                                     <th style="width:36px"><input type="checkbox" id="select-all"></th>
                                     <th>Run</th>
                                     <th>Date</th>
+                                    <th class="text-col">Schema</th>
                                     <th>Tables</th>
                                     <th class="text-col">Partition</th>
                                     <th class="text-col">Compress</th>
@@ -676,7 +693,7 @@
                                 </tr>
                             </thead>
                             <tbody id="results-body">
-                                <tr><td colspan="12">
+                                <tr><td colspan="13">
                                     <div class="empty-state">
                                         <div class="empty-icon">&#128202;</div>
                                         No benchmark runs yet.<br>Complete a workload run to see results here.

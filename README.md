@@ -87,6 +87,24 @@ Oracle Database Stress Testing Tool with Real-time Monitoring
 
 ## Running the Application
 
+### Root Wrapper Scripts
+
+You added two helper scripts in the repository root to manage the full app:
+
+```bash
+./startall.sh
+./stopall.sh
+```
+
+They are thin wrappers for:
+
+```bash
+npm run start-all
+npm run stop-all
+```
+
+Use them from `/home/paportug/DBStress` when you want a short command to start or stop everything.
+
 ### Development Mode
 
 Start both backend and frontend with hot-reloading:

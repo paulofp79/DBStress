@@ -152,6 +152,39 @@ def _get_cpool_connection():
     )
 
 
+def _restart_pdb_with_cdb_connection(pdb_name: str) -> list[str]:
+    """Close and reopen a PDB using the configured CDB connection."""
+    name = (pdb_name or "").strip().upper()
+    if not name:
+        raise ValueError("PDB name is required when PDB restart is enabled.")
+    if not (
+        _cpool_conn_state.get("host")
+        and _cpool_conn_state.get("service_name")
+        and _cpool_conn_state.get("user")
+        and _cpool_conn_state.get("password")
+    ):
+        raise ValueError("Set the CDB Connection first.")
+
+    conn = _get_cpool_connection()
+    steps: list[str] = []
+    try:
+        cur = conn.cursor()
+        try:
+            close_sql = f"ALTER PLUGGABLE DATABASE {name} CLOSE IMMEDIATE"
+            open_sql = f"ALTER PLUGGABLE DATABASE {name} OPEN READ WRITE"
+            steps.append(f"Executing: {close_sql}")
+            cur.execute(close_sql)
+            steps.append(f"PDB {name} closed.")
+            steps.append(f"Executing: {open_sql}")
+            cur.execute(open_sql)
+            steps.append(f"PDB {name} opened READ WRITE.")
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+    return steps
+
+
 def _load_recent_conns() -> list[dict]:
     """Return the saved list of recent connections (no passwords)."""
     if not os.path.exists(RECENT_CONNS_PATH):
@@ -1218,15 +1251,7 @@ async def workload_start(body: dict):
 
     loop = asyncio.get_event_loop()
     started_at = datetime.now(timezone.utc).isoformat()
-
-    # Take before snapshot
     before_snapshot: dict = {}
-    try:
-        conn = _get_connection()
-        before_snapshot = snapshot_system_events(conn)
-        conn.close()
-    except Exception as exc:
-        await _broadcast({"type": "warning", "source": "workload", "message": f"Could not capture before snapshot: {exc}"})
 
     # Progress callback — bridges threads → async
     gc_sample_interval = 2.0
@@ -1268,6 +1293,12 @@ async def workload_start(body: dict):
             except Exception:
                 pass
 
+    def on_prepare(status_dict: dict):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast({"type": "progress", "data": status_dict}),
+            loop,
+        )
+
     # Prime the live chart immediately so short runs do not appear blank
     # before the first non-zero GC sample arrives.
     await _broadcast({
@@ -1283,7 +1314,23 @@ async def workload_start(body: dict):
 
     def _run_workload():
         try:
-            _runner.start(cfg, progress_callback=on_progress)
+            _runner.prepare(cfg, prepare_callback=on_prepare)
+            if _runner._stop_event.is_set():
+                _runner.stop(timeout=0)
+                return
+            try:
+                conn = _get_connection()
+                before_snapshot.update(snapshot_system_events(conn))
+                conn.close()
+            except Exception as exc:
+                asyncio.run_coroutine_threadsafe(
+                    _broadcast({"type": "warning", "source": "workload", "message": f"Could not capture before snapshot: {exc}"}),
+                    loop,
+                )
+            if _runner._stop_event.is_set():
+                _runner.stop(timeout=0)
+                return
+            _runner.start(progress_callback=on_progress)
             # Wait for completion
             while _runner.is_running:
                 time.sleep(0.5)
@@ -1317,6 +1364,7 @@ async def workload_start(body: dict):
                 started_at=started_at,
                 finished_at=finished_at,
                 duration_secs=cfg.duration_seconds,
+                schema_name=str(body.get("schema_name") or cfg.table_prefix or ""),
                 table_prefix=cfg.table_prefix,
                 table_count=cfg.table_count,
                 # Prefer values sent by the frontend (from selected schema dropdown)
@@ -1356,7 +1404,7 @@ async def workload_start(body: dict):
 async def workload_stop():
     """Stop the running workload."""
     global _runner
-    if not _runner or not _runner.is_running:
+    if not _runner or not _runner.status.running:
         return {"ok": False, "message": "No workload is running."}
     result = _runner.stop()
     return {"ok": True, "status": result}
@@ -1446,6 +1494,17 @@ async def db_cpool_connection_test(body: dict):
     except oracledb.DatabaseError as exc:
         error_obj = exc.args[0] if exc.args else exc
         return {"ok": False, "message": str(error_obj)}
+
+
+@app.post("/api/db/pdb-restart")
+async def db_pdb_restart(body: dict):
+    """Restart a PDB using the configured CDB connection."""
+    pdb_name = str(body.get("pdb_name", "")).strip()
+    try:
+        steps = _restart_pdb_with_cdb_connection(pdb_name)
+        return {"ok": True, "message": f"PDB {pdb_name.upper()} restarted.", "steps": steps}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
 
 
 # ---------------------------------------------------------------------------
