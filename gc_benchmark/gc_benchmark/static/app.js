@@ -12,6 +12,7 @@
     var gcChart = null;
     var compareChart = null;
     var workloadRunning = false;
+    var loginWorkloadRunning = false;
     var dbActivityTimer = null;
     var cpoolStatsTimer = null;
 
@@ -38,6 +39,7 @@
         connection: 'Connection',
         schema: 'Schema Setup',
         workload: 'Run Workload',
+        'login-sim': 'Login Workload Simulation',
         results: 'Results & Comparison',
     };
 
@@ -110,7 +112,13 @@
         $('page-title').textContent = PAGE_TITLES[name] || name;
         // Load data for specific tabs
         if (name === 'results')  loadResults();
-        if (name === 'workload') loadSchemas();
+        if (name === 'workload') {
+            loadSchemas();
+            loadWorkloadStatus();
+        }
+        if (name === 'login-sim') {
+            loadLoginWorkloadStatus();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -340,6 +348,70 @@
         };
     }
 
+    function normalizeConnText(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function normalizeConnPort(value) {
+        var port = parseInt(value, 10);
+        return isNaN(port) ? 0 : port;
+    }
+
+    function getCurrentWorkloadConnectionKey() {
+        return {
+            host: (($('conn-host') || {}).value || '').trim(),
+            port: normalizeConnPort((($('conn-port') || {}).value || '')),
+            service_name: (($('conn-service') || {}).value || '').trim(),
+            user: (($('conn-user') || {}).value || '').trim(),
+        };
+    }
+
+    function hasConnectionKey(key) {
+        if (!key) return false;
+        return !!(
+            normalizeConnText(key.host) ||
+            normalizeConnText(key.service_name) ||
+            normalizeConnText(key.user)
+        );
+    }
+
+    function sameConnectionKey(left, right) {
+        if (!hasConnectionKey(left) || !hasConnectionKey(right)) return false;
+        return (
+            normalizeConnText(left.host) === normalizeConnText(right.host) &&
+            normalizeConnPort(left.port) === normalizeConnPort(right.port) &&
+            normalizeConnText(left.service_name) === normalizeConnText(right.service_name) &&
+            normalizeConnText(left.user) === normalizeConnText(right.user)
+        );
+    }
+
+    function workloadMessageMatchesCurrentConnection(msg) {
+        if (!msg || !msg.connection_key) return true;
+        var current = getCurrentWorkloadConnectionKey();
+        if (!hasConnectionKey(current)) return false;
+        return sameConnectionKey(current, msg.connection_key);
+    }
+
+    function buildScopedStatusUrl(path) {
+        var key = getCurrentWorkloadConnectionKey();
+        if (!hasConnectionKey(key)) return null;
+
+        var params = new URLSearchParams();
+        if (key.host) params.set('host', key.host);
+        if (key.port) params.set('port', String(key.port));
+        if (key.service_name) params.set('service_name', key.service_name);
+        if (key.user) params.set('user', key.user);
+        return path + '?' + params.toString();
+    }
+
+    function buildWorkloadStatusUrl() {
+        return buildScopedStatusUrl('/api/workload/status');
+    }
+
+    function buildLoginWorkloadStatusUrl() {
+        return buildScopedStatusUrl('/api/login-workload/status');
+    }
+
     async function loadConnectionStatus() {
         try {
             var data = await api('GET', '/api/connection/status');
@@ -348,6 +420,8 @@
             if (data.service_name) $('conn-service').value = data.service_name;
             if (data.user) $('conn-user').value = data.user;
             if (data.mode) $('conn-mode').value = data.mode;
+            loadWorkloadStatus();
+            loadLoginWorkloadStatus();
         } catch (e) { /* ignore */ }
     }
 
@@ -356,7 +430,11 @@
         var result = await api('POST', '/api/connection/test', getConnFields());
         showStatus('conn-status', result.message, result.ok ? 'success' : 'error');
         // Refresh recent-connections list after a successful test (backend auto-saves)
-        if (result.ok) loadRecentConnections();
+        if (result.ok) {
+            loadRecentConnections();
+            loadWorkloadStatus();
+            loadLoginWorkloadStatus();
+        }
     }
 
     async function checkPrivileges() {
@@ -442,6 +520,19 @@
      */
     function appendWorkloadNotice(message, type) {
         var container = $('workload-notices');
+        if (!container) return;
+        container.style.display = 'block';
+        var div = document.createElement('div');
+        var level = (type === 'warning' || type === 'success' || type === 'info') ? type : 'error';
+        var prefix = level === 'warning' ? '⚠ ' : (level === 'info' ? 'ℹ ' : (level === 'success' ? '✓ ' : '✖ '));
+        div.className = 'status-box status-' + level;
+        div.textContent = prefix + message;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function appendLoginWorkloadNotice(message, type) {
+        var container = $('login-workload-notices');
         if (!container) return;
         container.style.display = 'block';
         var div = document.createElement('div');
@@ -622,11 +713,23 @@
         var el = $('running-workload-banner');
         if (!el) return;
 
-        if (!data || !data.running) {
+        if (!data || (!data.running && !data.other_workload_running)) {
             el.style.display = 'none';
             el.innerHTML = '';
             return;
         }
+
+        if (data.other_workload_running && !data.running) {
+            el.className = 'status-box status-info';
+            el.innerHTML =
+                'Another database workload is active in this app process: <b>' +
+                escapeHtml(data.other_connection_label || 'unknown connection') +
+                '</b>. This page is scoped to a different connection.';
+            el.style.display = 'flex';
+            return;
+        }
+
+        el.className = 'status-box status-warning';
 
         var schema = data.table_prefix || 'GCB';
         var tables = Number(data.table_count || 0).toLocaleString();
@@ -649,16 +752,26 @@
             (phase === 'RUNNING'
                 ? ('Elapsed <b>' + escapeHtml(elapsed) + 's / ' + escapeHtml(duration) + 's</b>')
                 : ('Status <b>' + escapeHtml(statusMessage || 'Preparing...') + '</b>'));
-        el.style.display = 'block';
+        el.style.display = 'flex';
     }
 
     async function loadWorkloadStatus() {
         try {
-            var data = await api('GET', '/api/workload/status');
+            var statusUrl = buildWorkloadStatusUrl();
+            if (!statusUrl) {
+                workloadRunning = false;
+                $('btn-start-workload').disabled = false;
+                $('btn-stop-workload').disabled = true;
+                renderRunningWorkloadBanner(null);
+                return;
+            }
+
+            var data = await api('GET', statusUrl);
             var running = !!data.running;
+            var otherConnectionRunning = !!data.other_workload_running;
 
             workloadRunning = running;
-            $('btn-start-workload').disabled = running;
+            $('btn-start-workload').disabled = running || otherConnectionRunning;
             $('btn-stop-workload').disabled = !running;
             renderRunningWorkloadBanner(data);
 
@@ -672,6 +785,237 @@
             $('btn-start-workload').disabled = false;
             $('btn-stop-workload').disabled = true;
             renderRunningWorkloadBanner(null);
+        }
+    }
+
+    function getLoginWorkloadConfig() {
+        return {
+            sql_text: (($('login-sql-text') || {}).value || 'select 1 from dual').trim(),
+            thread_count: parseInt((($('login-thread-count-input') || {}).value || ($('login-thread-count') || {}).value || '20'), 10) || 20,
+            iterations_per_thread: parseInt((($('login-iterations') || {}).value || '1000'), 10) || 0,
+            think_time_ms: parseInt((($('login-think-time-ms') || {}).value || '0'), 10) || 0,
+        };
+    }
+
+    function resetLoginWorkloadDashboard() {
+        $('login-counter-active').textContent = '0';
+        $('login-counter-logons').textContent = '0';
+        $('login-counter-queries').textContent = '0';
+        $('login-counter-logouts').textContent = '0';
+        $('login-counter-cycles').textContent = '0';
+        $('login-counter-errors').textContent = '0';
+        $('login-progress-fill').style.width = '0%';
+        $('login-progress-text').textContent = 'Preparing login workload...';
+        $('login-progress-pct').textContent = '0%';
+        $('login-elapsed-badge').textContent = 'Preparing';
+        $('login-ops-per-sec').textContent = 'LOGON/s 0.0 · QRY/s 0.0 · LOGOFF/s 0.0 · AVG cycle 0.0 ms';
+    }
+
+    async function startLoginWorkload() {
+        if (loginWorkloadRunning) return;
+
+        $('login-live-dashboard').style.display = 'block';
+        $('login-workload-summary').innerHTML = '';
+
+        var notices = $('login-workload-notices');
+        if (notices) {
+            notices.innerHTML = '';
+            notices.style.display = 'none';
+        }
+
+        resetLoginWorkloadDashboard();
+        $('btn-start-login-workload').disabled = true;
+        $('btn-stop-login-workload').disabled = false;
+        loginWorkloadRunning = true;
+
+        ensureWebSocket();
+
+        var result = await api('POST', '/api/login-workload/start', getLoginWorkloadConfig());
+        if (!result.ok) {
+            $('login-live-dashboard').style.display = 'none';
+            $('login-workload-summary').innerHTML =
+                '<div class="status-box status-error">' + escapeHtml(result.message || 'Failed to start login workload') + '</div>';
+            loginWorkloadRunning = false;
+            $('btn-start-login-workload').disabled = false;
+            $('btn-stop-login-workload').disabled = true;
+            return;
+        }
+
+        appendLoginWorkloadNotice(result.message || 'Login workload started.', 'success');
+        loadLoginWorkloadStatus();
+    }
+
+    async function stopLoginWorkload() {
+        await api('POST', '/api/login-workload/stop');
+        loginWorkloadRunning = false;
+        $('btn-start-login-workload').disabled = false;
+        $('btn-stop-login-workload').disabled = true;
+        $('login-live-dashboard').style.display = 'none';
+        $('running-login-workload-banner').style.display = 'none';
+        $('running-login-workload-banner').innerHTML = '';
+    }
+
+    function renderRunningLoginWorkloadBanner(data) {
+        var el = $('running-login-workload-banner');
+        if (!el) return;
+
+        if (!data || (!data.running && !data.other_login_workload_running)) {
+            el.style.display = 'none';
+            el.innerHTML = '';
+            return;
+        }
+
+        if (data.other_login_workload_running && !data.running) {
+            el.className = 'status-box status-info';
+            el.innerHTML =
+                'Another database login workload is active in this app process: <b>' +
+                escapeHtml(data.other_connection_label || 'unknown connection') +
+                '</b>. This page is scoped to a different connection.';
+            el.style.display = 'flex';
+            return;
+        }
+
+        el.className = 'status-box status-warning';
+
+        var requestedThreads = Number(data.requested_threads || data.thread_count || 0).toLocaleString();
+        var physicalWorkers = Number(data.physical_workers || 0).toLocaleString();
+        var iterations = Number(data.iterations_per_thread || 0).toLocaleString();
+        var cycles = Number(data.cycles || 0).toLocaleString();
+        var elapsed = Number(data.elapsed || 0).toFixed(1);
+        var statusMessage = data.status_message || '';
+        var queryPreview = String(data.sql_text || '').replace(/\s+/g, ' ').trim();
+        if (queryPreview.length > 80) {
+            queryPreview = queryPreview.slice(0, 77) + '...';
+        }
+
+        el.innerHTML =
+            '<b>RUNNING login workload</b> ' +
+            'Threads <b>' + escapeHtml(requestedThreads) + '</b> · ' +
+            'Physical Workers <b>' + escapeHtml(physicalWorkers) + '</b> · ' +
+            'Iter/Thread <b>' + escapeHtml(iterations === '0' ? 'until stop' : iterations) + '</b> · ' +
+            'Cycles <b>' + escapeHtml(cycles) + '</b> · ' +
+            'Elapsed <b>' + escapeHtml(elapsed) + 's</b> · ' +
+            'Query <b>' + escapeHtml(queryPreview || 'select 1 from dual') + '</b> · ' +
+            'Status <b>' + escapeHtml(statusMessage || 'Running') + '</b>';
+        el.style.display = 'flex';
+    }
+
+    function updateLoginProgress(data) {
+        $('login-counter-active').textContent = Number(data.active_connections || 0).toLocaleString();
+        $('login-counter-logons').textContent = Number(data.logons || 0).toLocaleString();
+        $('login-counter-queries').textContent = Number(data.queries || 0).toLocaleString();
+        $('login-counter-logouts').textContent = Number(data.logouts || 0).toLocaleString();
+        $('login-counter-cycles').textContent = Number(data.cycles || 0).toLocaleString();
+        $('login-counter-errors').textContent = Number(data.errors || 0).toLocaleString();
+
+        var elapsed = Number(data.elapsed || 0);
+        var cycles = Number(data.cycles || 0);
+        var targetCycles = Number(data.target_cycles || 0);
+        var phase = data.phase || 'RUNNING';
+        var denom = elapsed > 0 ? elapsed : 1;
+
+        $('login-ops-per-sec').textContent =
+            'LOGON/s ' + ((Number(data.logons || 0)) / denom).toFixed(1) +
+            ' · QRY/s ' + ((Number(data.queries || 0)) / denom).toFixed(1) +
+            ' · LOGOFF/s ' + ((Number(data.logouts || 0)) / denom).toFixed(1) +
+            ' · AVG cycle ' + Number(data.avg_cycle_ms || 0).toFixed(1) + ' ms';
+
+        if (phase !== 'RUNNING') {
+            var finalPct = targetCycles > 0 ? Math.min(100, (cycles / Math.max(targetCycles, 1)) * 100) : 100;
+            $('login-progress-fill').style.width = finalPct.toFixed(1) + '%';
+            $('login-progress-pct').textContent = phase;
+            $('login-progress-text').textContent = data.status_message || ('Login workload ' + phase.toLowerCase());
+            $('login-elapsed-badge').textContent = targetCycles > 0
+                ? (Number(cycles).toLocaleString() + ' / ' + Number(targetCycles).toLocaleString() + ' cycles')
+                : (Number(cycles).toLocaleString() + ' cycles');
+            return;
+        }
+
+        if (targetCycles > 0) {
+            var pct = Math.min(100, (cycles / Math.max(targetCycles, 1)) * 100);
+            $('login-progress-fill').style.width = pct.toFixed(1) + '%';
+            $('login-progress-pct').textContent = pct.toFixed(0) + '%';
+            $('login-elapsed-badge').textContent = Number(cycles).toLocaleString() + ' / ' + Number(targetCycles).toLocaleString() + ' cycles';
+        } else {
+            $('login-progress-fill').style.width = '100%';
+            $('login-progress-pct').textContent = 'OPEN';
+            $('login-elapsed-badge').textContent = Number(cycles).toLocaleString() + ' cycles';
+        }
+
+        $('login-progress-text').textContent = 'Running — ' + Math.floor(elapsed) + 's elapsed';
+    }
+
+    function showLoginCompletionSummary(msg) {
+        loginWorkloadRunning = false;
+        $('btn-start-login-workload').disabled = false;
+        $('btn-stop-login-workload').disabled = true;
+        $('login-live-dashboard').style.display = 'none';
+        renderRunningLoginWorkloadBanner(null);
+
+        var s = msg.summary || {};
+        var targetCycles = Number(s.target_cycles || 0);
+        var cycles = Number(s.cycles || 0);
+        var phase = String(s.phase || '').toUpperCase();
+        var isStopped = phase === 'STOPPED' || phase === 'STOPPING';
+        var title = isStopped ? 'Login Workload Stopped' : 'Login Workload Complete';
+
+        var html = '<div class="summary-card">';
+        html += '<div class="summary-card-header">';
+        html += '<h3>&#10003; ' + escapeHtml(title) + '</h3>';
+        html += '<span class="summary-stats">';
+        html += 'Logons&nbsp;<b>' + Number(s.logons || 0).toLocaleString() + '</b>&emsp;';
+        html += 'Queries&nbsp;<b>' + Number(s.queries || 0).toLocaleString() + '</b>&emsp;';
+        html += 'Logouts&nbsp;<b>' + Number(s.logouts || 0).toLocaleString() + '</b>&emsp;';
+        html += 'Cycles&nbsp;<b>' + cycles.toLocaleString() + '</b>&emsp;';
+        html += 'Errors&nbsp;<b>' + Number(s.errors || 0).toLocaleString() + '</b>&emsp;';
+        html += 'Avg Cycle&nbsp;<b>' + Number(s.avg_cycle_ms || 0).toFixed(1) + ' ms</b>&emsp;';
+        html += 'Elapsed&nbsp;<b>' + Number(s.elapsed || 0).toFixed(1) + ' s</b>';
+        html += '</span>';
+        html += '</div>';
+        html += '<div class="status-box status-info" style="margin-top:0">';
+        html += 'Target cycles: <b>' + escapeHtml(targetCycles > 0 ? targetCycles.toLocaleString() : 'open-ended') +
+            '</b> · Completed cycles: <b>' + escapeHtml(cycles.toLocaleString()) + '</b>';
+        if (s.status_message) {
+            html += ' · Status: <b>' + escapeHtml(s.status_message) + '</b>';
+        }
+        html += '</div></div>';
+        $('login-workload-summary').innerHTML = html;
+    }
+
+    async function loadLoginWorkloadStatus() {
+        try {
+            var statusUrl = buildLoginWorkloadStatusUrl();
+            if (!statusUrl) {
+                loginWorkloadRunning = false;
+                $('btn-start-login-workload').disabled = false;
+                $('btn-stop-login-workload').disabled = true;
+                $('login-live-dashboard').style.display = 'none';
+                renderRunningLoginWorkloadBanner(null);
+                return;
+            }
+
+            var data = await api('GET', statusUrl);
+            var running = !!data.running;
+            var otherConnectionRunning = !!data.other_login_workload_running;
+
+            loginWorkloadRunning = running;
+            $('btn-start-login-workload').disabled = running || otherConnectionRunning;
+            $('btn-stop-login-workload').disabled = !running;
+            renderRunningLoginWorkloadBanner(data);
+
+            if (running) {
+                $('login-live-dashboard').style.display = 'block';
+                updateLoginProgress(data);
+                ensureWebSocket();
+            } else {
+                $('login-live-dashboard').style.display = 'none';
+            }
+        } catch (e) {
+            loginWorkloadRunning = false;
+            $('btn-start-login-workload').disabled = false;
+            $('btn-stop-login-workload').disabled = true;
+            $('login-live-dashboard').style.display = 'none';
+            renderRunningLoginWorkloadBanner(null);
         }
     }
 
@@ -1030,25 +1374,58 @@
             try { msg = JSON.parse(event.data); } catch (e) { return; }
 
             switch (msg.type) {
-                case 'progress':        updateProgress(msg.data); break;
-                case 'gc_snapshot':     updateGCChart(msg.data); break;
+                case 'progress':
+                    if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                    updateProgress(msg.data);
+                    break;
+                case 'login_progress':
+                    if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                    updateLoginProgress(msg.data);
+                    break;
+                case 'gc_snapshot':
+                    if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                    updateGCChart(msg.data);
+                    break;
                 case 'schema_progress': appendSchemaLog(msg.message); break;
                 case 'schema_complete': appendSchemaLog(msg.message); loadSchemaState(); loadSchemas(); break;
-                case 'complete':        showCompletionSummary(msg); break;
+                case 'complete':
+                    if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                    showCompletionSummary(msg);
+                    break;
+                case 'login_complete':
+                    if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                    showLoginCompletionSummary(msg);
+                    break;
                 case 'info':
-                    appendWorkloadNotice(msg.message, 'info');
+                    if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                    if (msg.source === 'login_workload') {
+                        appendLoginWorkloadNotice(msg.message, 'info');
+                    } else {
+                        appendWorkloadNotice(msg.message, 'info');
+                    }
                     break;
                 case 'warning':
                     if (msg.source === 'schema') {
                         appendSchemaLog('WARNING: ' + msg.message);
+                    } else if (msg.source === 'login_workload') {
+                        if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                        appendLoginWorkloadNotice(msg.message, 'warning');
                     } else {
+                        if (!workloadMessageMatchesCurrentConnection(msg)) break;
                         appendWorkloadNotice(msg.message, 'warning');
                     }
                     break;
                 case 'error':
                     if (msg.source === 'schema') {
                         appendSchemaLog('ERROR: ' + msg.message);
+                    } else if (msg.source === 'login_workload') {
+                        if (!workloadMessageMatchesCurrentConnection(msg)) break;
+                        appendLoginWorkloadNotice(msg.message, 'error');
+                        loginWorkloadRunning = false;
+                        $('btn-start-login-workload').disabled = false;
+                        $('btn-stop-login-workload').disabled = true;
                     } else {
+                        if (!workloadMessageMatchesCurrentConnection(msg)) break;
                         appendWorkloadNotice(msg.message, 'error');
                         // Reset workload button state on fatal error
                         workloadRunning = false;
@@ -1062,7 +1439,7 @@
         ws.onclose = function () {
             $('ws-dot').classList.remove('connected');
             $('ws-label').textContent = 'Disconnected';
-            if (workloadRunning) {
+            if (workloadRunning || loginWorkloadRunning) {
                 setTimeout(ensureWebSocket, 3000);
             }
         };
@@ -1439,6 +1816,7 @@
         // Sliders
         bindSlider('wl-threads', 'thread-count-val', 'wl-threads-input');
         bindSlider('wl-hotrow', 'hot-row-val');
+        bindSlider('login-thread-count', 'login-thread-count-val', 'login-thread-count-input');
 
         // Partition radio change
         document.querySelectorAll('input[name="partition"]').forEach(function (r) {
@@ -1515,6 +1893,8 @@
         // Workload buttons
         $('btn-start-workload').addEventListener('click', startWorkload);
         $('btn-stop-workload').addEventListener('click', stopWorkload);
+        $('btn-start-login-workload').addEventListener('click', startLoginWorkload);
+        $('btn-stop-login-workload').addEventListener('click', stopLoginWorkload);
 
         // Results buttons
         $('btn-compare').addEventListener('click', compareSelected);
@@ -1533,7 +1913,9 @@
         // Connect WebSocket proactively
         ensureWebSocket();
         loadWorkloadStatus();
+        loadLoginWorkloadStatus();
         setInterval(loadWorkloadStatus, 5000);
+        setInterval(loadLoginWorkloadStatus, 5000);
         startDbActivityPolling();
         startCpoolStatsPolling();
     }

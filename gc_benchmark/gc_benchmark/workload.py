@@ -19,8 +19,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import oracledb
+from oracle_session import DEFAULT_CALL_TIMEOUT_MS, apply_call_timeout
 
-_MAX_PHYSICAL_WORKERS = 256
+_MAX_PHYSICAL_WORKERS = 64
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ class WorkloadConfig:
     mode: str = "thin"
     table_prefix: str = "GCB"
     table_count: int = 10
-    thread_count: int = 8           # 2..32
+    thread_count: int = 8           # requested worker count for this process
     duration_seconds: int = 60
     hot_row_pct: int = 5            # 1..10
     seed_rows: int = 500
@@ -56,6 +57,7 @@ class WorkloadConfig:
     #              LMS process queue and force "congested" waits
     contention_mode: str = "NORMAL"   # NORMAL | HAMMER | LMS_STRESS
     lock_hold_ms: int = 0              # ms to hold lock before UPDATE (HAMMER only)
+    call_timeout_ms: int = DEFAULT_CALL_TIMEOUT_MS
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ class WorkloadRunner:
         self._stop_event.set()
         if self.status.phase in ("PREPARING", "WARMING") and not self._threads:
             self.status.running = False
-            self.status.set_phase("STOPPING", "Stopping preparation...")
+            self.status.set_phase("STOPPED", "Preparation stopped.")
             return self.status.to_dict(
                 duration=self._config.duration_seconds if self._config else 0,
             )
@@ -272,6 +274,11 @@ class WorkloadRunner:
         if self._start_time:
             self.status.elapsed = time.monotonic() - self._start_time
         self.status.running = False
+        if self.status.phase not in ("ERROR", "STOPPED", "COMPLETE"):
+            if self._config and self.status.elapsed + 0.01 >= self._config.duration_seconds:
+                self.status.set_phase("COMPLETE", "Timed workload finished.")
+            else:
+                self.status.set_phase("STOPPED", "Workload stopped.")
 
         if self._pool:
             try:
@@ -334,6 +341,7 @@ class WorkloadRunner:
         conn = None
         try:
             conn = self._pool.acquire()
+            apply_call_timeout(conn, cfg.call_timeout_ms)
             cursor = conn.cursor()
             commit_counter = 0
 
@@ -439,6 +447,7 @@ class WorkloadRunner:
         conn = None
         try:
             conn = self._pool.acquire()
+            apply_call_timeout(conn, cfg.call_timeout_ms)
             cursor = conn.cursor()
             ops = 0
 
@@ -555,6 +564,7 @@ class WorkloadRunner:
         conn = None
         try:
             conn = self._pool.acquire()
+            apply_call_timeout(conn, cfg.call_timeout_ms)
             cursor = conn.cursor()
 
             while not self._stop_event.is_set():
@@ -700,6 +710,7 @@ class WorkloadRunner:
 
         conn = self._pool.acquire()
         try:
+            apply_call_timeout(conn, cfg.call_timeout_ms)
             cursor = conn.cursor()
             tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
 
@@ -779,6 +790,7 @@ class WorkloadRunner:
                 return
             conn = self._pool.acquire()
             try:
+                apply_call_timeout(conn, self._config.call_timeout_ms)
                 cur = conn.cursor()
                 cur.execute("SELECT 1 FROM dual")
                 cur.fetchone()

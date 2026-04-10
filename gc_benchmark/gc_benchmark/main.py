@@ -16,13 +16,16 @@ import configparser
 import json
 import os
 import queue
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from tempfile import NamedTemporaryFile
+from typing import Any, Callable, Optional
 
 import oracledb
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -32,8 +35,6 @@ from fastapi.staticfiles import StaticFiles
 from schema import (
     SchemaConfig,
     preview_ddl,
-    create_schema,
-    create_schema_parallel,
     drop_schema,
     drop_tables_by_prefix,
     get_table_names,
@@ -47,7 +48,18 @@ from metrics import (
     GC_SYSTEM_EVENTS,
     PRIMARY_GC_EVENTS,
 )
-from workload import WorkloadConfig, WorkloadRunner
+from login_workload import LoginWorkloadConfig
+from oracle_session import (
+    MAX_TOTAL_GC_WORKERS,
+    MAX_TOTAL_LOGIN_WORKERS,
+    SUBPROCESS_FORCE_KILL_SECONDS,
+    SUBPROCESS_STOP_GRACE_SECONDS,
+    build_connection_state,
+    build_dsn_from_state,
+    connect_from_state,
+    shard_worker_counts,
+)
+from workload import WorkloadConfig
 import report
 
 # ---------------------------------------------------------------------------
@@ -84,7 +96,9 @@ _cpool_conn_state: dict = {
     "mode": "thin",
 }
 
-_runner: Optional[WorkloadRunner] = None
+_runner: Optional[Any] = None
+_login_runner: Optional[Any] = None
+_schema_job = None
 _ws_clients: list[WebSocket] = []
 _ws_lock = asyncio.Lock()
 
@@ -106,50 +120,22 @@ _schema_state: dict = {
 
 def _dsn() -> str:
     """Build a connect-string from the current state."""
-    return f"{_conn_state['host']}:{_conn_state['port']}/{_conn_state['service_name']}"
+    return build_dsn_from_state(_conn_state)
 
 
 def _get_connection():
     """Create a new Oracle connection from the current state."""
-    mode = _conn_state.get("mode", "thin")
-    if mode == "thick":
-        try:
-            if oracledb.is_thin_mode():
-                oracledb.init_oracle_client()
-        except Exception:
-            pass
-
-    return oracledb.connect(
-        user=_conn_state["user"],
-        password=_conn_state["password"],
-        dsn=_dsn(),
-    )
+    return connect_from_state(_conn_state)
 
 
 def _cpool_dsn() -> str:
     """Build a connect-string for the CDB pool-stats connection."""
-    return (
-        f"{_cpool_conn_state['host']}:"
-        f"{_cpool_conn_state['port']}/"
-        f"{_cpool_conn_state['service_name']}"
-    )
+    return build_dsn_from_state(_cpool_conn_state)
 
 
 def _get_cpool_connection():
     """Create a new Oracle connection for GV$CPOOL_STATS queries."""
-    mode = _cpool_conn_state.get("mode", "thin")
-    if mode == "thick":
-        try:
-            if oracledb.is_thin_mode():
-                oracledb.init_oracle_client()
-        except Exception:
-            pass
-
-    return oracledb.connect(
-        user=_cpool_conn_state["user"],
-        password=_cpool_conn_state["password"],
-        dsn=_cpool_dsn(),
-    )
+    return connect_from_state(_cpool_conn_state)
 
 
 def _restart_pdb_with_cdb_connection(pdb_name: str) -> list[str]:
@@ -183,6 +169,36 @@ def _restart_pdb_with_cdb_connection(pdb_name: str) -> list[str]:
     finally:
         conn.close()
     return steps
+
+
+def _normalize_login_sql(sql_text: str) -> str:
+    """Validate the login simulation SQL and normalize trailing delimiters."""
+    sql = (sql_text or "").strip()
+    while sql.endswith(";"):
+        sql = sql[:-1].rstrip()
+    if not sql:
+        raise ValueError("Enter a SQL query for Login Workload Simulation.")
+    first_token = sql.split(None, 1)[0].upper()
+    if first_token not in {"SELECT", "WITH"}:
+        raise ValueError(
+            "Login Workload Simulation only supports SELECT or WITH queries."
+        )
+    return sql
+
+
+def _validate_login_query(sql_text: str, state: Optional[dict] = None) -> None:
+    """Run the login-simulation query once before starting many workers."""
+    conn = connect_from_state(state or _conn_state)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.arraysize = 1
+            cur.execute(sql_text)
+            cur.fetchmany(1)
+        finally:
+            cur.close()
+    finally:
+        conn.close()
 
 
 def _load_recent_conns() -> list[dict]:
@@ -294,6 +310,103 @@ def _save_config() -> None:
     }
     with open(CONFIG_PATH, "w") as f:
         cp.write(f)
+
+
+def _connection_key(
+    host: str = "",
+    port: int = 0,
+    service_name: str = "",
+    user: str = "",
+) -> dict:
+    """Return a comparable connection identity payload."""
+    try:
+        port_value = int(port or 0)
+    except Exception:
+        port_value = 0
+    return {
+        "host": str(host or "").strip(),
+        "port": port_value,
+        "service_name": str(service_name or "").strip(),
+        "user": str(user or "").strip(),
+    }
+
+
+def _connection_key_from_state(state: dict) -> dict:
+    """Build a connection identity from a connection-state dict."""
+    return _connection_key(
+        host=state.get("host", ""),
+        port=state.get("port", 0),
+        service_name=state.get("service_name", ""),
+        user=state.get("user", ""),
+    )
+
+
+def _normalized_connection_key(key: Optional[dict]) -> Optional[tuple[str, int, str, str]]:
+    """Return a normalized tuple for case-insensitive connection matching."""
+    if not key:
+        return None
+    raw = _connection_key(
+        host=key.get("host", ""),
+        port=key.get("port", 0),
+        service_name=key.get("service_name", ""),
+        user=key.get("user", ""),
+    )
+    return (
+        raw["host"].lower(),
+        raw["port"],
+        raw["service_name"].lower(),
+        raw["user"].lower(),
+    )
+
+
+def _has_connection_key(key: Optional[dict]) -> bool:
+    """True when at least one identity field is populated."""
+    if not key:
+        return False
+    raw = _connection_key(
+        host=key.get("host", ""),
+        port=key.get("port", 0),
+        service_name=key.get("service_name", ""),
+        user=key.get("user", ""),
+    )
+    return bool(raw["host"] or raw["service_name"] or raw["user"])
+
+
+def _same_connection(left: Optional[dict], right: Optional[dict]) -> bool:
+    """Return True when two connection identities refer to the same DB login."""
+    if not (_has_connection_key(left) and _has_connection_key(right)):
+        return False
+    return _normalized_connection_key(left) == _normalized_connection_key(right)
+
+
+def _format_connection_key(key: Optional[dict]) -> str:
+    """Render a connection identity in the same form the UI uses."""
+    if not _has_connection_key(key):
+        return "unknown connection"
+    raw = _connection_key(
+        host=key.get("host", ""),
+        port=key.get("port", 0),
+        service_name=key.get("service_name", ""),
+        user=key.get("user", ""),
+    )
+    return (
+        f"{raw['user'] or '?'}@{raw['host'] or '?'}:{raw['port'] or '?'}"
+        f"/{raw['service_name'] or '?'}"
+    )
+
+
+def _workload_message(msg: dict, connection_key: Optional[dict]) -> dict:
+    """Attach workload connection metadata so clients can scope live events."""
+    payload = dict(msg)
+    if _has_connection_key(connection_key):
+        payload["connection_key"] = _connection_key(
+            host=connection_key.get("host", ""),
+            port=connection_key.get("port", 0),
+            service_name=connection_key.get("service_name", ""),
+            user=connection_key.get("user", ""),
+        )
+        payload["connection_label"] = _format_connection_key(connection_key)
+    return payload
 
 
 async def _broadcast(msg: dict) -> None:
@@ -622,6 +735,559 @@ def _kill_sessions_for_user_parallel(connection_factory, username: str):
 
 
 # ---------------------------------------------------------------------------
+# Subprocess controllers
+# ---------------------------------------------------------------------------
+
+def _last_nonempty(values: list[str]) -> str:
+    for value in reversed(values):
+        if value:
+            return value
+    return ""
+
+
+def _aggregate_workload_metrics(statuses: list[dict]) -> dict:
+    return {
+        "inserts": sum(int(s.get("inserts", 0) or 0) for s in statuses),
+        "updates": sum(int(s.get("updates", 0) or 0) for s in statuses),
+        "deletes": sum(int(s.get("deletes", 0) or 0) for s in statuses),
+        "selects": sum(int(s.get("selects", 0) or 0) for s in statuses),
+        "errors": sum(int(s.get("errors", 0) or 0) for s in statuses),
+    }
+
+
+def _aggregate_login_metrics(statuses: list[dict]) -> dict:
+    cycles = sum(int(s.get("cycles", 0) or 0) for s in statuses)
+    weighted_cycle_ms = sum(
+        float(s.get("avg_cycle_ms", 0) or 0) * int(s.get("cycles", 0) or 0)
+        for s in statuses
+    )
+    avg_cycle_ms = (weighted_cycle_ms / cycles) if cycles > 0 else 0.0
+    return {
+        "logons": sum(int(s.get("logons", 0) or 0) for s in statuses),
+        "queries": sum(int(s.get("queries", 0) or 0) for s in statuses),
+        "logouts": sum(int(s.get("logouts", 0) or 0) for s in statuses),
+        "cycles": cycles,
+        "errors": sum(int(s.get("errors", 0) or 0) for s in statuses),
+        "active_connections": sum(int(s.get("active_connections", 0) or 0) for s in statuses),
+        "target_cycles": sum(int(s.get("target_cycles", 0) or 0) for s in statuses),
+        "avg_cycle_ms": round(avg_cycle_ms, 2),
+    }
+
+
+class _StatusProxy:
+    def __init__(self, controller: "ShardedSubprocessController") -> None:
+        self._controller = controller
+
+    @property
+    def running(self) -> bool:
+        return bool(self.to_dict().get("running"))
+
+    def to_dict(self) -> dict:
+        return self._controller.status_dict()
+
+
+class ShardedSubprocessController:
+    """Run heavy benchmark jobs in child processes and aggregate live status."""
+
+    def __init__(
+        self,
+        *,
+        job_type: str,
+        job_label: str,
+        base_config: dict,
+        requested_threads: int,
+        total_cap: int,
+        aggregate_metrics: Callable[[list[dict]], dict],
+        progress_event: str,
+        complete_event: str,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+        complete_callback: Optional[Callable[[dict], None]] = None,
+        error_callback: Optional[Callable[[str], None]] = None,
+        connection_key: Optional[dict] = None,
+    ) -> None:
+        self._job_type = job_type
+        self._job_label = job_label
+        self._base_config = dict(base_config)
+        self._requested_threads = max(1, int(requested_threads or 1))
+        self._shards = shard_worker_counts(self._requested_threads, total_cap)
+        self._worker_count = sum(self._shards)
+        self._process_count = len(self._shards)
+        self._aggregate_metrics = aggregate_metrics
+        self._progress_event = progress_event
+        self._complete_event = complete_event
+        self._progress_callback = progress_callback
+        self._complete_callback = complete_callback
+        self._error_callback = error_callback
+        self._connection_key = connection_key or {}
+
+        self._lock = threading.Lock()
+        self._procs: dict[int, subprocess.Popen] = {}
+        self._monitor_threads: list[threading.Thread] = []
+        self._spec_paths: dict[int, str] = {}
+        self._shard_status: dict[int, dict] = {}
+        self._completed_shards: set[int] = set()
+        self._errors: list[str] = []
+        self._done_event = threading.Event()
+        self._stop_requested = False
+        self._fatal_error = False
+        self._forced_stop_count = 0
+        self._start_monotonic = time.monotonic()
+        self._initial_notice = self._build_initial_notice()
+        self._status_data = {
+            **self._aggregate_metrics([]),
+            "elapsed": 0.0,
+            "running": True,
+            "phase": "PREPARING",
+            "status_message": self._initial_notice,
+            "last_error": "",
+        }
+        self.status = _StatusProxy(self)
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self.status.running)
+
+    @property
+    def done_event(self) -> threading.Event:
+        return self._done_event
+
+    def _build_initial_notice(self) -> str:
+        message = (
+            f"Using {self._process_count} child process(es) and "
+            f"{self._worker_count} physical worker(s)."
+        )
+        if self._worker_count != self._requested_threads:
+            message += (
+                f" Requested {self._requested_threads}, capped at {self._worker_count}."
+            )
+        return message
+
+    def _active_process_count(self) -> int:
+        return sum(1 for proc in self._procs.values() if proc.poll() is None)
+
+    def _safe_callback(self, callback: Optional[Callable], *args) -> None:
+        if not callback:
+            return
+        try:
+            callback(*args)
+        except Exception:
+            pass
+
+    def _write_spec(self, payload: dict) -> str:
+        handle = NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            prefix=f"gcb-{self._job_type}-",
+            delete=False,
+        )
+        try:
+            json.dump(payload, handle)
+            handle.flush()
+            return handle.name
+        finally:
+            handle.close()
+
+    def start(self) -> None:
+        try:
+            for shard_index, shard_workers in enumerate(self._shards):
+                shard_config = dict(self._base_config)
+                shard_config["thread_count"] = shard_workers
+                spec_path = self._write_spec({
+                    "shard_index": shard_index,
+                    "config": shard_config,
+                })
+                proc = subprocess.Popen(
+                    [sys.executable, str(BASE_DIR / "job_worker.py"), self._job_type, spec_path],
+                    cwd=str(BASE_DIR),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                self._spec_paths[shard_index] = spec_path
+                self._procs[shard_index] = proc
+                monitor = threading.Thread(
+                    target=self._monitor_process,
+                    args=(shard_index, proc, spec_path),
+                    name=f"{self._job_type}-monitor-{shard_index}",
+                    daemon=True,
+                )
+                monitor.start()
+                self._monitor_threads.append(monitor)
+        except Exception:
+            for proc in self._procs.values():
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            for spec_path in self._spec_paths.values():
+                try:
+                    os.unlink(spec_path)
+                except Exception:
+                    pass
+            raise
+
+    def stop(
+        self,
+        grace_seconds: float = SUBPROCESS_STOP_GRACE_SECONDS,
+        force_kill_seconds: float = SUBPROCESS_FORCE_KILL_SECONDS,
+    ) -> dict:
+        with self._lock:
+            self._stop_requested = True
+            active = bool(self._active_process_count())
+            snapshot = self._build_status_snapshot(
+                running_override=active,
+                force_phase="STOPPING" if active else "STOPPED",
+            )
+            self._status_data = snapshot
+        self._safe_callback(self._progress_callback, snapshot)
+
+        for proc in self._procs.values():
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+        deadline = time.monotonic() + max(0.0, grace_seconds)
+        while time.monotonic() < deadline and self._active_process_count():
+            time.sleep(0.2)
+
+        alive = [proc for proc in self._procs.values() if proc.poll() is None]
+        if alive:
+            self._forced_stop_count += len(alive)
+            for proc in alive:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            deadline = time.monotonic() + max(0.0, force_kill_seconds)
+            while time.monotonic() < deadline and self._active_process_count():
+                time.sleep(0.2)
+
+        self._done_event.wait(timeout=force_kill_seconds + 1.0)
+        return self.status_dict()
+
+    def status_dict(self) -> dict:
+        with self._lock:
+            return dict(self._status_data)
+
+    def _monitor_process(self, shard_index: int, proc: subprocess.Popen, spec_path: str) -> None:
+        try:
+            stream = proc.stdout
+            if stream is not None:
+                for raw_line in stream:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        self._record_error(
+                            f"{self._job_label} child {shard_index + 1} emitted non-JSON output: {line}"
+                        )
+                        continue
+                    self._handle_event(shard_index, payload)
+
+            return_code = proc.wait()
+            if return_code != 0 and shard_index not in self._completed_shards:
+                self._record_error(
+                    f"{self._job_label} child {shard_index + 1} exited with code {return_code}."
+                )
+        finally:
+            try:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                os.unlink(spec_path)
+            except Exception:
+                pass
+            self._maybe_finalize()
+
+    def _record_error(self, message: str) -> None:
+        with self._lock:
+            self._fatal_error = True
+            self._stop_requested = True
+            self._errors.append(message)
+            active = bool(self._active_process_count())
+            snapshot = self._build_status_snapshot(
+                running_override=active,
+                force_phase="ERROR" if not active else "STOPPING",
+            )
+            self._status_data = snapshot
+        for proc in self._procs.values():
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        self._safe_callback(self._error_callback, message)
+        self._safe_callback(self._progress_callback, snapshot)
+
+    def _handle_event(self, shard_index: int, payload: dict) -> None:
+        event = str(payload.get("event", "")).strip()
+        if event == self._progress_event:
+            data = payload.get("data", {})
+            if isinstance(data, dict):
+                with self._lock:
+                    self._shard_status[shard_index] = dict(data)
+                    snapshot = self._build_status_snapshot()
+                    self._status_data = snapshot
+                self._safe_callback(self._progress_callback, snapshot)
+            return
+
+        if event == self._complete_event:
+            summary = payload.get("summary", {})
+            if isinstance(summary, dict):
+                with self._lock:
+                    self._completed_shards.add(shard_index)
+                    self._shard_status[shard_index] = dict(summary)
+                    active = bool(self._active_process_count())
+                    snapshot = self._build_status_snapshot(running_override=active)
+                    self._status_data = snapshot
+                self._safe_callback(self._progress_callback, snapshot)
+            return
+
+        if event == "error":
+            summary = payload.get("summary", {})
+            if isinstance(summary, dict):
+                with self._lock:
+                    self._shard_status[shard_index] = dict(summary)
+            self._record_error(str(payload.get("message", "Child worker failed.")))
+            return
+
+    def _build_status_snapshot(
+        self,
+        *,
+        running_override: Optional[bool] = None,
+        force_phase: str = "",
+    ) -> dict:
+        statuses = [dict(value) for value in self._shard_status.values()]
+        metrics = self._aggregate_metrics(statuses)
+        running = bool(self._active_process_count()) if running_override is None else bool(running_override)
+        elapsed = time.monotonic() - self._start_monotonic if self._start_monotonic else 0.0
+        if statuses:
+            elapsed = max(elapsed, max(float(s.get("elapsed", 0) or 0) for s in statuses))
+
+        last_error = _last_nonempty(
+            [str(s.get("last_error", "")).strip() for s in statuses] + self._errors
+        )
+        last_message = _last_nonempty(
+            [str(s.get("status_message", "")).strip() for s in statuses]
+        )
+
+        phase = force_phase or self._derive_phase(statuses, running=running)
+        status_message = self._derive_message(
+            phase=phase,
+            running=running,
+            last_message=last_message,
+            last_error=last_error,
+        )
+
+        return {
+            **metrics,
+            "elapsed": round(elapsed, 1),
+            "running": running,
+            "phase": phase,
+            "status_message": status_message,
+            "last_error": last_error,
+        }
+
+    def _derive_phase(self, statuses: list[dict], *, running: bool) -> str:
+        phases = [str(s.get("phase", "")).strip().upper() for s in statuses]
+        if self._fatal_error:
+            return "ERROR"
+        if self._stop_requested and running:
+            return "STOPPING"
+        if "PREPARING" in phases:
+            return "PREPARING"
+        if "WARMING" in phases:
+            return "WARMING"
+        if "RUNNING" in phases or running:
+            return "RUNNING" if not self._stop_requested else "STOPPING"
+        if self._stop_requested:
+            return "STOPPED"
+        if "STOPPED" in phases:
+            return "STOPPED"
+        if "ERROR" in phases:
+            return "ERROR"
+        return "COMPLETE"
+
+    def _derive_message(
+        self,
+        *,
+        phase: str,
+        running: bool,
+        last_message: str,
+        last_error: str,
+    ) -> str:
+        if phase == "ERROR":
+            return last_error or f"{self._job_label} failed."
+        if phase == "STOPPING":
+            return "Stopping child workers and waiting for Oracle calls to timeout..."
+        if phase == "STOPPED":
+            if self._forced_stop_count > 0:
+                return f"{self._job_label} stopped after forcing {self._forced_stop_count} child process(es)."
+            return f"{self._job_label} stopped."
+        if phase == "COMPLETE":
+            return f"{self._job_label} finished."
+        if last_message:
+            return last_message
+        if running:
+            return self._initial_notice
+        return ""
+
+    def _maybe_finalize(self) -> None:
+        if self._done_event.is_set():
+            return
+        if self._active_process_count() > 0:
+            return
+        with self._lock:
+            if self._done_event.is_set():
+                return
+            snapshot = self._build_status_snapshot(running_override=False)
+            if snapshot["phase"] in ("PREPARING", "WARMING", "RUNNING", "STOPPING"):
+                snapshot["phase"] = "ERROR" if self._fatal_error else ("STOPPED" if self._stop_requested else "COMPLETE")
+                snapshot["status_message"] = self._derive_message(
+                    phase=snapshot["phase"],
+                    running=False,
+                    last_message=snapshot.get("status_message", ""),
+                    last_error=snapshot.get("last_error", ""),
+                )
+            snapshot["running"] = False
+            self._status_data = snapshot
+            self._done_event.set()
+        self._safe_callback(self._progress_callback, snapshot)
+        self._safe_callback(self._complete_callback, snapshot)
+
+
+class SchemaCreateController:
+    """Run schema creation in a child process so table-build threads stay out of FastAPI."""
+
+    def __init__(
+        self,
+        *,
+        config: dict,
+        connection_state: dict,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        complete_callback: Optional[Callable[[str], None]] = None,
+        error_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self._config = dict(config)
+        self._connection_state = build_connection_state(connection_state)
+        self._progress_callback = progress_callback
+        self._complete_callback = complete_callback
+        self._error_callback = error_callback
+        self._lock = threading.Lock()
+        self._running = False
+        self._done_event = threading.Event()
+        self._proc: Optional[subprocess.Popen] = None
+        self._spec_path = ""
+        self._monitor_thread: Optional[threading.Thread] = None
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    def start(self) -> None:
+        handle = NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            prefix="gcb-schema-",
+            delete=False,
+        )
+        try:
+            json.dump(
+                {
+                    "config": self._config,
+                    "connection_state": self._connection_state,
+                },
+                handle,
+            )
+            handle.flush()
+            self._spec_path = handle.name
+        finally:
+            handle.close()
+
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, str(BASE_DIR / "job_worker.py"), "schema-create", self._spec_path],
+                cwd=str(BASE_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception:
+            try:
+                if self._spec_path:
+                    os.unlink(self._spec_path)
+            except Exception:
+                pass
+            raise
+        with self._lock:
+            self._running = True
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_process,
+            name="schema-create-monitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+
+    def _monitor_process(self) -> None:
+        try:
+            stream = self._proc.stdout if self._proc else None
+            if stream is not None:
+                for raw_line in stream:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        self._safe_callback(
+                            self._error_callback,
+                            f"Schema create child emitted non-JSON output: {line}",
+                        )
+                        continue
+                    event = str(payload.get("event", "")).strip()
+                    if event == "schema_progress":
+                        self._safe_callback(self._progress_callback, str(payload.get("message", "")))
+                    elif event == "schema_complete":
+                        self._safe_callback(self._complete_callback, str(payload.get("message", "Schema creation finished.")))
+                    elif event == "schema_error":
+                        self._safe_callback(self._error_callback, str(payload.get("message", "Schema creation failed.")))
+            if self._proc is not None:
+                self._proc.wait()
+        finally:
+            with self._lock:
+                self._running = False
+            try:
+                if self._proc and self._proc.stdout is not None:
+                    self._proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if self._spec_path:
+                    os.unlink(self._spec_path)
+            except Exception:
+                pass
+            self._done_event.set()
+
+    def _safe_callback(self, callback: Optional[Callable[[str], None]], arg: str) -> None:
+        if not callback:
+            return
+        try:
+            callback(arg)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
@@ -763,9 +1429,13 @@ async def schema_preview(
 @app.post("/api/schema/create")
 async def schema_create(body: dict):
     """Create the benchmark schema.  Streams progress via WebSocket."""
-    global _schema_state
+    global _schema_job, _schema_state
+    if _schema_job and _schema_job.is_running:
+        return {"ok": False, "message": "A schema creation job is already running."}
+
     cfg = _build_schema_config(body)
     loop = asyncio.get_event_loop()
+    connection_state = build_connection_state(_conn_state)
 
     # Persist schema metadata so the workload run can record it accurately
     part_detail = ""
@@ -785,28 +1455,51 @@ async def schema_create(body: dict):
         "compression":     cfg.compression.upper(),
     })
 
-    def _run():
-        try:
-            for msg in create_schema_parallel(cfg, _get_connection):
-                asyncio.run_coroutine_threadsafe(
-                    _broadcast({"type": "schema_progress", "message": msg}),
-                    loop,
-                )
-            asyncio.run_coroutine_threadsafe(
-                _broadcast({"type": "schema_complete", "message": "Schema creation finished."}),
-                loop,
-            )
-        except oracledb.DatabaseError as exc:
-            asyncio.run_coroutine_threadsafe(
-                _broadcast({"type": "schema_progress", "message": f"ERROR: {exc}"}),
-                loop,
-            )
+    def on_progress(message: str):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast({"type": "schema_progress", "message": message}),
+            loop,
+        )
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    def on_complete(message: str):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast({"type": "schema_complete", "message": message}),
+            loop,
+        )
+
+    def on_error(message: str):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast({"type": "schema_progress", "message": message}),
+            loop,
+        )
+
+    _schema_job = SchemaCreateController(
+        config={
+            "table_prefix": cfg.table_prefix,
+            "table_count": cfg.table_count,
+            "partition_type": cfg.partition_type,
+            "partition_count": cfg.partition_count,
+            "range_interval": cfg.range_interval,
+            "compression": cfg.compression,
+            "seed_rows": cfg.seed_rows,
+        },
+        connection_state=connection_state,
+        progress_callback=on_progress,
+        complete_callback=on_complete,
+        error_callback=on_error,
+    )
+    try:
+        _schema_job.start()
+    except Exception as exc:
+        _schema_job = None
+        return {"ok": False, "message": f"Failed to start schema creation: {exc}"}
+
     return {
         "ok": True,
-        "message": f"Creating {cfg.table_count} tables with {cfg.seed_rows} rows per table...",
+        "message": (
+            f"Creating {cfg.table_count} tables with {cfg.seed_rows} rows per table "
+            f"using a child process."
+        ),
     }
 
 
@@ -1217,7 +1910,11 @@ async def workload_start(body: dict):
     """Start the benchmark workload."""
     global _runner
     if _runner and _runner.is_running:
-        return {"ok": False, "message": "A workload is already running."}
+        message = "A workload is already running."
+        active_connection = getattr(_runner, "_connection_key", None)
+        if _has_connection_key(active_connection):
+            message += f" Active connection: {_format_connection_key(active_connection)}."
+        return {"ok": False, "message": message}
 
     # Guard: password must be set in the current session (not persisted to disk)
     if not _conn_state.get("password"):
@@ -1229,11 +1926,12 @@ async def workload_start(body: dict):
             ),
         }
 
+    connection_state = build_connection_state(_conn_state)
     cfg = WorkloadConfig(
-        dsn=_dsn(),
-        user=_conn_state["user"],
-        password=_conn_state["password"],
-        mode=_conn_state.get("mode", "thin"),
+        dsn=build_dsn_from_state(connection_state),
+        user=connection_state["user"],
+        password=connection_state["password"],
+        mode=connection_state.get("mode", "thin"),
         table_prefix=body.get("table_prefix", "GCB"),
         table_count=max(1, int(body.get("table_count", 10))),
         thread_count=max(2, min(10000, int(body.get("thread_count", 8)))),
@@ -1252,112 +1950,37 @@ async def workload_start(body: dict):
     loop = asyncio.get_event_loop()
     started_at = datetime.now(timezone.utc).isoformat()
     before_snapshot: dict = {}
-
-    # Progress callback — bridges threads → async
-    gc_sample_interval = 2.0
-    last_gc_sample = [0.0]
+    workload_connection_key = _connection_key_from_state(connection_state)
 
     def on_progress(status_dict: dict):
         asyncio.run_coroutine_threadsafe(
-            _broadcast({"type": "progress", "data": status_dict}),
+            _broadcast(_workload_message({"type": "progress", "data": status_dict}, workload_connection_key)),
             loop,
         )
-        # Periodic live GC snapshot for the real-time chart
-        now = time.monotonic()
-        if now - last_gc_sample[0] >= gc_sample_interval:
-            last_gc_sample[0] = now
-            try:
-                c = _get_connection()
-                snap = snapshot_system_events_aggregated(c)
-                c.close()
-                gc_data = {"elapsed": status_dict.get("elapsed", 0), "events": {}}
-                # Send average wait ms since run start for ALL GC events.
-                for ev in GC_SYSTEM_EVENTS:
-                    before_waits = 0
-                    before_time_waited = 0
-                    for k, v in before_snapshot.items():
-                        if k.endswith(f":{ev}"):
-                            before_waits += v.get("total_waits", 0)
-                            before_time_waited += v.get("time_waited_micro", 0)
-                    current = snap.get(ev, {})
-                    delta_waits = current.get("total_waits", 0) - before_waits
-                    delta_time_waited = current.get("time_waited_micro", 0) - before_time_waited
-                    if delta_waits > 0 and delta_time_waited >= 0:
-                        gc_data["events"][ev] = (delta_time_waited / delta_waits) / 1000.0
-                    else:
-                        gc_data["events"][ev] = 0
-                asyncio.run_coroutine_threadsafe(
-                    _broadcast({"type": "gc_snapshot", "data": gc_data}),
-                    loop,
-                )
-            except Exception:
-                pass
 
-    def on_prepare(status_dict: dict):
+    def on_error(message: str):
         asyncio.run_coroutine_threadsafe(
-            _broadcast({"type": "progress", "data": status_dict}),
+            _broadcast(_workload_message({
+                "type": "error",
+                "source": "workload",
+                "message": message,
+            }, workload_connection_key)),
             loop,
         )
 
-    # Prime the live chart immediately so short runs do not appear blank
-    # before the first non-zero GC sample arrives.
-    await _broadcast({
-        "type": "gc_snapshot",
-        "data": {
-            "elapsed": 0,
-            "events": {ev: 0 for ev in GC_SYSTEM_EVENTS},
-        },
-    })
-
-    # Start workload in background threads
-    _runner = WorkloadRunner()
-
-    def _run_workload():
-        try:
-            _runner.prepare(cfg, prepare_callback=on_prepare)
-            if _runner._stop_event.is_set():
-                _runner.stop(timeout=0)
-                return
-            try:
-                conn = _get_connection()
-                before_snapshot.update(snapshot_system_events(conn))
-                conn.close()
-            except Exception as exc:
-                asyncio.run_coroutine_threadsafe(
-                    _broadcast({"type": "warning", "source": "workload", "message": f"Could not capture before snapshot: {exc}"}),
-                    loop,
-                )
-            if _runner._stop_event.is_set():
-                _runner.stop(timeout=0)
-                return
-            _runner.start(progress_callback=on_progress)
-            # Wait for completion
-            while _runner.is_running:
-                time.sleep(0.5)
-        except Exception as exc:
-            asyncio.run_coroutine_threadsafe(
-                _broadcast({"type": "error", "source": "workload", "message": f"Workload error: {exc}"}),
-                loop,
-            )
-            return
-
-        final_status = _runner.stop(timeout=1.0)
-
-        # After snapshot
+    def on_complete(final_status: dict):
         after_snapshot: dict = {}
         try:
-            c = _get_connection()
-            after_snapshot = snapshot_system_events(c)
-            c.close()
+            conn = connect_from_state(connection_state)
+            after_snapshot = snapshot_system_events(conn)
+            conn.close()
         except Exception:
             pass
 
-        # Compute deltas
         delta = compute_delta(before_snapshot, after_snapshot)
         delta_agg = compute_aggregated_delta(before_snapshot, after_snapshot)
         finished_at = datetime.now(timezone.utc).isoformat()
 
-        # Save to SQLite
         async def _save():
             run_id = await report.save_run(
                 DB_PATH,
@@ -1367,8 +1990,6 @@ async def workload_start(body: dict):
                 schema_name=str(body.get("schema_name") or cfg.table_prefix or ""),
                 table_prefix=cfg.table_prefix,
                 table_count=cfg.table_count,
-                # Prefer values sent by the frontend (from selected schema dropdown)
-                # and fall back to the last schema created in this session.
                 partition_type=body.get("partition_type") or _schema_state.get("partition_type", "NONE"),
                 partition_detail=body.get("partition_detail") or _schema_state.get("partition_detail", ""),
                 compression=body.get("compression") or _schema_state.get("compression", "NONE"),
@@ -1383,21 +2004,135 @@ async def workload_start(body: dict):
                 before_snapshot=before_snapshot,
                 after_snapshot=after_snapshot,
             )
-            await _broadcast({
+            await _broadcast(_workload_message({
                 "type": "complete",
                 "run_id": run_id,
                 "summary": {
                     **final_status,
                     "gc_delta": delta_agg,
                 },
-            })
+            }, workload_connection_key))
 
         asyncio.run_coroutine_threadsafe(_save(), loop)
 
-    thread = threading.Thread(target=_run_workload, daemon=True)
-    thread.start()
+    # Prime the live chart immediately so short runs do not appear blank
+    # before the first non-zero GC sample arrives.
+    await _broadcast(_workload_message({
+        "type": "gc_snapshot",
+        "data": {
+            "elapsed": 0,
+            "events": {ev: 0 for ev in GC_SYSTEM_EVENTS},
+        },
+    }, workload_connection_key))
 
-    return {"ok": True, "message": "Workload started."}
+    try:
+        conn = connect_from_state(connection_state)
+        before_snapshot.update(snapshot_system_events(conn))
+        conn.close()
+    except Exception as exc:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(_workload_message({
+                "type": "warning",
+                "source": "workload",
+                "message": f"Could not capture before snapshot: {exc}",
+            }, workload_connection_key)),
+            loop,
+        )
+
+    _runner = ShardedSubprocessController(
+        job_type="workload",
+        job_label="Workload",
+        base_config={
+            "dsn": cfg.dsn,
+            "user": cfg.user,
+            "password": cfg.password,
+            "mode": cfg.mode,
+            "table_prefix": cfg.table_prefix,
+            "table_count": cfg.table_count,
+            "thread_count": cfg.thread_count,
+            "duration_seconds": cfg.duration_seconds,
+            "hot_row_pct": cfg.hot_row_pct,
+            "seed_rows": cfg.seed_rows,
+            "commit_batch": cfg.commit_batch,
+            "insert_pct": cfg.insert_pct,
+            "update_pct": cfg.update_pct,
+            "delete_pct": cfg.delete_pct,
+            "select_pct": cfg.select_pct,
+            "contention_mode": cfg.contention_mode,
+            "lock_hold_ms": cfg.lock_hold_ms,
+            "call_timeout_ms": cfg.call_timeout_ms,
+        },
+        requested_threads=cfg.thread_count,
+        total_cap=MAX_TOTAL_GC_WORKERS,
+        aggregate_metrics=_aggregate_workload_metrics,
+        progress_event="progress",
+        complete_event="complete",
+        progress_callback=on_progress,
+        complete_callback=on_complete,
+        error_callback=on_error,
+        connection_key=workload_connection_key,
+    )
+    _runner._connection_key = workload_connection_key
+    _runner._config = cfg
+    _runner._connection_state = connection_state
+    controller = _runner
+
+    try:
+        controller.start()
+    except Exception as exc:
+        _runner = None
+        return {"ok": False, "message": f"Failed to start workload: {exc}"}
+
+    def sample_gc_live():
+        last_gc_sample = 0.0
+        while not controller.done_event.wait(timeout=0.5):
+            status_dict = controller.status.to_dict()
+            if not status_dict.get("running") or status_dict.get("phase") != "RUNNING":
+                continue
+            now = time.monotonic()
+            if now - last_gc_sample < 2.0:
+                continue
+            last_gc_sample = now
+            try:
+                conn = connect_from_state(connection_state)
+                snap = snapshot_system_events_aggregated(conn)
+                conn.close()
+                gc_data = {"elapsed": status_dict.get("elapsed", 0), "events": {}}
+                for ev in GC_SYSTEM_EVENTS:
+                    before_waits = 0
+                    before_time_waited = 0
+                    for key, value in before_snapshot.items():
+                        if key.endswith(f":{ev}"):
+                            before_waits += value.get("total_waits", 0)
+                            before_time_waited += value.get("time_waited_micro", 0)
+                    current = snap.get(ev, {})
+                    delta_waits = current.get("total_waits", 0) - before_waits
+                    delta_time_waited = current.get("time_waited_micro", 0) - before_time_waited
+                    if delta_waits > 0 and delta_time_waited >= 0:
+                        gc_data["events"][ev] = (delta_time_waited / delta_waits) / 1000.0
+                    else:
+                        gc_data["events"][ev] = 0
+                asyncio.run_coroutine_threadsafe(
+                    _broadcast(_workload_message({"type": "gc_snapshot", "data": gc_data}, workload_connection_key)),
+                    loop,
+                )
+            except Exception:
+                pass
+
+    sampler_thread = threading.Thread(
+        target=sample_gc_live,
+        name="gc-live-sampler",
+        daemon=True,
+    )
+    sampler_thread.start()
+
+    return {
+        "ok": True,
+        "message": (
+            f"Workload started using {controller._worker_count} physical workers "
+            f"across {controller._process_count} child processes."
+        ),
+    }
 
 
 @app.post("/api/workload/stop")
@@ -1411,11 +2146,44 @@ async def workload_stop():
 
 
 @app.get("/api/workload/status")
-async def workload_status():
+async def workload_status(
+    host: str = "",
+    port: int = 0,
+    service_name: str = "",
+    user: str = "",
+):
     """Return current workload status."""
     if not _runner:
         return {"running": False}
+    requested_connection = _connection_key(
+        host=host,
+        port=port,
+        service_name=service_name,
+        user=user,
+    )
+    runner_connection = getattr(_runner, "_connection_key", None)
+    if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
+        if not _same_connection(requested_connection, runner_connection):
+            return {
+                "running": False,
+                "other_workload_running": bool(_runner.status.running),
+                "other_connection_key": _connection_key(
+                    host=runner_connection.get("host", ""),
+                    port=runner_connection.get("port", 0),
+                    service_name=runner_connection.get("service_name", ""),
+                    user=runner_connection.get("user", ""),
+                ),
+                "other_connection_label": _format_connection_key(runner_connection),
+            }
     payload = _runner.status.to_dict()
+    if _has_connection_key(runner_connection):
+        payload["connection_key"] = _connection_key(
+            host=runner_connection.get("host", ""),
+            port=runner_connection.get("port", 0),
+            service_name=runner_connection.get("service_name", ""),
+            user=runner_connection.get("user", ""),
+        )
+        payload["connection_label"] = _format_connection_key(runner_connection)
     cfg = getattr(_runner, "_config", None)
     if cfg:
         payload.update({
@@ -1424,8 +2192,202 @@ async def workload_status():
             "thread_count": getattr(cfg, "thread_count", 0),
             "requested_threads": getattr(cfg, "thread_count", 0),
             "physical_workers": getattr(_runner, "_worker_count", 0),
+            "process_count": getattr(_runner, "_process_count", 0),
             "duration": getattr(cfg, "duration_seconds", payload.get("duration", 0)),
             "contention_mode": getattr(cfg, "contention_mode", "NORMAL"),
+            "execution_model": "pooled child-process workers",
+        })
+    return payload
+
+
+@app.post("/api/login-workload/start")
+async def login_workload_start(body: dict):
+    """Start the repeated login/query/logout simulation."""
+    global _login_runner
+    if _login_runner and _login_runner.is_running:
+        message = "A login workload simulation is already running."
+        active_connection = getattr(_login_runner, "_connection_key", None)
+        if _has_connection_key(active_connection):
+            message += f" Active connection: {_format_connection_key(active_connection)}."
+        return {"ok": False, "message": message}
+
+    if not _conn_state.get("password"):
+        return {
+            "ok": False,
+            "message": (
+                "No password is set for this session. "
+                "Go to the Connection tab, enter your password, and click 'Test Connection' first."
+            ),
+        }
+
+    connection_state = build_connection_state(_conn_state)
+    try:
+        sql_text = _normalize_login_sql(body.get("sql_text", "select 1 from dual"))
+        _validate_login_query(sql_text, state=connection_state)
+    except Exception as exc:
+        return {"ok": False, "message": f"Preflight query failed: {exc}"}
+
+    cfg = LoginWorkloadConfig(
+        dsn=build_dsn_from_state(connection_state),
+        user=connection_state["user"],
+        password=connection_state["password"],
+        mode=connection_state.get("mode", "thin"),
+        sql_text=sql_text,
+        thread_count=max(1, min(1000, int(body.get("thread_count", 20)))),
+        iterations_per_thread=max(0, int(body.get("iterations_per_thread", 1000))),
+        think_time_ms=max(0, min(60000, int(body.get("think_time_ms", 0)))),
+    )
+
+    loop = asyncio.get_event_loop()
+    login_connection_key = _connection_key_from_state(connection_state)
+
+    def on_progress(status_dict: dict):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(
+                _workload_message(
+                    {"type": "login_progress", "data": status_dict},
+                    login_connection_key,
+                )
+            ),
+            loop,
+        )
+
+    def on_error(message: str):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(
+                _workload_message(
+                    {
+                        "type": "error",
+                        "source": "login_workload",
+                        "message": message,
+                    },
+                    login_connection_key,
+                )
+            ),
+            loop,
+        )
+
+    def on_complete(final_status: dict):
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(
+                _workload_message(
+                    {
+                        "type": "login_complete",
+                        "summary": final_status,
+                    },
+                    login_connection_key,
+                )
+            ),
+            loop,
+        )
+
+    _login_runner = ShardedSubprocessController(
+        job_type="login",
+        job_label="Login workload",
+        base_config={
+            "dsn": cfg.dsn,
+            "user": cfg.user,
+            "password": cfg.password,
+            "mode": cfg.mode,
+            "sql_text": cfg.sql_text,
+            "thread_count": cfg.thread_count,
+            "iterations_per_thread": cfg.iterations_per_thread,
+            "think_time_ms": cfg.think_time_ms,
+            "call_timeout_ms": cfg.call_timeout_ms,
+        },
+        requested_threads=cfg.thread_count,
+        total_cap=MAX_TOTAL_LOGIN_WORKERS,
+        aggregate_metrics=_aggregate_login_metrics,
+        progress_event="login_progress",
+        complete_event="login_complete",
+        progress_callback=on_progress,
+        complete_callback=on_complete,
+        error_callback=on_error,
+        connection_key=login_connection_key,
+    )
+    _login_runner._connection_key = login_connection_key
+    _login_runner._config = cfg
+    _login_runner._connection_state = connection_state
+    controller = _login_runner
+
+    try:
+        controller.start()
+    except Exception as exc:
+        _login_runner = None
+        return {"ok": False, "message": f"Failed to start login workload simulation: {exc}"}
+
+    return {
+        "ok": True,
+        "message": (
+            f"Login workload simulation started using {controller._worker_count} physical workers "
+            f"across {controller._process_count} child processes."
+        ),
+    }
+
+
+@app.post("/api/login-workload/stop")
+async def login_workload_stop():
+    """Stop the running login workload simulation."""
+    global _login_runner
+    if not _login_runner or not _login_runner.status.running:
+        return {"ok": False, "message": "No login workload simulation is running."}
+    result = _login_runner.stop()
+    return {"ok": True, "status": result}
+
+
+@app.get("/api/login-workload/status")
+async def login_workload_status(
+    host: str = "",
+    port: int = 0,
+    service_name: str = "",
+    user: str = "",
+):
+    """Return current login workload simulation status."""
+    if not _login_runner:
+        return {"running": False}
+
+    requested_connection = _connection_key(
+        host=host,
+        port=port,
+        service_name=service_name,
+        user=user,
+    )
+    runner_connection = getattr(_login_runner, "_connection_key", None)
+    if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
+        if not _same_connection(requested_connection, runner_connection):
+            return {
+                "running": False,
+                "other_login_workload_running": bool(_login_runner.status.running),
+                "other_connection_key": _connection_key(
+                    host=runner_connection.get("host", ""),
+                    port=runner_connection.get("port", 0),
+                    service_name=runner_connection.get("service_name", ""),
+                    user=runner_connection.get("user", ""),
+                ),
+                "other_connection_label": _format_connection_key(runner_connection),
+            }
+
+    payload = _login_runner.status.to_dict()
+    if _has_connection_key(runner_connection):
+        payload["connection_key"] = _connection_key(
+            host=runner_connection.get("host", ""),
+            port=runner_connection.get("port", 0),
+            service_name=runner_connection.get("service_name", ""),
+            user=runner_connection.get("user", ""),
+        )
+        payload["connection_label"] = _format_connection_key(runner_connection)
+
+    cfg = getattr(_login_runner, "_config", None)
+    if cfg:
+        payload.update({
+            "thread_count": getattr(cfg, "thread_count", 0),
+            "requested_threads": getattr(cfg, "thread_count", 0),
+            "physical_workers": getattr(_login_runner, "_worker_count", 0),
+            "process_count": getattr(_login_runner, "_process_count", 0),
+            "iterations_per_thread": getattr(cfg, "iterations_per_thread", 0),
+            "think_time_ms": getattr(cfg, "think_time_ms", 0),
+            "sql_text": getattr(cfg, "sql_text", ""),
+            "execution_model": "dedicated child-process workers",
         })
     return payload
 

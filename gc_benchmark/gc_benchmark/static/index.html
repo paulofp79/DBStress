@@ -37,6 +37,10 @@
                 <div class="nav-icon">&#9654;</div>
                 <span class="nav-label">Run Workload</span>
             </button>
+            <button class="nav-item" data-tab="login-sim">
+                <div class="nav-icon">&#8646;</div>
+                <span class="nav-label">Login Simulation</span>
+            </button>
             <button class="nav-item" data-tab="results">
                 <div class="nav-icon">&#9776;</div>
                 <span class="nav-label">Results</span>
@@ -655,7 +659,131 @@
             </section>
 
             <!-- ====================================================== -->
-            <!-- TAB 4: Results & Comparison                            -->
+            <!-- TAB 4: Login Workload Simulation                       -->
+            <!-- ====================================================== -->
+            <section id="tab-login-sim" class="tab-panel">
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-green">&#8646;</span>
+                            Login Workload Simulation
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" id="btn-start-login-workload">Start</button>
+                            <button class="btn btn-danger" id="btn-stop-login-workload" disabled>Stop</button>
+                        </div>
+                    </div>
+
+                    <div id="running-login-workload-banner" class="status-box status-warning" style="display:none; margin-top:12px"></div>
+
+                    <div class="field-inline field-inline-top">
+                        <div class="field-left">
+                            <span class="field-name">Simple Query</span>
+                            <span class="field-desc">Fast SELECT or WITH query executed after every logon. One row is fetched, then the session logs out.</span>
+                        </div>
+                        <div class="field-right" style="flex:1; max-width:700px">
+                            <textarea id="login-sql-text" rows="4" style="width:100%">select 1 from dual</textarea>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Concurrent Threads</span>
+                            <span class="field-desc">Independent worker threads simulating separate application servers (1 - 1000).</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="slider-group">
+                                <input type="range" id="login-thread-count" min="1" max="1000" value="20" style="width:160px">
+                                <span class="range-value" id="login-thread-count-val">20</span>
+                                <input type="number" id="login-thread-count-input" min="1" max="1000" value="20" style="width:110px;text-align:center">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Iterations per Thread</span>
+                            <span class="field-desc">How many login → query → logout cycles each thread should run. Use 0 to run until you click Stop.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="login-iterations" value="1000" min="0" max="1000000" step="100" style="width:140px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Think Time</span>
+                            <span class="field-desc">Optional pause between cycles for each thread.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="login-think-time-ms" value="0" min="0" max="60000" step="10" style="width:120px;text-align:center">
+                            <span class="text-muted text-sm">ms</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="login-live-dashboard" style="display:none">
+
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <span class="title-icon icon-blue">&#8987;</span>
+                                Live Progress
+                            </div>
+                            <span class="badge badge-info" id="login-elapsed-badge">0s</span>
+                        </div>
+
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="login-progress-fill" style="width:0%"></div>
+                        </div>
+                        <div class="progress-info">
+                            <span id="login-progress-text">Waiting...</span>
+                            <span class="progress-pct" id="login-progress-pct">0%</span>
+                        </div>
+                    </div>
+
+                    <div class="metric-grid">
+                        <div class="metric-card m-update">
+                            <div class="metric-label">Active Connections</div>
+                            <div class="metric-value" id="login-counter-active">0</div>
+                        </div>
+                        <div class="metric-card m-insert">
+                            <div class="metric-label">Logons</div>
+                            <div class="metric-value" id="login-counter-logons">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Queries</div>
+                            <div class="metric-value" id="login-counter-queries">0</div>
+                        </div>
+                        <div class="metric-card m-delete">
+                            <div class="metric-label">Logouts</div>
+                            <div class="metric-value" id="login-counter-logouts">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Cycles</div>
+                            <div class="metric-value" id="login-counter-cycles">0</div>
+                        </div>
+                        <div class="metric-card m-error">
+                            <div class="metric-label">Errors</div>
+                            <div class="metric-value" id="login-counter-errors">0</div>
+                        </div>
+                    </div>
+
+                    <div class="progress-info" style="margin-top:8px">
+                        <span id="login-ops-per-sec">LOGON/s 0.0 · QRY/s 0.0 · LOGOFF/s 0.0 · AVG cycle 0.0 ms</span>
+                    </div>
+
+                </div>
+
+                <div id="login-workload-notices" style="display:none; margin-top:12px; max-height:180px; overflow-y:auto;"></div>
+
+                <div id="login-workload-summary"></div>
+
+            </section>
+
+            <!-- ====================================================== -->
+            <!-- TAB 5: Results & Comparison                            -->
             <!-- ====================================================== -->
             <section id="tab-results" class="tab-panel">
 

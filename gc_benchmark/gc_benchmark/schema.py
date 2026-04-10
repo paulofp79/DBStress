@@ -49,6 +49,7 @@ _COMPRESSION_MAP = {
 
 _LIST_VALUES = ["NEW", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"]
 _MAX_INSERT_CHUNK_ROWS = 100000
+_MAX_SCHEMA_PARALLEL_WORKERS = 32
 
 
 def _table_name(prefix: str, idx: int) -> str:
@@ -310,6 +311,7 @@ def create_schema_parallel(config: SchemaConfig, connection_factory) -> Generato
     """Create benchmark tables in parallel using one database session per table."""
     total = config.table_count
     progress_queue: queue.Queue[str] = queue.Queue()
+    max_workers = max(1, min(total, _MAX_SCHEMA_PARALLEL_WORKERS))
 
     def _worker(table_idx: int) -> None:
         tname = _table_name(config.table_prefix, table_idx)
@@ -362,7 +364,12 @@ def create_schema_parallel(config: SchemaConfig, connection_factory) -> Generato
                 except Exception:
                     pass
 
-    with ThreadPoolExecutor(max_workers=max(1, total)) as executor:
+    yield (
+        f"Using {max_workers} parallel schema worker sessions "
+        f"(requested tables: {total})."
+    )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_worker, idx) for idx in range(1, total + 1)]
 
         while True:
