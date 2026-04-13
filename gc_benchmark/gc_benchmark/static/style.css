@@ -861,6 +861,83 @@ td.col-primary {
     font-family: 'Inter', sans-serif;
 }
 
+.active-workloads-panel {
+    margin-top: 14px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.02);
+    overflow: hidden;
+}
+
+.active-workloads-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--glass-border);
+    background: rgba(255,255,255,0.03);
+}
+
+.active-workloads-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.active-workloads-subtitle {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.active-workloads-table td {
+    white-space: nowrap;
+}
+
+.active-workload-selected td {
+    background: rgba(108,159,255,0.10) !important;
+}
+
+.active-workload-id {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.active-workload-id strong {
+    color: var(--text-primary);
+}
+
+.active-workload-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'Inter', sans-serif;
+}
+
+.active-workload-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.active-workload-phase {
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.active-workload-phase.phase-stopping {
+    color: var(--warning);
+}
+
+.active-workload-phase.phase-error,
+.active-workload-phase.phase-stopped {
+    color: var(--error);
+}
+
+.active-workload-phase.phase-complete {
+    color: var(--success);
+}
+
 .row-best td    { background: rgba(52,211,153,0.06) !important; }
 .row-worst td   { background: rgba(248,113,113,0.06) !important; }
 /* Highlight the run that was just completed */

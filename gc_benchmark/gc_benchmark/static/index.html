@@ -300,7 +300,7 @@
                         </div>
                         <div class="btn-group">
                             <button class="btn btn-primary" id="btn-start-workload">Start Run</button>
-                            <button class="btn btn-danger" id="btn-stop-workload" disabled>Stop</button>
+                            <button class="btn btn-danger" id="btn-stop-workload" disabled>Stop Selected</button>
                         </div>
                     </div>
 
@@ -313,6 +313,35 @@
                     </div>
 
                     <div id="running-workload-banner" class="status-box status-warning" style="display:none; margin-top:12px"></div>
+
+                    <div id="active-workloads-panel" class="active-workloads-panel" style="display:none">
+                        <div class="active-workloads-header">
+                            <div class="active-workloads-title">Active Workloads On This Connection</div>
+                            <div class="active-workloads-subtitle" id="active-workloads-subtitle">
+                                Select one workload to drive the live dashboard and chart.
+                            </div>
+                        </div>
+                        <div class="table-wrap">
+                            <table class="data-table active-workloads-table">
+                                <thead>
+                                    <tr>
+                                        <th>Workload</th>
+                                        <th class="text-col">Schema</th>
+                                        <th>Threads</th>
+                                        <th>Mode</th>
+                                        <th>Phase</th>
+                                        <th>Elapsed</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="active-workloads-body">
+                                    <tr>
+                                        <td colspan="7" class="text-col">No active workloads on this connection.</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
 
                     <!-- Contention Mode -->
                     <div class="field-inline field-inline-top">
@@ -601,6 +630,10 @@
                                 Live Progress
                             </div>
                             <span class="badge badge-info" id="elapsed-badge">0s / 60s</span>
+                        </div>
+
+                        <div class="chart-subtitle" id="selected-workload-caption" style="margin-bottom:12px">
+                            No active workload selected.
                         </div>
 
                         <div class="progress-bar">

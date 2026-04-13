@@ -12,6 +12,10 @@
     var gcChart = null;
     var compareChart = null;
     var workloadRunning = false;
+    var workloadStartPending = false;
+    var workloadStates = {};
+    var workloadChartSeries = {};
+    var selectedWorkloadId = '';
     var loginWorkloadRunning = false;
     var dbActivityTimer = null;
     var cpoolStatsTimer = null;
@@ -412,6 +416,167 @@
         return buildScopedStatusUrl('/api/login-workload/status');
     }
 
+    function isWorkloadActive(data) {
+        if (!data) return false;
+        if (data.running) return true;
+        var phase = String(data.phase || '').toUpperCase();
+        return phase === 'PREPARING' || phase === 'WARMING' || phase === 'RUNNING' || phase === 'STOPPING';
+    }
+
+    function getActiveWorkloads() {
+        return Object.keys(workloadStates).map(function (id) {
+            return workloadStates[id];
+        }).filter(function (item) {
+            return isWorkloadActive(item);
+        });
+    }
+
+    function getSelectedWorkload() {
+        if (!selectedWorkloadId) return null;
+        return workloadStates[selectedWorkloadId] || null;
+    }
+
+    function sortWorkloads(workloads) {
+        return workloads.slice().sort(function (left, right) {
+            var leftCreated = String(left.created_at || '');
+            var rightCreated = String(right.created_at || '');
+            if (leftCreated !== rightCreated) return rightCreated.localeCompare(leftCreated);
+            return String(right.workload_id || '').localeCompare(String(left.workload_id || ''));
+        });
+    }
+
+    function ensureSelectedWorkload() {
+        if (selectedWorkloadId && isWorkloadActive(workloadStates[selectedWorkloadId])) return;
+        var workloads = sortWorkloads(getActiveWorkloads());
+        selectedWorkloadId = workloads.length ? String(workloads[0].workload_id || '') : '';
+    }
+
+    function syncWorkloadButtons() {
+        workloadRunning = getActiveWorkloads().length > 0;
+        $('btn-start-workload').disabled = workloadStartPending;
+        $('btn-stop-workload').disabled = !getSelectedWorkload();
+    }
+
+    function buildSelectedWorkloadCaption(data) {
+        if (!data) return 'No active workload selected.';
+        var schema = data.schema_name || data.table_prefix || 'GCB';
+        var requested = Number(data.requested_threads || data.thread_count || 0).toLocaleString();
+        var physical = Number(data.physical_workers || 0).toLocaleString();
+        return (
+            'Selected workload ' + escapeHtml(String(data.workload_id || '')) +
+            ' on schema ' + escapeHtml(schema) +
+            ' · requested threads ' + escapeHtml(requested) +
+            ' · physical workers ' + escapeHtml(physical)
+        );
+    }
+
+    function updateSelectedWorkloadCaption(data) {
+        var el = $('selected-workload-caption');
+        if (!el) return;
+        el.textContent = data ? (
+            'Selected workload ' + String(data.workload_id || '') +
+            ' on schema ' + String(data.schema_name || data.table_prefix || 'GCB') +
+            ' · requested threads ' + Number(data.requested_threads || data.thread_count || 0).toLocaleString() +
+            ' · physical workers ' + Number(data.physical_workers || 0).toLocaleString()
+        ) : 'No active workload selected.';
+    }
+
+    function resetWorkloadDashboard() {
+        $('counter-inserts').textContent = '0';
+        $('counter-updates').textContent = '0';
+        $('counter-deletes').textContent = '0';
+        $('counter-selects').textContent = '0';
+        $('counter-errors').textContent = '0';
+        $('ops-per-sec').textContent = 'INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0';
+        $('progress-fill').style.width = '0%';
+        $('progress-text').textContent = 'Preparing workload...';
+        $('progress-pct').textContent = '0%';
+        $('elapsed-badge').textContent = 'Preparing';
+        updateSelectedWorkloadCaption(null);
+    }
+
+    function removeWorkloadState(workloadId) {
+        if (!workloadId) return;
+        delete workloadStates[workloadId];
+        if (selectedWorkloadId === workloadId) {
+            selectedWorkloadId = '';
+        }
+        ensureSelectedWorkload();
+    }
+
+    function rememberWorkloadState(data) {
+        if (!data || !data.workload_id) return;
+        var workloadId = String(data.workload_id);
+        if (!isWorkloadActive(data)) {
+            removeWorkloadState(workloadId);
+            return;
+        }
+        workloadStates[workloadId] = Object.assign({}, workloadStates[workloadId] || {}, data, {
+            workload_id: workloadId,
+        });
+        ensureSelectedWorkload();
+    }
+
+    function replaceCurrentConnectionWorkloads(workloads) {
+        workloadStates = {};
+        (workloads || []).forEach(function (item) {
+            if (item && item.workload_id) {
+                workloadStates[String(item.workload_id)] = Object.assign({}, item, {
+                    workload_id: String(item.workload_id),
+                });
+            }
+        });
+        ensureSelectedWorkload();
+    }
+
+    function getWorkloadChartSeries(workloadId) {
+        if (!workloadId) return null;
+        if (!workloadChartSeries[workloadId]) {
+            var events = {};
+            ALL_GC_EVENTS.forEach(function (ev) { events[ev] = []; });
+            workloadChartSeries[workloadId] = {
+                labels: [],
+                events: events,
+            };
+        }
+        return workloadChartSeries[workloadId];
+    }
+
+    function restoreSelectedWorkloadChart() {
+        if (!gcChart) initGCChart();
+        var selected = getSelectedWorkload();
+        var series = selected ? getWorkloadChartSeries(String(selected.workload_id || '')) : null;
+
+        gcChart.data.labels = series ? series.labels.slice() : [];
+        gcChart.data.datasets.forEach(function (dataset) {
+            dataset.data = series ? (series.events[dataset.label] || []).slice() : [];
+        });
+        gcChart.update('none');
+    }
+
+    function selectWorkload(workloadId) {
+        var targetId = String(workloadId || '');
+        if (!targetId || !workloadStates[targetId]) return;
+        selectedWorkloadId = targetId;
+        renderRunningWorkloadBanner();
+        renderActiveWorkloads();
+        updateProgress(workloadStates[targetId]);
+        updateSelectedWorkloadCaption(workloadStates[targetId]);
+        restoreSelectedWorkloadChart();
+        syncWorkloadButtons();
+    }
+
+    function formatWorkloadNoticeMessage(msg) {
+        if (!msg) return '';
+        var prefix = '';
+        if (msg.workload_id) {
+            var current = workloadStates[String(msg.workload_id)] || {};
+            var schema = current.schema_name || current.table_prefix || '';
+            prefix = '[' + String(msg.workload_id) + (schema ? ' · ' + schema : '') + '] ';
+        }
+        return prefix + String(msg.message || '');
+    }
+
     async function loadConnectionStatus() {
         try {
             var data = await api('GET', '/api/connection/status');
@@ -663,95 +828,176 @@
     }
 
     async function startWorkload() {
-        if (workloadRunning) return;
+        if (workloadStartPending) return;
 
-        // Reset UI
+        workloadStartPending = true;
+        syncWorkloadButtons();
+
         $('live-dashboard').style.display = 'block';
-        // Clear any previous workload notices
         var notices = $('workload-notices');
         if (notices) { notices.innerHTML = ''; notices.style.display = 'none'; }
         $('workload-summary').innerHTML = '';
-        $('counter-inserts').textContent = '0';
-        $('counter-updates').textContent = '0';
-        $('counter-deletes').textContent = '0';
-        $('counter-selects').textContent = '0';
-        $('counter-errors').textContent = '0';
-        $('ops-per-sec').textContent = 'INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0';
-        $('progress-fill').style.width = '0%';
-        $('progress-text').textContent = 'Preparing workload...';
-        $('progress-pct').textContent = '0%';
-        $('elapsed-badge').textContent = 'Preparing';
-
+        resetWorkloadDashboard();
         initGCChart();
-
-        $('btn-start-workload').disabled = true;
-        $('btn-stop-workload').disabled = false;
-        workloadRunning = true;
 
         ensureWebSocket();
 
-        var result = await api('POST', '/api/workload/start', getWorkloadConfig());
-        if (!result.ok) {
-            $('workload-summary').innerHTML =
-                '<div class="status-box status-error">' + escapeHtml(result.message || 'Failed to start') + '</div>';
-            workloadRunning = false;
-            $('btn-start-workload').disabled = false;
-            $('btn-stop-workload').disabled = true;
+        try {
+            var result = await api('POST', '/api/workload/start', getWorkloadConfig());
+            if (!result.ok) {
+                $('workload-summary').innerHTML =
+                    '<div class="status-box status-error">' + escapeHtml(result.message || 'Failed to start') + '</div>';
+                return;
+            }
+
+            if (result.status) {
+                rememberWorkloadState(result.status);
+            }
+            if (result.workload_id) {
+                selectedWorkloadId = String(result.workload_id);
+            }
+
+            renderRunningWorkloadBanner();
+            renderActiveWorkloads();
+            if (selectedWorkloadId && workloadStates[selectedWorkloadId]) {
+                updateProgress(workloadStates[selectedWorkloadId]);
+                updateSelectedWorkloadCaption(workloadStates[selectedWorkloadId]);
+            }
+            appendWorkloadNotice(result.message || 'Workload started.', 'success');
+            restoreSelectedWorkloadChart();
+            await loadWorkloadStatus();
+        } finally {
+            workloadStartPending = false;
+            syncWorkloadButtons();
         }
     }
 
-    async function stopWorkload() {
-        await api('POST', '/api/workload/stop');
-        workloadRunning = false;
-        $('btn-start-workload').disabled = false;
-        $('btn-stop-workload').disabled = true;
-        $('running-workload-banner').style.display = 'none';
-        $('running-workload-banner').innerHTML = '';
+    async function stopWorkload(workloadId) {
+        var targetId = String(workloadId || selectedWorkloadId || '');
+        if (!targetId) return;
+
+        var result = await api('POST', '/api/workload/stop', { workload_id: targetId });
+        if (!result.ok) {
+            appendWorkloadNotice(result.message || ('Failed to stop workload ' + targetId), 'error');
+            return;
+        }
+
+        if (result.status) {
+            rememberWorkloadState(result.status);
+            if (result.status.phase === 'STOPPED' || result.status.phase === 'ERROR' || result.status.phase === 'COMPLETE') {
+                removeWorkloadState(targetId);
+            }
+        }
+
+        appendWorkloadNotice('Stop requested for workload ' + targetId + '.', 'info');
+        renderRunningWorkloadBanner();
+        renderActiveWorkloads();
+        if (getSelectedWorkload()) {
+            updateProgress(getSelectedWorkload());
+            updateSelectedWorkloadCaption(getSelectedWorkload());
+        } else {
+            $('live-dashboard').style.display = 'none';
+            updateSelectedWorkloadCaption(null);
+        }
+        syncWorkloadButtons();
     }
 
-    function renderRunningWorkloadBanner(data) {
+    function renderActiveWorkloads() {
+        var panel = $('active-workloads-panel');
+        var body = $('active-workloads-body');
+        var subtitle = $('active-workloads-subtitle');
+        if (!panel || !body) return;
+
+        var workloads = sortWorkloads(getActiveWorkloads());
+        if (workloads.length === 0) {
+            panel.style.display = 'none';
+            body.innerHTML = '<tr><td colspan="7" class="text-col">No active workloads on this connection.</td></tr>';
+            return;
+        }
+
+        panel.style.display = 'block';
+        subtitle.textContent = selectedWorkloadId
+            ? ('Selected workload ' + selectedWorkloadId + ' drives the dashboard below.')
+            : 'Select one workload to drive the live dashboard and chart.';
+
+        body.innerHTML = workloads.map(function (item) {
+            var workloadId = String(item.workload_id || '');
+            var selected = workloadId === selectedWorkloadId;
+            var schema = item.schema_name || item.table_prefix || 'GCB';
+            var elapsed = Number(item.elapsed || 0).toFixed(1) + 's / ' + Number(item.duration || 0).toLocaleString() + 's';
+            var requested = Number(item.requested_threads || item.thread_count || 0).toLocaleString();
+            var physical = Number(item.physical_workers || 0).toLocaleString();
+            var phase = String(item.phase || 'RUNNING').toUpperCase();
+            var phaseClass = 'phase-' + phase.toLowerCase();
+
+            return (
+                '<tr class="' + (selected ? 'active-workload-selected' : '') + '">' +
+                    '<td>' +
+                        '<div class="active-workload-id">' +
+                            '<strong>' + escapeHtml(workloadId) + '</strong>' +
+                            '<span class="active-workload-meta">Tables ' + escapeHtml(Number(item.table_count || 0).toLocaleString()) + ' · Workers ' + escapeHtml(physical) + '</span>' +
+                        '</div>' +
+                    '</td>' +
+                    '<td class="text-col">' + escapeHtml(schema) + '</td>' +
+                    '<td>' + requested + '</td>' +
+                    '<td>' + escapeHtml(item.contention_mode || 'NORMAL') + '</td>' +
+                    '<td><span class="active-workload-phase ' + phaseClass + '">' + escapeHtml(phase) + '</span></td>' +
+                    '<td>' + escapeHtml(elapsed) + '</td>' +
+                    '<td>' +
+                        '<div class="active-workload-actions">' +
+                            '<button class="btn btn-secondary btn-sm" data-workload-select="' + escapeHtml(workloadId) + '">View</button>' +
+                            '<button class="btn btn-danger btn-sm" data-workload-stop="' + escapeHtml(workloadId) + '">Stop</button>' +
+                        '</div>' +
+                    '</td>' +
+                '</tr>'
+            );
+        }).join('');
+    }
+
+    function renderRunningWorkloadBanner(statusData) {
         var el = $('running-workload-banner');
         if (!el) return;
 
-        if (!data || (!data.running && !data.other_workload_running)) {
+        var data = statusData || {};
+        var workloads = sortWorkloads(getActiveWorkloads());
+        var selected = getSelectedWorkload();
+        var otherCount = Number(data.other_connection_workload_count || 0);
+        var otherLabels = data.other_connection_labels || [];
+
+        if (workloads.length === 0 && !otherCount) {
             el.style.display = 'none';
             el.innerHTML = '';
             return;
         }
 
-        if (data.other_workload_running && !data.running) {
+        if (workloads.length === 0 && otherCount) {
             el.className = 'status-box status-info';
             el.innerHTML =
-                'Another database workload is active in this app process: <b>' +
-                escapeHtml(data.other_connection_label || 'unknown connection') +
-                '</b>. This page is scoped to a different connection.';
+                'No active workloads match this connection. ' +
+                'Other connection workload(s) still active in this app: <b>' +
+                escapeHtml(otherLabels.join(', ') || String(otherCount)) +
+                '</b>.';
             el.style.display = 'flex';
             return;
         }
 
         el.className = 'status-box status-warning';
-
-        var schema = data.table_prefix || 'GCB';
-        var tables = Number(data.table_count || 0).toLocaleString();
-        var requestedThreads = Number(data.requested_threads || data.thread_count || 0).toLocaleString();
-        var physicalWorkers = Number(data.physical_workers || 0).toLocaleString();
-        var elapsed = Number(data.elapsed || 0).toFixed(1);
-        var duration = Number(data.duration || 0).toLocaleString();
-        var mode = data.contention_mode || 'NORMAL';
-        var phase = data.phase || 'RUNNING';
-        var statusMessage = data.status_message || '';
+        var selectedLabel = '';
+        if (selected) {
+            selectedLabel =
+                ' Selected workload <b>' + escapeHtml(String(selected.workload_id || '')) + '</b>' +
+                ' on schema <b>' + escapeHtml(selected.schema_name || selected.table_prefix || 'GCB') + '</b>' +
+                ' is <b>' + escapeHtml(String(selected.phase || 'RUNNING')) + '</b>' +
+                ' at <b>' + escapeHtml(Number(selected.elapsed || 0).toFixed(1)) + 's / ' +
+                escapeHtml(Number(selected.duration || 0).toLocaleString()) + 's</b>.';
+        }
 
         el.innerHTML =
-            '<b>RUNNING workload</b> ' +
-            'Schema <b>' + escapeHtml(schema) + '</b> · ' +
-            'Tables <b>' + escapeHtml(tables) + '</b> · ' +
-            'Requested Threads <b>' + escapeHtml(requestedThreads) + '</b> · ' +
-            'Physical Workers/Sessions <b>' + escapeHtml(physicalWorkers) + '</b> · ' +
-            'Phase <b>' + escapeHtml(phase) + '</b> · ' +
-            'Mode <b>' + escapeHtml(mode) + '</b> · ' +
-            (phase === 'RUNNING'
-                ? ('Elapsed <b>' + escapeHtml(elapsed) + 's / ' + escapeHtml(duration) + 's</b>')
-                : ('Status <b>' + escapeHtml(statusMessage || 'Preparing...') + '</b>'));
+            '<b>' + escapeHtml(String(workloads.length)) + '</b> active workload(s) on this connection.' +
+            selectedLabel +
+            (otherCount
+                ? (' <span>Other connection workload(s) in this app: <b>' + escapeHtml(String(otherCount)) + '</b>.</span>')
+                : '');
         el.style.display = 'flex';
     }
 
@@ -759,32 +1005,41 @@
         try {
             var statusUrl = buildWorkloadStatusUrl();
             if (!statusUrl) {
-                workloadRunning = false;
-                $('btn-start-workload').disabled = false;
-                $('btn-stop-workload').disabled = true;
+                workloadStates = {};
+                selectedWorkloadId = '';
                 renderRunningWorkloadBanner(null);
+                renderActiveWorkloads();
+                $('live-dashboard').style.display = 'none';
+                updateSelectedWorkloadCaption(null);
+                syncWorkloadButtons();
                 return;
             }
 
             var data = await api('GET', statusUrl);
-            var running = !!data.running;
-            var otherConnectionRunning = !!data.other_workload_running;
-
-            workloadRunning = running;
-            $('btn-start-workload').disabled = running || otherConnectionRunning;
-            $('btn-stop-workload').disabled = !running;
+            replaceCurrentConnectionWorkloads(data.workloads || []);
             renderRunningWorkloadBanner(data);
+            renderActiveWorkloads();
+            syncWorkloadButtons();
 
-            if (running) {
+            var selected = getSelectedWorkload();
+            if (selected) {
                 $('live-dashboard').style.display = 'block';
-                updateProgress(data);
+                updateProgress(selected);
+                updateSelectedWorkloadCaption(selected);
+                restoreSelectedWorkloadChart();
                 ensureWebSocket();
+            } else {
+                $('live-dashboard').style.display = 'none';
+                updateSelectedWorkloadCaption(null);
             }
         } catch (e) {
-            workloadRunning = false;
-            $('btn-start-workload').disabled = false;
-            $('btn-stop-workload').disabled = true;
+            workloadStates = {};
+            selectedWorkloadId = '';
             renderRunningWorkloadBanner(null);
+            renderActiveWorkloads();
+            $('live-dashboard').style.display = 'none';
+            updateSelectedWorkloadCaption(null);
+            syncWorkloadButtons();
         }
     }
 
@@ -1141,6 +1396,10 @@
     }
 
     function updateProgress(data) {
+        if (!data) {
+            resetWorkloadDashboard();
+            return;
+        }
         $('counter-inserts').textContent = (data.inserts || 0).toLocaleString();
         $('counter-updates').textContent = (data.updates || 0).toLocaleString();
         $('counter-deletes').textContent = (data.deletes || 0).toLocaleString();
@@ -1205,9 +1464,19 @@
      * GC-event comparison table so every execution is visible side-by-side.
      */
     async function showCompletionSummary(msg) {
-        workloadRunning = false;
-        $('btn-start-workload').disabled = false;
-        $('btn-stop-workload').disabled = true;
+        if (msg && msg.workload_id) {
+            removeWorkloadState(String(msg.workload_id));
+            renderRunningWorkloadBanner();
+            renderActiveWorkloads();
+            syncWorkloadButtons();
+            if (getSelectedWorkload()) {
+                updateProgress(getSelectedWorkload());
+                updateSelectedWorkloadCaption(getSelectedWorkload());
+            } else {
+                $('live-dashboard').style.display = 'none';
+                updateSelectedWorkloadCaption(null);
+            }
+        }
 
         var currentRunId = String(msg.run_id || '');
         var s = msg.summary || {};
@@ -1272,6 +1541,7 @@
         html += '</tbody></table></div></div>';
         $('workload-summary').innerHTML = html;
         loadResultsCount();
+        loadWorkloadStatus();
     }
 
     // ================================================================
@@ -1334,24 +1604,24 @@
         });
     }
 
-    function updateGCChart(gcData) {
-        if (!gcChart) return;
+    function updateGCChart(gcData, workloadId) {
+        var targetId = String(workloadId || selectedWorkloadId || '');
+        if (!targetId || !gcData) return;
+        var series = getWorkloadChartSeries(targetId);
         var elapsed = Math.floor(gcData.elapsed || 0);
-        gcChart.data.labels.push(elapsed + 's');
+        series.labels.push(elapsed + 's');
 
         var events = gcData.events || {};
 
         ALL_GC_EVENTS.forEach(function (ev) {
             var value = events[ev] || 0;
-            var ds = gcChart.data.datasets.find(function (d) { return d.label === ev; });
-            if (!ds) return;
-
-            // Pad any missing points, then append
-            while (ds.data.length < gcChart.data.labels.length - 1) ds.data.push(0);
-            ds.data.push(value);
+            while (series.events[ev].length < series.labels.length - 1) series.events[ev].push(0);
+            series.events[ev].push(value);
         });
 
-        gcChart.update('none');
+        if (targetId === selectedWorkloadId) {
+            restoreSelectedWorkloadChart();
+        }
     }
 
     // ================================================================
@@ -1376,7 +1646,19 @@
             switch (msg.type) {
                 case 'progress':
                     if (!workloadMessageMatchesCurrentConnection(msg)) break;
-                    updateProgress(msg.data);
+                    rememberWorkloadState(msg.data);
+                    renderRunningWorkloadBanner();
+                    renderActiveWorkloads();
+                    syncWorkloadButtons();
+                    if (getSelectedWorkload()) {
+                        $('live-dashboard').style.display = 'block';
+                        updateProgress(getSelectedWorkload());
+                        updateSelectedWorkloadCaption(getSelectedWorkload());
+                        restoreSelectedWorkloadChart();
+                    } else {
+                        $('live-dashboard').style.display = 'none';
+                        updateSelectedWorkloadCaption(null);
+                    }
                     break;
                 case 'login_progress':
                     if (!workloadMessageMatchesCurrentConnection(msg)) break;
@@ -1384,7 +1666,7 @@
                     break;
                 case 'gc_snapshot':
                     if (!workloadMessageMatchesCurrentConnection(msg)) break;
-                    updateGCChart(msg.data);
+                    updateGCChart(msg.data, msg.workload_id);
                     break;
                 case 'schema_progress': appendSchemaLog(msg.message); break;
                 case 'schema_complete': appendSchemaLog(msg.message); loadSchemaState(); loadSchemas(); break;
@@ -1401,7 +1683,7 @@
                     if (msg.source === 'login_workload') {
                         appendLoginWorkloadNotice(msg.message, 'info');
                     } else {
-                        appendWorkloadNotice(msg.message, 'info');
+                        appendWorkloadNotice(formatWorkloadNoticeMessage(msg), 'info');
                     }
                     break;
                 case 'warning':
@@ -1412,7 +1694,7 @@
                         appendLoginWorkloadNotice(msg.message, 'warning');
                     } else {
                         if (!workloadMessageMatchesCurrentConnection(msg)) break;
-                        appendWorkloadNotice(msg.message, 'warning');
+                        appendWorkloadNotice(formatWorkloadNoticeMessage(msg), 'warning');
                     }
                     break;
                 case 'error':
@@ -1426,11 +1708,8 @@
                         $('btn-stop-login-workload').disabled = true;
                     } else {
                         if (!workloadMessageMatchesCurrentConnection(msg)) break;
-                        appendWorkloadNotice(msg.message, 'error');
-                        // Reset workload button state on fatal error
-                        workloadRunning = false;
-                        $('btn-start-workload').disabled = false;
-                        $('btn-stop-workload').disabled = true;
+                        appendWorkloadNotice(formatWorkloadNoticeMessage(msg), 'error');
+                        syncWorkloadButtons();
                     }
                     break;
             }
@@ -1439,7 +1718,7 @@
         ws.onclose = function () {
             $('ws-dot').classList.remove('connected');
             $('ws-label').textContent = 'Disconnected';
-            if (workloadRunning || loginWorkloadRunning) {
+            if (getActiveWorkloads().length || loginWorkloadRunning || workloadStartPending) {
                 setTimeout(ensureWebSocket, 3000);
             }
         };
@@ -1896,6 +2175,25 @@
         $('btn-start-login-workload').addEventListener('click', startLoginWorkload);
         $('btn-stop-login-workload').addEventListener('click', stopLoginWorkload);
 
+        var activeWorkloadsBody = $('active-workloads-body');
+        if (activeWorkloadsBody) {
+            activeWorkloadsBody.addEventListener('click', function (event) {
+                var button = event.target.closest('button');
+                if (!button) return;
+
+                var selectId = button.getAttribute('data-workload-select');
+                if (selectId) {
+                    selectWorkload(selectId);
+                    return;
+                }
+
+                var stopId = button.getAttribute('data-workload-stop');
+                if (stopId) {
+                    stopWorkload(stopId);
+                }
+            });
+        }
+
         // Results buttons
         $('btn-compare').addEventListener('click', compareSelected);
         $('btn-compare-all').addEventListener('click', compareAll);
@@ -1912,6 +2210,7 @@
 
         // Connect WebSocket proactively
         ensureWebSocket();
+        syncWorkloadButtons();
         loadWorkloadStatus();
         loadLoginWorkloadStatus();
         setInterval(loadWorkloadStatus, 5000);

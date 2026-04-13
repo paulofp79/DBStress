@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Optional
+from uuid import uuid4
 
 import oracledb
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -96,7 +97,8 @@ _cpool_conn_state: dict = {
     "mode": "thin",
 }
 
-_runner: Optional[Any] = None
+_workload_runners: dict[str, Any] = {}
+_workload_runners_lock = threading.Lock()
 _login_runner: Optional[Any] = None
 _schema_job = None
 _ws_clients: list[WebSocket] = []
@@ -395,9 +397,15 @@ def _format_connection_key(key: Optional[dict]) -> str:
     )
 
 
-def _workload_message(msg: dict, connection_key: Optional[dict]) -> dict:
+def _workload_message(
+    msg: dict,
+    connection_key: Optional[dict],
+    workload_id: str = "",
+) -> dict:
     """Attach workload connection metadata so clients can scope live events."""
     payload = dict(msg)
+    if workload_id:
+        payload["workload_id"] = workload_id
     if _has_connection_key(connection_key):
         payload["connection_key"] = _connection_key(
             host=connection_key.get("host", ""),
@@ -421,6 +429,90 @@ async def _broadcast(msg: dict) -> None:
                 dead.append(ws)
         for ws in dead:
             _ws_clients.remove(ws)
+
+
+def _new_workload_id() -> str:
+    """Return a short workload identifier safe to expose in the UI."""
+    return uuid4().hex[:12]
+
+
+def _build_workload_status_payload(
+    controller: Any,
+    workload_id: str,
+    *,
+    status_override: Optional[dict] = None,
+) -> dict:
+    """Return one UI-ready workload status payload."""
+    payload = dict(status_override or controller.status.to_dict())
+    payload["workload_id"] = workload_id
+
+    runner_connection = getattr(controller, "_connection_key", None)
+    if _has_connection_key(runner_connection):
+        payload["connection_key"] = _connection_key(
+            host=runner_connection.get("host", ""),
+            port=runner_connection.get("port", 0),
+            service_name=runner_connection.get("service_name", ""),
+            user=runner_connection.get("user", ""),
+        )
+        payload["connection_label"] = _format_connection_key(runner_connection)
+
+    cfg = getattr(controller, "_config", None)
+    schema_name = getattr(controller, "_schema_name", "")
+    if cfg:
+        payload.update({
+            "schema_name": schema_name or getattr(cfg, "table_prefix", "GCB"),
+            "table_prefix": getattr(cfg, "table_prefix", "GCB"),
+            "table_count": getattr(cfg, "table_count", 0),
+            "thread_count": getattr(cfg, "thread_count", 0),
+            "requested_threads": getattr(cfg, "thread_count", 0),
+            "physical_workers": getattr(controller, "_worker_count", 0),
+            "process_count": getattr(controller, "_process_count", 0),
+            "duration": getattr(cfg, "duration_seconds", payload.get("duration", 0)),
+            "contention_mode": getattr(cfg, "contention_mode", "NORMAL"),
+            "execution_model": "pooled child-process workers",
+        })
+    elif schema_name:
+        payload["schema_name"] = schema_name
+
+    created_at = getattr(controller, "_created_at", "")
+    if created_at:
+        payload["created_at"] = created_at
+
+    return payload
+
+
+def _is_active_workload_payload(payload: Optional[dict]) -> bool:
+    """True while a workload should stay visible as active in the UI."""
+    if not payload:
+        return False
+    if bool(payload.get("running")):
+        return True
+    return str(payload.get("phase", "")).upper() in {"PREPARING", "WARMING", "RUNNING", "STOPPING"}
+
+
+def _register_workload_runner(workload_id: str, controller: Any) -> None:
+    with _workload_runners_lock:
+        _workload_runners[workload_id] = controller
+
+
+def _remove_workload_runner(workload_id: str, controller: Optional[Any] = None) -> None:
+    with _workload_runners_lock:
+        current = _workload_runners.get(workload_id)
+        if current is None:
+            return
+        if controller is not None and current is not controller:
+            return
+        _workload_runners.pop(workload_id, None)
+
+
+def _get_workload_runner(workload_id: str) -> Optional[Any]:
+    with _workload_runners_lock:
+        return _workload_runners.get(workload_id)
+
+
+def _list_workload_runners() -> list[tuple[str, Any]]:
+    with _workload_runners_lock:
+        return list(_workload_runners.items())
 
 
 def _build_schema_config(data: dict) -> SchemaConfig:
@@ -1162,6 +1254,32 @@ class ShardedSubprocessController:
             self._done_event.set()
         self._safe_callback(self._progress_callback, snapshot)
         self._safe_callback(self._complete_callback, snapshot)
+
+
+def _watch_workload_runner(
+    workload_id: str,
+    controller: Any,
+    connection_key: Optional[dict],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Send one final workload snapshot, then remove it from the active registry."""
+    controller.done_event.wait()
+    try:
+        final_payload = _build_workload_status_payload(controller, workload_id)
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(
+                _workload_message(
+                    {"type": "progress", "data": final_payload},
+                    connection_key,
+                    workload_id,
+                )
+            ),
+            loop,
+        )
+    except Exception:
+        pass
+    finally:
+        _remove_workload_runner(workload_id, controller)
 
 
 class SchemaCreateController:
@@ -1908,14 +2026,6 @@ async def schema_list():
 @app.post("/api/workload/start")
 async def workload_start(body: dict):
     """Start the benchmark workload."""
-    global _runner
-    if _runner and _runner.is_running:
-        message = "A workload is already running."
-        active_connection = getattr(_runner, "_connection_key", None)
-        if _has_connection_key(active_connection):
-            message += f" Active connection: {_format_connection_key(active_connection)}."
-        return {"ok": False, "message": message}
-
     # Guard: password must be set in the current session (not persisted to disk)
     if not _conn_state.get("password"):
         return {
@@ -1947,24 +2057,53 @@ async def workload_start(body: dict):
         lock_hold_ms=max(0, min(500, int(body.get("lock_hold_ms", 0)))),
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     started_at = datetime.now(timezone.utc).isoformat()
     before_snapshot: dict = {}
     workload_connection_key = _connection_key_from_state(connection_state)
+    workload_id = _new_workload_id()
+    controller: Optional[ShardedSubprocessController] = None
+
+    def current_status_payload(status_dict: Optional[dict] = None) -> dict:
+        if controller is None:
+            payload = dict(status_dict or {})
+            payload["workload_id"] = workload_id
+            payload["schema_name"] = str(body.get("schema_name") or cfg.table_prefix or "")
+            return payload
+        return _build_workload_status_payload(
+            controller,
+            workload_id,
+            status_override=status_dict,
+        )
 
     def on_progress(status_dict: dict):
         asyncio.run_coroutine_threadsafe(
-            _broadcast(_workload_message({"type": "progress", "data": status_dict}, workload_connection_key)),
+            _broadcast(
+                _workload_message(
+                    {
+                        "type": "progress",
+                        "data": current_status_payload(status_dict),
+                    },
+                    workload_connection_key,
+                    workload_id,
+                )
+            ),
             loop,
         )
 
     def on_error(message: str):
         asyncio.run_coroutine_threadsafe(
-            _broadcast(_workload_message({
-                "type": "error",
-                "source": "workload",
-                "message": message,
-            }, workload_connection_key)),
+            _broadcast(
+                _workload_message(
+                    {
+                        "type": "error",
+                        "source": "workload",
+                        "message": message,
+                    },
+                    workload_connection_key,
+                    workload_id,
+                )
+            ),
             loop,
         )
 
@@ -2004,26 +2143,39 @@ async def workload_start(body: dict):
                 before_snapshot=before_snapshot,
                 after_snapshot=after_snapshot,
             )
-            await _broadcast(_workload_message({
-                "type": "complete",
-                "run_id": run_id,
-                "summary": {
-                    **final_status,
-                    "gc_delta": delta_agg,
-                },
-            }, workload_connection_key))
+            await _broadcast(
+                _workload_message(
+                    {
+                        "type": "complete",
+                        "run_id": run_id,
+                        "status": current_status_payload(final_status),
+                        "summary": {
+                            **final_status,
+                            "gc_delta": delta_agg,
+                        },
+                    },
+                    workload_connection_key,
+                    workload_id,
+                )
+            )
 
         asyncio.run_coroutine_threadsafe(_save(), loop)
 
     # Prime the live chart immediately so short runs do not appear blank
     # before the first non-zero GC sample arrives.
-    await _broadcast(_workload_message({
-        "type": "gc_snapshot",
-        "data": {
-            "elapsed": 0,
-            "events": {ev: 0 for ev in GC_SYSTEM_EVENTS},
-        },
-    }, workload_connection_key))
+    await _broadcast(
+        _workload_message(
+            {
+                "type": "gc_snapshot",
+                "data": {
+                    "elapsed": 0,
+                    "events": {ev: 0 for ev in GC_SYSTEM_EVENTS},
+                },
+            },
+            workload_connection_key,
+            workload_id,
+        )
+    )
 
     try:
         conn = connect_from_state(connection_state)
@@ -2031,15 +2183,21 @@ async def workload_start(body: dict):
         conn.close()
     except Exception as exc:
         asyncio.run_coroutine_threadsafe(
-            _broadcast(_workload_message({
-                "type": "warning",
-                "source": "workload",
-                "message": f"Could not capture before snapshot: {exc}",
-            }, workload_connection_key)),
+            _broadcast(
+                _workload_message(
+                    {
+                        "type": "warning",
+                        "source": "workload",
+                        "message": f"Could not capture before snapshot: {exc}",
+                    },
+                    workload_connection_key,
+                    workload_id,
+                )
+            ),
             loop,
         )
 
-    _runner = ShardedSubprocessController(
+    controller = ShardedSubprocessController(
         job_type="workload",
         job_label="Workload",
         base_config={
@@ -2072,16 +2230,26 @@ async def workload_start(body: dict):
         error_callback=on_error,
         connection_key=workload_connection_key,
     )
-    _runner._connection_key = workload_connection_key
-    _runner._config = cfg
-    _runner._connection_state = connection_state
-    controller = _runner
+    controller._connection_key = workload_connection_key
+    controller._config = cfg
+    controller._connection_state = connection_state
+    controller._schema_name = str(body.get("schema_name") or cfg.table_prefix or "")
+    controller._created_at = started_at
+    _register_workload_runner(workload_id, controller)
 
     try:
         controller.start()
     except Exception as exc:
-        _runner = None
+        _remove_workload_runner(workload_id, controller)
         return {"ok": False, "message": f"Failed to start workload: {exc}"}
+
+    lifecycle_thread = threading.Thread(
+        target=_watch_workload_runner,
+        args=(workload_id, controller, workload_connection_key, loop),
+        name=f"workload-watch-{workload_id}",
+        daemon=True,
+    )
+    lifecycle_thread.start()
 
     def sample_gc_live():
         last_gc_sample = 0.0
@@ -2113,7 +2281,13 @@ async def workload_start(body: dict):
                     else:
                         gc_data["events"][ev] = 0
                 asyncio.run_coroutine_threadsafe(
-                    _broadcast(_workload_message({"type": "gc_snapshot", "data": gc_data}, workload_connection_key)),
+                    _broadcast(
+                        _workload_message(
+                            {"type": "gc_snapshot", "data": gc_data},
+                            workload_connection_key,
+                            workload_id,
+                        )
+                    ),
                     loop,
                 )
             except Exception:
@@ -2121,28 +2295,43 @@ async def workload_start(body: dict):
 
     sampler_thread = threading.Thread(
         target=sample_gc_live,
-        name="gc-live-sampler",
+        name=f"gc-live-sampler-{workload_id}",
         daemon=True,
     )
     sampler_thread.start()
 
     return {
         "ok": True,
+        "workload_id": workload_id,
+        "status": current_status_payload(),
         "message": (
             f"Workload started using {controller._worker_count} physical workers "
-            f"across {controller._process_count} child processes."
+            f"across {controller._process_count} child processes. "
+            f"Workload ID: {workload_id}."
         ),
     }
 
 
 @app.post("/api/workload/stop")
-async def workload_stop():
-    """Stop the running workload."""
-    global _runner
-    if not _runner or not _runner.status.running:
-        return {"ok": False, "message": "No workload is running."}
-    result = _runner.stop()
-    return {"ok": True, "status": result}
+async def workload_stop(body: dict):
+    """Stop one active workload."""
+    workload_id = str(body.get("workload_id", "")).strip()
+    if not workload_id:
+        return {"ok": False, "message": "workload_id is required."}
+
+    controller = _get_workload_runner(workload_id)
+    if not controller:
+        return {"ok": False, "message": f"Workload {workload_id} was not found."}
+
+    result = controller.stop()
+    return {
+        "ok": True,
+        "status": _build_workload_status_payload(
+            controller,
+            workload_id,
+            status_override=result,
+        ),
+    }
 
 
 @app.get("/api/workload/status")
@@ -2152,52 +2341,45 @@ async def workload_status(
     service_name: str = "",
     user: str = "",
 ):
-    """Return current workload status."""
-    if not _runner:
-        return {"running": False}
+    """Return active workload status for the requested connection."""
     requested_connection = _connection_key(
         host=host,
         port=port,
         service_name=service_name,
         user=user,
     )
-    runner_connection = getattr(_runner, "_connection_key", None)
-    if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
-        if not _same_connection(requested_connection, runner_connection):
-            return {
-                "running": False,
-                "other_workload_running": bool(_runner.status.running),
-                "other_connection_key": _connection_key(
-                    host=runner_connection.get("host", ""),
-                    port=runner_connection.get("port", 0),
-                    service_name=runner_connection.get("service_name", ""),
-                    user=runner_connection.get("user", ""),
-                ),
-                "other_connection_label": _format_connection_key(runner_connection),
-            }
-    payload = _runner.status.to_dict()
-    if _has_connection_key(runner_connection):
-        payload["connection_key"] = _connection_key(
-            host=runner_connection.get("host", ""),
-            port=runner_connection.get("port", 0),
-            service_name=runner_connection.get("service_name", ""),
-            user=runner_connection.get("user", ""),
-        )
-        payload["connection_label"] = _format_connection_key(runner_connection)
-    cfg = getattr(_runner, "_config", None)
-    if cfg:
-        payload.update({
-            "table_prefix": getattr(cfg, "table_prefix", "GCB"),
-            "table_count": getattr(cfg, "table_count", 0),
-            "thread_count": getattr(cfg, "thread_count", 0),
-            "requested_threads": getattr(cfg, "thread_count", 0),
-            "physical_workers": getattr(_runner, "_worker_count", 0),
-            "process_count": getattr(_runner, "_process_count", 0),
-            "duration": getattr(cfg, "duration_seconds", payload.get("duration", 0)),
-            "contention_mode": getattr(cfg, "contention_mode", "NORMAL"),
-            "execution_model": "pooled child-process workers",
-        })
-    return payload
+
+    workloads: list[dict] = []
+    other_labels: set[str] = set()
+    other_workload_count = 0
+
+    for workload_id, controller in _list_workload_runners():
+        payload = _build_workload_status_payload(controller, workload_id)
+        if not _is_active_workload_payload(payload):
+            continue
+
+        runner_connection = getattr(controller, "_connection_key", None)
+        if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
+            if not _same_connection(requested_connection, runner_connection):
+                other_workload_count += 1
+                other_labels.add(_format_connection_key(runner_connection))
+                continue
+
+        workloads.append(payload)
+
+    workloads.sort(
+        key=lambda item: (item.get("created_at", ""), item.get("workload_id", "")),
+        reverse=True,
+    )
+
+    return {
+        "running": bool(workloads),
+        "count": len(workloads),
+        "workloads": workloads,
+        "other_workload_running": bool(other_workload_count),
+        "other_connection_workload_count": other_workload_count,
+        "other_connection_labels": sorted(other_labels),
+    }
 
 
 @app.post("/api/login-workload/start")
