@@ -56,6 +56,7 @@ Use **Preview DDL** to review the SQL before executing. Click **Create Schema** 
 Configure the concurrent workload:
 - **Threads**: 2–10000 concurrent sessions
 - **Duration**: run time in seconds
+- **Workload Seed Rows**: rows per table to cache / top up for the run
 - **Hot Row %**: percentage of rows receiving disproportionate updates
 
 Click **Start Run**. The live dashboard shows:

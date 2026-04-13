@@ -21,7 +21,8 @@ from typing import Callable, Dict, List, Optional
 import oracledb
 from oracle_session import DEFAULT_CALL_TIMEOUT_MS, apply_call_timeout
 
-_MAX_PHYSICAL_WORKERS = 64
+_MAX_PHYSICAL_WORKERS = 128
+MAX_WORKLOAD_SEED_ROWS = 100000
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ class WorkloadConfig:
     thread_count: int = 8           # requested worker count for this process
     duration_seconds: int = 60
     hot_row_pct: int = 5            # 1..10
-    seed_rows: int = 500
+    seed_rows: int = 500            # cached / ensured rows per table for the run
     commit_batch: int = 10
     insert_pct: int = 40
     update_pct: int = 40
@@ -52,10 +53,12 @@ class WorkloadConfig:
     # NORMAL     : mixed DML (INSERT/UPDATE/DELETE) spread across all tables
     # HAMMER     : SELECT FOR UPDATE NOWAIT + UPDATE on the same 10 hot rows
     #              across ALL tables — maximises gc current block congested
-    # LMS_STRESS : rapid-fire UPDATEs on just 5 rows in table-1, commit after
-    #              every op — highest GC-request rate, designed to overflow the
-    #              LMS process queue and force "congested" waits
-    contention_mode: str = "NORMAL"   # NORMAL | HAMMER | LMS_STRESS
+    # LMS_STRESS : rapid-fire UPDATEs on a very small hot window across all
+    #              tables, commit after every op — floods the LMS queue
+    # EXTREME_LMS: NOWAIT lock + UPDATE + COMMIT on an ultra-tight hot window
+    #              across the first 1-2 tables — maximises repeated block
+    #              bouncing on the same data and index blocks
+    contention_mode: str = "NORMAL"   # NORMAL | HAMMER | LMS_STRESS | EXTREME_LMS
     lock_hold_ms: int = 0              # ms to hold lock before UPDATE (HAMMER only)
     call_timeout_ms: int = DEFAULT_CALL_TIMEOUT_MS
 
@@ -232,6 +235,8 @@ class WorkloadRunner:
         mode = config.contention_mode.upper()
         if mode == "HAMMER":
             worker_fn = self._worker_hammer
+        elif mode == "EXTREME_LMS":
+            worker_fn = self._worker_extreme_lms
         elif mode == "LMS_STRESS":
             worker_fn = self._worker_lms_stress
         else:
@@ -314,11 +319,20 @@ class WorkloadRunner:
 
     def _contention_row_pool(self, table_idx: int, minimum_rows: int) -> list[int]:
         """Return a wider hot-row pool to favor GC over same-row TX waits."""
+        hot = self._hot_rows.get(table_idx, [])
+        all_rows = self._all_rows.get(table_idx, [])
+        if not all_rows:
+            return []
+        if len(hot) >= minimum_rows:
+            return hot
+        return all_rows[:min(len(all_rows), max(1, int(minimum_rows or 1)))]
+
+    def _narrow_contention_row_pool(self, table_idx: int, row_limit: int) -> list[int]:
+        """Return the hottest rows only, keeping the working set intentionally tiny."""
         base = self._hot_rows.get(table_idx, []) or self._all_rows.get(table_idx, [])
         if not base:
             return []
-        target = max(minimum_rows, len(base))
-        return base[:min(len(base), target)]
+        return base[:min(len(base), max(1, int(row_limit or 1)))]
 
     def _thread_row_window(self, rows: list[int], slot: int, window_size: int) -> list[int]:
         """Return a thread-specific rotating window over a shared hot-row pool."""
@@ -339,6 +353,7 @@ class WorkloadRunner:
         cfg = self._config
 
         conn = None
+        cursor = None
         try:
             conn = self._pool.acquire()
             apply_call_timeout(conn, cfg.call_timeout_ms)
@@ -399,10 +414,11 @@ class WorkloadRunner:
             self.status.record_error(str(exc))
         finally:
             if conn is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
                 try:
                     self._pool.release(conn)
                 except Exception:
@@ -445,6 +461,7 @@ class WorkloadRunner:
         slot = self._worker_slot()
 
         conn = None
+        cursor = None
         try:
             conn = self._pool.acquire()
             apply_call_timeout(conn, cfg.call_timeout_ms)
@@ -521,10 +538,11 @@ class WorkloadRunner:
             self.status.record_error(str(exc))
         finally:
             if conn is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
                 try:
                     self._pool.release(conn)
                 except Exception:
@@ -533,12 +551,13 @@ class WorkloadRunner:
     def _worker_lms_stress(self) -> None:
         """LMS Stress mode worker — maximum GC request rate.
 
-        All threads hammer rows 1-5 in every table with rapid-fire
-        plain UPDATEs (no ``FOR UPDATE`` lock step) and commit after
-        every single operation.  This generates the highest possible
-        rate of Cache Fusion block-transfer requests per second,
-        designed to overflow the LMS receive-queue and reliably produce
-        ``gc current block congested`` waits.
+        All threads hammer a narrow hot window in every table with
+        rapid-fire plain UPDATEs and commit after every single
+        operation.  This generates a very high rate of Cache Fusion
+        block-transfer requests per second, designed to overflow the
+        LMS receive-queue and reliably produce
+        ``gc current block congested`` waits while still avoiding the
+        worst same-row lock pileups.
 
         Why commit=1?
         -------------
@@ -553,15 +572,17 @@ class WorkloadRunner:
         assert self._pool is not None
         cfg = self._config
 
-        # Keep pressure on hot areas, but widen the pool enough that sessions
-        # collide on blocks/index leaves more often than on the exact same row.
+        # Tighten the working set so nearby rows and index leaves bounce
+        # constantly, but leave enough room to avoid total collapse into
+        # TX row-lock waits.
         stress_rows: dict[int, list[int]] = {
-            idx: self._contention_row_pool(idx, 256)
+            idx: self._narrow_contention_row_pool(idx, 24)
             for idx in range(1, cfg.table_count + 1)
         }
         slot = self._worker_slot()
 
         conn = None
+        cursor = None
         try:
             conn = self._pool.acquire()
             apply_call_timeout(conn, cfg.call_timeout_ms)
@@ -577,7 +598,7 @@ class WorkloadRunner:
                 rows = stress_rows.get(table_idx, [])
                 if not rows:
                     continue
-                pk = random.choice(self._thread_row_window(rows, slot, 24))
+                pk = random.choice(self._thread_row_window(rows, slot, 8))
                 tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
 
                 try:
@@ -606,10 +627,98 @@ class WorkloadRunner:
             self.status.record_error(str(exc))
         finally:
             if conn is not None:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
                 try:
-                    cursor.close()
+                    self._pool.release(conn)
                 except Exception:
                     pass
+
+    def _worker_extreme_lms(self) -> None:
+        """Extreme LMS mode worker — ultra-tight block bouncing.
+
+        This mode focuses all workers on the first one or two tables and
+        only the first handful of hot PKs.  It uses ``FOR UPDATE NOWAIT``
+        to avoid long row-lock stalls, then commits every operation so
+        the same current blocks are requested and handed off again
+        immediately.
+        """
+        assert self._config is not None
+        assert self._pool is not None
+        cfg = self._config
+
+        focus_table_count = max(1, min(cfg.table_count, 2))
+        focus_tables = list(range(1, focus_table_count + 1))
+        extreme_rows: dict[int, list[int]] = {
+            idx: self._narrow_contention_row_pool(idx, 8)
+            for idx in focus_tables
+        }
+        slot = self._worker_slot()
+
+        conn = None
+        cursor = None
+        try:
+            conn = self._pool.acquire()
+            apply_call_timeout(conn, cfg.call_timeout_ms)
+            cursor = conn.cursor()
+
+            while not self._stop_event.is_set():
+                elapsed = time.monotonic() - self._start_time
+                if elapsed >= cfg.duration_seconds:
+                    self._stop_event.set()
+                    break
+
+                table_idx = focus_tables[(slot + random.randint(0, focus_table_count - 1)) % focus_table_count]
+                rows = extreme_rows.get(table_idx, [])
+                if not rows:
+                    continue
+                pk = random.choice(self._thread_row_window(rows, slot, 4))
+                tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
+
+                try:
+                    cursor.execute(
+                        f"SELECT order_id FROM {tname} "
+                        f"WHERE order_id = :pk FOR UPDATE NOWAIT",
+                        {"pk": pk},
+                    )
+                    if cursor.fetchone() is None:
+                        conn.rollback()
+                        continue
+
+                    cursor.execute(
+                        f"UPDATE {tname} SET "
+                        f"amount = NVL(amount, 0) + 1, "
+                        f"status = CASE status WHEN 'PROCESSING' THEN 'NEW' ELSE 'PROCESSING' END, "
+                        f"ship_date = SYSDATE "
+                        f"WHERE order_id = :pk",
+                        {"pk": pk},
+                    )
+                    self.status.increment("updates")
+                    conn.commit()
+
+                except oracledb.DatabaseError as exc:
+                    err_str = str(exc)
+                    if "ORA-00054" in err_str or "ORA-30006" in err_str:
+                        pass
+                    else:
+                        self.status.record_error(err_str)
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+
+        except oracledb.DatabaseError as exc:
+            self.status.record_error(str(exc))
+        finally:
+            if conn is not None:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
                 try:
                     self._pool.release(conn)
                 except Exception:
@@ -709,6 +818,7 @@ class WorkloadRunner:
             return
 
         conn = self._pool.acquire()
+        cursor = None
         try:
             apply_call_timeout(conn, cfg.call_timeout_ms)
             cursor = conn.cursor()
@@ -749,7 +859,8 @@ class WorkloadRunner:
             self._all_rows[table_idx] = all_pks
             hot_count = max(32, len(all_pks) * cfg.hot_row_pct // 100)
             self._hot_rows[table_idx] = all_pks[:min(len(all_pks), hot_count)]
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
         finally:
             self._pool.release(conn)
 

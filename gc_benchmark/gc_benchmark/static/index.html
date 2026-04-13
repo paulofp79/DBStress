@@ -368,7 +368,14 @@
                                 <input type="radio" name="contention_mode" value="LMS_STRESS">
                                 <div class="radio-card-body">
                                     <span class="radio-card-title">🔥 LMS Stress</span>
-                                    <span class="radio-card-desc">Rapid-fire UPDATEs on 5 rows, commit every op — floods LMS queue</span>
+                                    <span class="radio-card-desc">Rapid-fire UPDATEs on a narrow hot window across all tables — floods the LMS queue</span>
+                                </div>
+                            </label>
+                            <label class="radio-card" id="cm-extreme-lms-card">
+                                <input type="radio" name="contention_mode" value="EXTREME_LMS">
+                                <div class="radio-card-body">
+                                    <span class="radio-card-title">💥 Extreme LMS</span>
+                                    <span class="radio-card-desc">NOWAIT lock + UPDATE on 8 hot rows across 1-2 tables — ultra-tight block bouncing</span>
                                 </div>
                             </label>
                         </div>
@@ -401,7 +408,7 @@
                         </div>
                     </div>
 
-                    <!-- Oracle tuning tips (shown in Hammer / LMS Stress) -->
+                    <!-- Oracle tuning tips (shown in Hammer / LMS Stress / Extreme LMS) -->
                     <div class="tuning-tips-card" id="tuning-tips" style="display:none">
                         <div class="tuning-tips-header">
                             💡 Boost congestion further — Oracle &amp; OS parameters
@@ -454,8 +461,19 @@
 
                     <div class="field-inline">
                         <div class="field-left">
+                            <span class="field-name">Workload Seed Rows</span>
+                            <span class="field-desc">Rows per table to cache or top up for the run. Keep this much smaller than total table size for very large schemas.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="wl-seed-rows" value="500" min="1" max="100000" step="1" style="width:140px;text-align:center">
+                            <span class="text-muted text-sm">rows/table</span>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
                             <span class="field-name">Hot Row Percentage</span>
-                            <span class="field-desc">% of rows targeted for contention (1 - 10)</span>
+                            <span class="field-desc">% of the workload seed rows targeted for contention (1 - 10)</span>
                         </div>
                         <div class="field-right">
                             <div class="slider-group">

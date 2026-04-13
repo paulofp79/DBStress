@@ -38,6 +38,7 @@
         '#6c9fff', '#f87171', '#fbbf24', '#34d399',
         '#a78bfa', '#22d3ee', '#f472b6', '#a3a3a3',
     ];
+    var MAX_WORKLOAD_SEED_ROWS = 100000;
 
     var PAGE_TITLES = {
         connection: 'Connection',
@@ -77,6 +78,15 @@
     function showStatus(containerId, message, type) {
         $(containerId).innerHTML =
             '<div class="status-box status-' + type + '">' + escapeHtml(message) + '</div>';
+    }
+
+    function getCurrentWorkloadSeedRows() {
+        var field = $('wl-seed-rows');
+        var value = parseInt(((field || {}).value || '500'), 10);
+        if (isNaN(value)) value = 500;
+        value = Math.max(1, Math.min(MAX_WORKLOAD_SEED_ROWS, value));
+        if (field) field.value = String(value);
+        return value;
     }
 
     function confirmDialog(message, onConfirm) {
@@ -292,10 +302,12 @@
         if (s.partition_detail) part += ' (' + s.partition_detail + ')';
         var comp = s.compression || 'NONE';
         var compActive = comp !== 'NONE';
+        var hasSeedRows = !(s.seed_rows === undefined || s.seed_rows === null || s.seed_rows === '');
+        var rowLabel = hasSeedRows ? Number(s.seed_rows || 0).toLocaleString() : 'unknown';
         el.innerHTML =
             '<span class="schema-badge"><b>' + escapeHtml(s.prefix || s.table_prefix || 'GCB') + '</b></span>' +
             '<span class="schema-badge">Tables&nbsp;<b>' + escapeHtml(String(s.table_count || 10)) + '</b></span>' +
-            '<span class="schema-badge">Rows/Table&nbsp;<b>' + escapeHtml((Number(s.seed_rows || 0)).toLocaleString()) + '</b></span>' +
+            '<span class="schema-badge">Rows/Table&nbsp;<b>' + escapeHtml(rowLabel) + '</b></span>' +
             '<span class="schema-badge">Partition&nbsp;<b>' + escapeHtml(part) + '</b></span>' +
             '<span class="schema-badge' + (compActive ? ' schema-badge-active' : '') + '">Compression&nbsp;<b>' + escapeHtml(comp) + '</b></span>';
     }
@@ -801,6 +813,7 @@
             table_count:      parseInt($('wl-table-count').value) || 10,
             thread_count:     parseInt($('wl-threads').value),
             duration_seconds: parseInt($('wl-duration').value)    || 60,
+            seed_rows:        getCurrentWorkloadSeedRows(),
             hot_row_pct:      parseInt($('wl-hotrow').value),
             insert_pct:       parseInt($('wl-insert-pct').value, 10) || 0,
             update_pct:       parseInt($('wl-update-pct').value, 10) || 0,
@@ -942,6 +955,7 @@
             var elapsed = Number(item.elapsed || 0).toFixed(1) + 's / ' + Number(item.duration || 0).toLocaleString() + 's';
             var requested = Number(item.requested_threads || item.thread_count || 0).toLocaleString();
             var physical = Number(item.physical_workers || 0).toLocaleString();
+            var seedRows = Number(item.seed_rows || 0).toLocaleString();
             var phase = String(item.phase || 'RUNNING').toUpperCase();
             var phaseClass = 'phase-' + phase.toLowerCase();
 
@@ -950,7 +964,7 @@
                     '<td>' +
                         '<div class="active-workload-id">' +
                             '<strong>' + escapeHtml(workloadId) + '</strong>' +
-                            '<span class="active-workload-meta">Tables ' + escapeHtml(Number(item.table_count || 0).toLocaleString()) + ' · Workers ' + escapeHtml(physical) + '</span>' +
+                            '<span class="active-workload-meta">Tables ' + escapeHtml(Number(item.table_count || 0).toLocaleString()) + ' · Seed ' + escapeHtml(seedRows) + ' · Workers ' + escapeHtml(physical) + '</span>' +
                         '</div>' +
                     '</td>' +
                     '<td class="text-col">' + escapeHtml(schema) + '</td>' +
@@ -2163,6 +2177,12 @@
                 var v = $('lock-hold-val');
                 if (v) v.textContent = this.value + ' ms';
             });
+        }
+
+        var workloadSeedRows = $('wl-seed-rows');
+        if (workloadSeedRows) {
+            workloadSeedRows.addEventListener('change', getCurrentWorkloadSeedRows);
+            workloadSeedRows.addEventListener('blur', getCurrentWorkloadSeedRows);
         }
 
         var modeInit = document.querySelector('input[name="contention_mode"]:checked');

@@ -349,6 +349,7 @@ Current workload controls:
 - set concurrent threads
 - type or slide the thread count directly
 - set duration
+- set workload seed rows
 - set hot row percentage
 - restart a PDB as a separate action using the configured CDB connection
 
@@ -357,6 +358,7 @@ Current contention modes:
 - `NORMAL`
 - `HAMMER`
 - `LMS_STRESS`
+- `EXTREME_LMS`
 
 Current live behavior:
 

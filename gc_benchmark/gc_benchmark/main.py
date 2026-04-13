@@ -60,7 +60,7 @@ from oracle_session import (
     connect_from_state,
     shard_worker_counts,
 )
-from workload import WorkloadConfig
+from workload import MAX_WORKLOAD_SEED_ROWS, WorkloadConfig
 import report
 
 # ---------------------------------------------------------------------------
@@ -468,6 +468,7 @@ def _build_workload_status_payload(
             "physical_workers": getattr(controller, "_worker_count", 0),
             "process_count": getattr(controller, "_process_count", 0),
             "duration": getattr(cfg, "duration_seconds", payload.get("duration", 0)),
+            "seed_rows": getattr(cfg, "seed_rows", 0),
             "contention_mode": getattr(cfg, "contention_mode", "NORMAL"),
             "execution_model": "pooled child-process workers",
         })
@@ -2047,7 +2048,13 @@ async def workload_start(body: dict):
         thread_count=max(2, min(10000, int(body.get("thread_count", 8)))),
         duration_seconds=max(10, int(body.get("duration_seconds", 60))),
         hot_row_pct=max(1, min(10, int(body.get("hot_row_pct", 5)))),
-        seed_rows=int(body.get("seed_rows", 500)),
+        seed_rows=max(
+            1,
+            min(
+                MAX_WORKLOAD_SEED_ROWS,
+                int(body.get("seed_rows", 500)),
+            ),
+        ),
         commit_batch=int(body.get("commit_batch", 10)),
         insert_pct=max(0, int(body.get("insert_pct", 40))),
         update_pct=max(0, int(body.get("update_pct", 40))),
