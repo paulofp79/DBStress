@@ -59,6 +59,21 @@
         return div.innerHTML;
     }
 
+    function formatRunDateTime(value) {
+        if (!value) return '-';
+        var date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return String(value).replace('T', ' ').substring(0, 16);
+        }
+        return date.toLocaleString([], {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    }
+
     function showStatus(containerId, message, type) {
         $(containerId).innerHTML =
             '<div class="status-box status-' + type + '">' + escapeHtml(message) + '</div>';
@@ -1759,7 +1774,7 @@
         }
 
         if (runs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">' +
+            tbody.innerHTML = '<tr><td colspan="14"><div class="empty-state">' +
                 '<div class="empty-icon">&#128202;</div>' +
                 'No benchmark runs yet.<br>Complete a workload run to see results here.' +
                 '</div></td></tr>';
@@ -1787,12 +1802,15 @@
                 else if (total === maxGC) rowClass = 'row-worst';
             }
 
-            var date = r.started_at ? r.started_at.replace('T', ' ').substring(0, 16) : '-';
+            var date = formatRunDateTime(r.started_at);
+            var startedFinished = 'Start: ' + escapeHtml(formatRunDateTime(r.started_at)) +
+                '<br>End: ' + escapeHtml(formatRunDateTime(r.finished_at));
 
             html += '<tr class="' + rowClass + '">' +
                 '<td><input type="checkbox" class="run-check" value="' + r.run_id + '"></td>' +
                 '<td>#' + r.run_id + '</td>' +
                 '<td class="text-col">' + escapeHtml(date) + '</td>' +
+                '<td class="text-col">' + startedFinished + '</td>' +
                 '<td class="text-col">' + escapeHtml(r.schema_name || '-') + '</td>' +
                 '<td>' + (r.table_count || '-') + '</td>' +
                 '<td class="text-col">' + escapeHtml(r.partition_type || '-') + '</td>' +
