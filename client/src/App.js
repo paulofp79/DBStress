@@ -559,7 +559,14 @@ function App() {
         )}
 
         <div style={{ display: activeTab === 'monitor' ? 'block' : 'none' }}>
-          <MonitorPanel dbStatus={dbStatus} />
+          <div className="grid-2">
+            <ConnectionPanel
+              dbStatus={dbStatus}
+              onConnect={handleConnect}
+              onDisconnect={handleDisconnect}
+            />
+            <MonitorPanel dbStatus={dbStatus} />
+          </div>
         </div>
 
         {/* Stress Test Tab */}

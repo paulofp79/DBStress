@@ -258,19 +258,21 @@ function MonitorPanel({ dbStatus }) {
 
   if (!dbStatus.connected) {
     return (
-      <div className="panel">
+      <div className="panel" style={{ minHeight: '100%' }}>
         <div className="panel-header">
           <h2>Monitor</h2>
         </div>
         <div className="panel-content">
-          <p style={{ color: 'var(--text-muted)' }}>Connect to database first.</p>
+          <p style={{ color: 'var(--text-muted)' }}>
+            Use the connection panel on this tab to connect to the database, then start monitoring waits.
+          </p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="panel">
+    <div className="panel" style={{ minHeight: '100%' }}>
       <div className="panel-header">
         <h2>Monitor</h2>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
