@@ -16,7 +16,11 @@ import traceback
 from pathlib import Path
 
 from login_workload import LoginWorkloadConfig, LoginWorkloadRunner
-from oracle_session import build_connection_state, connect_from_state
+from oracle_session import (
+    DEFAULT_SCHEMA_CALL_TIMEOUT_MS,
+    build_connection_state,
+    connect_from_state,
+)
 from schema import SchemaConfig, create_schema_parallel
 from workload import WorkloadConfig, WorkloadRunner
 
@@ -130,7 +134,10 @@ def run_schema_create(spec: dict) -> int:
     install_signal_handlers(stop_requested)
 
     def connection_factory():
-        return connect_from_state(connection_state)
+        return connect_from_state(
+            connection_state,
+            call_timeout_ms=DEFAULT_SCHEMA_CALL_TIMEOUT_MS,
+        )
 
     try:
         for message in create_schema_parallel(cfg, connection_factory):
