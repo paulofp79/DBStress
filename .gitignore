@@ -36,5 +36,6 @@ gc_benchmark/gc_benchmark/results.db
 gc_benchmark/gc_benchmark/config.ini
 gc_benchmark/gc_benchmark/connections.json
 gc_benchmark/gc_benchmark/cpool_connections.json
+gc_benchmark/gc_benchmark/active_workloads.json
 
 .nfs*

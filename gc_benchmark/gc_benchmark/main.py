@@ -16,6 +16,7 @@ import configparser
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -73,6 +74,7 @@ DB_PATH = str(BASE_DIR / "results.db")
 CONFIG_PATH           = str(BASE_DIR / "config.ini")
 RECENT_CONNS_PATH     = str(BASE_DIR / "connections.json")
 RECENT_CPOOL_CONNS_PATH = str(BASE_DIR / "cpool_connections.json")
+ACTIVE_WORKLOADS_PATH = str(BASE_DIR / "active_workloads.json")
 RECENT_CONNS_MAX      = 5          # how many entries to keep
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,7 @@ _cpool_conn_state: dict = {
 
 _workload_runners: dict[str, Any] = {}
 _workload_runners_lock = threading.Lock()
+_active_workloads_file_lock = threading.Lock()
 _login_runner: Optional[Any] = None
 _schema_job = None
 _ws_clients: list[WebSocket] = []
@@ -283,6 +286,228 @@ def _save_recent_cpool_conn(entry: dict) -> None:
 
     with open(RECENT_CPOOL_CONNS_PATH, "w") as f:
         json.dump(updated, f, indent=2)
+
+
+def _load_active_workload_records() -> dict[str, dict]:
+    """Return the persisted active workload registry."""
+    if not os.path.exists(ACTIVE_WORKLOADS_PATH):
+        return {}
+    try:
+        with open(ACTIVE_WORKLOADS_PATH) as handle:
+            data = json.load(handle)
+        workloads = data.get("workloads", {}) if isinstance(data, dict) else {}
+        return workloads if isinstance(workloads, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_active_workload_records(records: dict[str, dict]) -> None:
+    """Persist the active workload registry atomically."""
+    payload = {"workloads": records}
+    handle = NamedTemporaryFile(
+        mode="w",
+        suffix=".json",
+        prefix="gcb-active-workloads-",
+        dir=str(BASE_DIR),
+        delete=False,
+    )
+    try:
+        json.dump(payload, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_path = handle.name
+    finally:
+        handle.close()
+    os.replace(temp_path, ACTIVE_WORKLOADS_PATH)
+
+
+def _persist_active_workload(
+    workload_id: str,
+    payload: dict,
+    *,
+    child_pids: Optional[list[int]] = None,
+) -> None:
+    """Upsert one workload record used for restart recovery."""
+    if not workload_id:
+        return
+    record = dict(payload or {})
+    record["workload_id"] = workload_id
+    if child_pids is not None:
+        record["child_pids"] = [
+            int(pid) for pid in child_pids
+            if str(pid).strip() and int(pid) > 0
+        ]
+    elif "child_pids" in record:
+        record["child_pids"] = [
+            int(pid) for pid in record.get("child_pids", [])
+            if str(pid).strip() and int(pid) > 0
+        ]
+    else:
+        record["child_pids"] = []
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    with _active_workloads_file_lock:
+        records = _load_active_workload_records()
+        records[workload_id] = record
+        _save_active_workload_records(records)
+
+
+def _remove_persisted_active_workload(workload_id: str) -> None:
+    """Delete one workload from the restart recovery registry."""
+    if not workload_id:
+        return
+    with _active_workloads_file_lock:
+        records = _load_active_workload_records()
+        if workload_id not in records:
+            return
+        records.pop(workload_id, None)
+        _save_active_workload_records(records)
+
+
+def _get_persisted_active_workload_record(workload_id: str) -> Optional[dict]:
+    """Return one raw workload record from the persisted registry."""
+    if not workload_id:
+        return None
+    with _active_workloads_file_lock:
+        records = _load_active_workload_records()
+        record = records.get(workload_id)
+        return dict(record) if isinstance(record, dict) else None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True when *pid* currently exists on this host."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    return True
+
+
+def _build_recovered_workload_payload(record: dict, alive_pids: list[int]) -> dict:
+    """Return a UI payload for a workload recovered from disk after restart."""
+    payload = {
+        key: value
+        for key, value in dict(record or {}).items()
+        if key not in {"child_pids", "updated_at"}
+    }
+    prior_phase = str(payload.get("phase", "") or "").upper()
+    prior_message = str(payload.get("status_message", "") or "").strip()
+    payload["workload_id"] = str(payload.get("workload_id", "") or "")
+    payload["running"] = True
+    payload["phase"] = "STOPPING" if prior_phase == "STOPPING" else "RECOVERED"
+    payload["orphaned"] = True
+    payload["live_updates_available"] = False
+    payload["recovered_child_process_count"] = len(alive_pids)
+    if prior_phase == "STOPPING" and prior_message:
+        payload["status_message"] = prior_message
+    else:
+        payload["status_message"] = (
+            "Recovered after app restart. Child workload process(es) are still running, "
+            "but live progress updates are unavailable until you stop them or they finish."
+        )
+    if not payload.get("execution_model"):
+        payload["execution_model"] = "recovered child-process workers"
+    if not payload.get("physical_workers"):
+        payload["physical_workers"] = int(payload.get("thread_count", 0) or 0)
+    if not payload.get("process_count"):
+        payload["process_count"] = len(alive_pids)
+    return payload
+
+
+def _list_recovered_active_workloads() -> list[dict]:
+    """Return persisted workloads whose child processes survived an app restart."""
+    recovered: list[dict] = []
+    changed = False
+
+    with _active_workloads_file_lock:
+        records = _load_active_workload_records()
+        for workload_id, record in list(records.items()):
+            child_pids = [
+                int(pid) for pid in record.get("child_pids", [])
+                if str(pid).strip()
+            ]
+            alive_pids = [pid for pid in child_pids if _pid_is_alive(pid)]
+            if not alive_pids:
+                records.pop(workload_id, None)
+                changed = True
+                continue
+            if alive_pids != child_pids:
+                record["child_pids"] = alive_pids
+                record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                records[workload_id] = record
+                changed = True
+            recovered.append(_build_recovered_workload_payload(record, alive_pids))
+
+        if changed:
+            _save_active_workload_records(records)
+
+    return recovered
+
+
+def _stop_recovered_workload(record: dict) -> dict:
+    """Stop child processes for a workload found only in the persisted registry."""
+    workload_id = str(record.get("workload_id", "") or "").strip()
+    child_pids = [
+        int(pid) for pid in record.get("child_pids", [])
+        if str(pid).strip()
+    ]
+    alive_pids = [pid for pid in child_pids if _pid_is_alive(pid)]
+    if not alive_pids:
+        _remove_persisted_active_workload(workload_id)
+        payload = _build_recovered_workload_payload(record, [])
+        payload["running"] = False
+        payload["phase"] = "STOPPED"
+        payload["status_message"] = "Recovered workload is no longer running."
+        return payload
+
+    for pid in alive_pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + SUBPROCESS_STOP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        remaining = [pid for pid in alive_pids if _pid_is_alive(pid)]
+        if not remaining:
+            break
+        time.sleep(0.2)
+
+    remaining = [pid for pid in alive_pids if _pid_is_alive(pid)]
+    if remaining:
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+        deadline = time.monotonic() + SUBPROCESS_FORCE_KILL_SECONDS
+        while time.monotonic() < deadline:
+            remaining = [pid for pid in remaining if _pid_is_alive(pid)]
+            if not remaining:
+                break
+            time.sleep(0.2)
+
+    remaining = [pid for pid in alive_pids if _pid_is_alive(pid)]
+    if remaining:
+        persisted = _build_recovered_workload_payload(record, remaining)
+        persisted["phase"] = "STOPPING"
+        persisted["status_message"] = (
+            "Stop requested for recovered workload. Waiting for child process(es) to exit."
+        )
+        _persist_active_workload(workload_id, persisted, child_pids=remaining)
+        return persisted
+
+    _remove_persisted_active_workload(workload_id)
+    payload = _build_recovered_workload_payload(record, [])
+    payload["running"] = False
+    payload["phase"] = "STOPPED"
+    payload["status_message"] = "Recovered workload stopped."
+    return payload
 
 
 def _load_config() -> None:
@@ -2085,6 +2310,14 @@ async def workload_start(body: dict):
         )
 
     def on_progress(status_dict: dict):
+        _persist_active_workload(
+            workload_id,
+            current_status_payload(status_dict),
+            child_pids=[
+                proc.pid for proc in controller._procs.values()
+                if getattr(proc, "pid", 0)
+            ] if controller is not None else None,
+        )
         asyncio.run_coroutine_threadsafe(
             _broadcast(
                 _workload_message(
@@ -2116,6 +2349,7 @@ async def workload_start(body: dict):
         )
 
     def on_complete(final_status: dict):
+        _remove_persisted_active_workload(workload_id)
         after_snapshot: dict = {}
         try:
             conn = connect_from_state(connection_state)
@@ -2249,7 +2483,17 @@ async def workload_start(body: dict):
         controller.start()
     except Exception as exc:
         _remove_workload_runner(workload_id, controller)
+        _remove_persisted_active_workload(workload_id)
         return {"ok": False, "message": f"Failed to start workload: {exc}"}
+
+    _persist_active_workload(
+        workload_id,
+        current_status_payload(),
+        child_pids=[
+            proc.pid for proc in controller._procs.values()
+            if getattr(proc, "pid", 0)
+        ],
+    )
 
     lifecycle_thread = threading.Thread(
         target=_watch_workload_runner,
@@ -2329,7 +2573,14 @@ async def workload_stop(body: dict):
 
     controller = _get_workload_runner(workload_id)
     if not controller:
-        return {"ok": False, "message": f"Workload {workload_id} was not found."}
+        recovered_record = _get_persisted_active_workload_record(workload_id)
+        if not recovered_record:
+            return {"ok": False, "message": f"Workload {workload_id} was not found."}
+        result = _stop_recovered_workload(recovered_record)
+        return {
+            "ok": True,
+            "status": result,
+        }
 
     result = controller.stop()
     return {
@@ -2360,13 +2611,29 @@ async def workload_status(
     workloads: list[dict] = []
     other_labels: set[str] = set()
     other_workload_count = 0
+    seen_workload_ids: set[str] = set()
 
     for workload_id, controller in _list_workload_runners():
         payload = _build_workload_status_payload(controller, workload_id)
         if not _is_active_workload_payload(payload):
             continue
+        seen_workload_ids.add(str(workload_id))
 
         runner_connection = getattr(controller, "_connection_key", None)
+        if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
+            if not _same_connection(requested_connection, runner_connection):
+                other_workload_count += 1
+                other_labels.add(_format_connection_key(runner_connection))
+                continue
+
+        workloads.append(payload)
+
+    for payload in _list_recovered_active_workloads():
+        workload_id = str(payload.get("workload_id", "") or "")
+        if workload_id in seen_workload_ids:
+            continue
+
+        runner_connection = payload.get("connection_key")
         if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
             if not _same_connection(requested_connection, runner_connection):
                 other_workload_count += 1
@@ -2427,7 +2694,7 @@ async def login_workload_start(body: dict):
         password=connection_state["password"],
         mode=connection_state.get("mode", "thin"),
         sql_text=sql_text,
-        thread_count=max(1, min(1000, int(body.get("thread_count", 20)))),
+        thread_count=max(1, min(MAX_TOTAL_LOGIN_WORKERS, int(body.get("thread_count", 20)))),
         stop_mode=stop_mode,
         iterations_per_thread=max(0, int(body.get("iterations_per_thread", 1000))),
         duration_seconds=max(0, int(body.get("duration_seconds", 0))),

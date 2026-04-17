@@ -447,7 +447,7 @@
         if (!data) return false;
         if (data.running) return true;
         var phase = String(data.phase || '').toUpperCase();
-        return phase === 'PREPARING' || phase === 'WARMING' || phase === 'RUNNING' || phase === 'STOPPING';
+        return phase === 'PREPARING' || phase === 'WARMING' || phase === 'RUNNING' || phase === 'STOPPING' || phase === 'RECOVERED';
     }
 
     function getActiveWorkloads() {
@@ -958,13 +958,14 @@
             var seedRows = Number(item.seed_rows || 0).toLocaleString();
             var phase = String(item.phase || 'RUNNING').toUpperCase();
             var phaseClass = 'phase-' + phase.toLowerCase();
+            var restartMeta = item.orphaned ? ' · Recovered after restart' : '';
 
             return (
                 '<tr class="' + (selected ? 'active-workload-selected' : '') + '">' +
                     '<td>' +
                         '<div class="active-workload-id">' +
                             '<strong>' + escapeHtml(workloadId) + '</strong>' +
-                            '<span class="active-workload-meta">Tables ' + escapeHtml(Number(item.table_count || 0).toLocaleString()) + ' · Seed ' + escapeHtml(seedRows) + ' · Workers ' + escapeHtml(physical) + '</span>' +
+                            '<span class="active-workload-meta">Tables ' + escapeHtml(Number(item.table_count || 0).toLocaleString()) + ' · Seed ' + escapeHtml(seedRows) + ' · Workers ' + escapeHtml(physical) + escapeHtml(restartMeta) + '</span>' +
                         '</div>' +
                     '</td>' +
                     '<td class="text-col">' + escapeHtml(schema) + '</td>' +
@@ -1013,12 +1014,16 @@
         el.className = 'status-box status-warning';
         var selectedLabel = '';
         if (selected) {
+            var recoveredNote = selected.orphaned
+                ? ' Recovered after app restart; live updates are unavailable.'
+                : '';
             selectedLabel =
                 ' Selected workload <b>' + escapeHtml(String(selected.workload_id || '')) + '</b>' +
                 ' on schema <b>' + escapeHtml(selected.schema_name || selected.table_prefix || 'GCB') + '</b>' +
                 ' is <b>' + escapeHtml(String(selected.phase || 'RUNNING')) + '</b>' +
                 ' at <b>' + escapeHtml(Number(selected.elapsed || 0).toFixed(1)) + 's / ' +
-                escapeHtml(Number(selected.duration || 0).toLocaleString()) + 's</b>.';
+                escapeHtml(Number(selected.duration || 0).toLocaleString()) + 's</b>.' +
+                recoveredNote;
         }
 
         el.innerHTML =
@@ -1474,6 +1479,14 @@
         var elapsed = data.elapsed || 0;
         var duration = data.duration || 60;
         var phase = data.phase || 'RUNNING';
+        if (phase === 'RECOVERED') {
+            $('ops-per-sec').textContent = 'Recovered workload after app restart';
+            $('progress-fill').style.width = '100%';
+            $('progress-pct').textContent = 'RECOVERED';
+            $('progress-text').textContent = data.status_message || 'Recovered workload is still running, but live counters are unavailable.';
+            $('elapsed-badge').textContent = Math.floor(elapsed) + 's last seen';
+            return;
+        }
         if (phase !== 'RUNNING') {
             $('ops-per-sec').textContent = 'Waiting for timed run to start...';
             $('progress-fill').style.width = '100%';
