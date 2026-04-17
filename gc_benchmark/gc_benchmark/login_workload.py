@@ -18,9 +18,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import oracledb
-from oracle_session import DEFAULT_CALL_TIMEOUT_MS, apply_call_timeout
+from oracle_session import (
+    DEFAULT_CALL_TIMEOUT_MS,
+    MAX_WORKERS_PER_PROCESS,
+    apply_call_timeout,
+)
 
-_MAX_LOGIN_WORKERS = 64
+_MAX_LOGIN_WORKERS = MAX_WORKERS_PER_PROCESS
 
 
 @dataclass
