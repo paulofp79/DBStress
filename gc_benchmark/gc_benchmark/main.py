@@ -863,6 +863,7 @@ def _aggregate_login_metrics(statuses: list[dict]) -> dict:
         "errors": sum(int(s.get("errors", 0) or 0) for s in statuses),
         "active_connections": sum(int(s.get("active_connections", 0) or 0) for s in statuses),
         "target_cycles": sum(int(s.get("target_cycles", 0) or 0) for s in statuses),
+        "target_seconds": max(int(s.get("target_seconds", 0) or 0) for s in statuses) if statuses else 0,
         "avg_cycle_ms": round(avg_cycle_ms, 2),
     }
 
@@ -2416,6 +2417,10 @@ async def login_workload_start(body: dict):
     except Exception as exc:
         return {"ok": False, "message": f"Preflight query failed: {exc}"}
 
+    stop_mode = str(body.get("stop_mode", "CYCLES") or "CYCLES").upper()
+    if stop_mode not in {"CYCLES", "DURATION", "MANUAL"}:
+        stop_mode = "CYCLES"
+
     cfg = LoginWorkloadConfig(
         dsn=build_dsn_from_state(connection_state),
         user=connection_state["user"],
@@ -2423,7 +2428,9 @@ async def login_workload_start(body: dict):
         mode=connection_state.get("mode", "thin"),
         sql_text=sql_text,
         thread_count=max(1, min(1000, int(body.get("thread_count", 20)))),
+        stop_mode=stop_mode,
         iterations_per_thread=max(0, int(body.get("iterations_per_thread", 1000))),
+        duration_seconds=max(0, int(body.get("duration_seconds", 0))),
         think_time_ms=max(0, min(60000, int(body.get("think_time_ms", 0)))),
     )
 
@@ -2480,7 +2487,9 @@ async def login_workload_start(body: dict):
             "mode": cfg.mode,
             "sql_text": cfg.sql_text,
             "thread_count": cfg.thread_count,
+            "stop_mode": cfg.stop_mode,
             "iterations_per_thread": cfg.iterations_per_thread,
+            "duration_seconds": cfg.duration_seconds,
             "think_time_ms": cfg.think_time_ms,
             "call_timeout_ms": cfg.call_timeout_ms,
         },
@@ -2573,7 +2582,9 @@ async def login_workload_status(
             "requested_threads": getattr(cfg, "thread_count", 0),
             "physical_workers": getattr(_login_runner, "_worker_count", 0),
             "process_count": getattr(_login_runner, "_process_count", 0),
+            "stop_mode": getattr(cfg, "stop_mode", "CYCLES"),
             "iterations_per_thread": getattr(cfg, "iterations_per_thread", 0),
+            "duration_seconds": getattr(cfg, "duration_seconds", 0),
             "think_time_ms": getattr(cfg, "think_time_ms", 0),
             "sql_text": getattr(cfg, "sql_text", ""),
             "execution_model": "dedicated child-process workers",

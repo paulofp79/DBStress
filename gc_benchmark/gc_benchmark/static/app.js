@@ -1073,12 +1073,29 @@
     }
 
     function getLoginWorkloadConfig() {
+        var stopModeRadio = document.querySelector('input[name="login-stop-mode"]:checked');
+        var stopMode = stopModeRadio ? stopModeRadio.value : 'CYCLES';
         return {
             sql_text: (($('login-sql-text') || {}).value || 'select 1 from dual').trim(),
             thread_count: parseInt((($('login-thread-count-input') || {}).value || ($('login-thread-count') || {}).value || '20'), 10) || 20,
-            iterations_per_thread: parseInt((($('login-iterations') || {}).value || '1000'), 10) || 0,
+            stop_mode: stopMode,
+            iterations_per_thread: stopMode === 'CYCLES'
+                ? (parseInt((($('login-iterations') || {}).value || '1000'), 10) || 0)
+                : 0,
+            duration_seconds: stopMode === 'DURATION'
+                ? (parseInt((($('login-duration-seconds') || {}).value || '300'), 10) || 300)
+                : 0,
             think_time_ms: parseInt((($('login-think-time-ms') || {}).value || '0'), 10) || 0,
         };
+    }
+
+    function updateLoginStopModeUI() {
+        var modeRadio = document.querySelector('input[name="login-stop-mode"]:checked');
+        var mode = modeRadio ? modeRadio.value : 'CYCLES';
+        var durationRow = $('login-duration-row');
+        var iterationsRow = $('login-iterations-row');
+        if (durationRow) durationRow.style.display = mode === 'DURATION' ? '' : 'none';
+        if (iterationsRow) iterationsRow.style.display = mode === 'CYCLES' ? '' : 'none';
     }
 
     function resetLoginWorkloadDashboard() {
@@ -1163,7 +1180,9 @@
 
         var requestedThreads = Number(data.requested_threads || data.thread_count || 0).toLocaleString();
         var physicalWorkers = Number(data.physical_workers || 0).toLocaleString();
+        var stopMode = String(data.stop_mode || 'CYCLES').toUpperCase();
         var iterations = Number(data.iterations_per_thread || 0).toLocaleString();
+        var targetSeconds = Number(data.duration_seconds || data.target_seconds || 0).toLocaleString();
         var cycles = Number(data.cycles || 0).toLocaleString();
         var elapsed = Number(data.elapsed || 0).toFixed(1);
         var statusMessage = data.status_message || '';
@@ -1171,12 +1190,15 @@
         if (queryPreview.length > 80) {
             queryPreview = queryPreview.slice(0, 77) + '...';
         }
+        var stopLabel = 'Until Stop';
+        if (stopMode === 'DURATION') stopLabel = targetSeconds + 's';
+        else if (stopMode === 'CYCLES') stopLabel = (iterations === '0' ? 'open-ended' : (iterations + ' / thread'));
 
         el.innerHTML =
             '<b>RUNNING login workload</b> ' +
             'Threads <b>' + escapeHtml(requestedThreads) + '</b> · ' +
             'Physical Workers <b>' + escapeHtml(physicalWorkers) + '</b> · ' +
-            'Iter/Thread <b>' + escapeHtml(iterations === '0' ? 'until stop' : iterations) + '</b> · ' +
+            'Stop <b>' + escapeHtml(stopLabel) + '</b> · ' +
             'Cycles <b>' + escapeHtml(cycles) + '</b> · ' +
             'Elapsed <b>' + escapeHtml(elapsed) + 's</b> · ' +
             'Query <b>' + escapeHtml(queryPreview || 'select 1 from dual') + '</b> · ' +
@@ -1195,6 +1217,7 @@
         var elapsed = Number(data.elapsed || 0);
         var cycles = Number(data.cycles || 0);
         var targetCycles = Number(data.target_cycles || 0);
+        var targetSeconds = Number(data.target_seconds || data.duration_seconds || 0);
         var phase = data.phase || 'RUNNING';
         var denom = elapsed > 0 ? elapsed : 1;
 
@@ -1205,13 +1228,17 @@
             ' · AVG cycle ' + Number(data.avg_cycle_ms || 0).toFixed(1) + ' ms';
 
         if (phase !== 'RUNNING') {
-            var finalPct = targetCycles > 0 ? Math.min(100, (cycles / Math.max(targetCycles, 1)) * 100) : 100;
+            var finalPct = targetCycles > 0
+                ? Math.min(100, (cycles / Math.max(targetCycles, 1)) * 100)
+                : (targetSeconds > 0 ? Math.min(100, (elapsed / Math.max(targetSeconds, 1)) * 100) : 100);
             $('login-progress-fill').style.width = finalPct.toFixed(1) + '%';
             $('login-progress-pct').textContent = phase;
             $('login-progress-text').textContent = data.status_message || ('Login workload ' + phase.toLowerCase());
             $('login-elapsed-badge').textContent = targetCycles > 0
                 ? (Number(cycles).toLocaleString() + ' / ' + Number(targetCycles).toLocaleString() + ' cycles')
-                : (Number(cycles).toLocaleString() + ' cycles');
+                : (targetSeconds > 0
+                    ? (Math.floor(elapsed) + ' / ' + Number(targetSeconds).toLocaleString() + ' sec')
+                    : (Number(cycles).toLocaleString() + ' cycles'));
             return;
         }
 
@@ -1220,6 +1247,11 @@
             $('login-progress-fill').style.width = pct.toFixed(1) + '%';
             $('login-progress-pct').textContent = pct.toFixed(0) + '%';
             $('login-elapsed-badge').textContent = Number(cycles).toLocaleString() + ' / ' + Number(targetCycles).toLocaleString() + ' cycles';
+        } else if (targetSeconds > 0) {
+            var timePct = Math.min(100, (elapsed / Math.max(targetSeconds, 1)) * 100);
+            $('login-progress-fill').style.width = timePct.toFixed(1) + '%';
+            $('login-progress-pct').textContent = timePct.toFixed(0) + '%';
+            $('login-elapsed-badge').textContent = Math.floor(elapsed) + ' / ' + Number(targetSeconds).toLocaleString() + ' sec';
         } else {
             $('login-progress-fill').style.width = '100%';
             $('login-progress-pct').textContent = 'OPEN';
@@ -1238,6 +1270,7 @@
 
         var s = msg.summary || {};
         var targetCycles = Number(s.target_cycles || 0);
+        var targetSeconds = Number(s.target_seconds || 0);
         var cycles = Number(s.cycles || 0);
         var phase = String(s.phase || '').toUpperCase();
         var isStopped = phase === 'STOPPED' || phase === 'STOPPING';
@@ -1257,8 +1290,11 @@
         html += '</span>';
         html += '</div>';
         html += '<div class="status-box status-info" style="margin-top:0">';
-        html += 'Target cycles: <b>' + escapeHtml(targetCycles > 0 ? targetCycles.toLocaleString() : 'open-ended') +
-            '</b> · Completed cycles: <b>' + escapeHtml(cycles.toLocaleString()) + '</b>';
+        html += 'Target: <b>' + escapeHtml(
+            targetCycles > 0
+                ? (targetCycles.toLocaleString() + ' cycles')
+                : (targetSeconds > 0 ? (targetSeconds.toLocaleString() + ' sec') : 'until stop')
+        ) + '</b> · Completed cycles: <b>' + escapeHtml(cycles.toLocaleString()) + '</b>';
         if (s.status_message) {
             html += ' · Status: <b>' + escapeHtml(s.status_message) + '</b>';
         }
@@ -2190,6 +2226,11 @@
             var normalMixRow = $('normal-mix-row');
             if (normalMixRow) normalMixRow.style.display = (modeInit.value === 'NORMAL') ? '' : 'none';
         }
+
+        document.querySelectorAll('input[name="login-stop-mode"]').forEach(function (radio) {
+            radio.addEventListener('change', updateLoginStopModeUI);
+        });
+        updateLoginStopModeUI();
 
         // Schema select dropdown
         $('wl-schema-select').addEventListener('change', function () {

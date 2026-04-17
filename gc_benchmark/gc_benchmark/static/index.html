@@ -754,8 +754,33 @@
 
                     <div class="field-inline">
                         <div class="field-left">
+                            <span class="field-name">Stop Condition</span>
+                            <span class="field-desc">Choose whether the login simulation should run until you stop it, for a fixed time, or for a fixed number of cycles.</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="segment-control">
+                                <label><input type="radio" name="login-stop-mode" value="MANUAL"><span class="seg-label">Until Stop</span></label>
+                                <label><input type="radio" name="login-stop-mode" value="DURATION"><span class="seg-label">Time Limit</span></label>
+                                <label><input type="radio" name="login-stop-mode" value="CYCLES" checked><span class="seg-label">Cycle Limit</span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline" id="login-duration-row" style="display:none">
+                        <div class="field-left">
+                            <span class="field-name">Run Duration</span>
+                            <span class="field-desc">Stop automatically after this many seconds.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="login-duration-seconds" value="300" min="10" max="86400" step="10" style="width:140px;text-align:center">
+                            <span class="text-muted text-sm">sec</span>
+                        </div>
+                    </div>
+
+                    <div class="field-inline" id="login-iterations-row">
+                        <div class="field-left">
                             <span class="field-name">Iterations per Thread</span>
-                            <span class="field-desc">How many login → query → logout cycles each thread should run. Use 0 to run until you click Stop.</span>
+                            <span class="field-desc">How many login → query → logout cycles each thread should run before stopping automatically.</span>
                         </div>
                         <div class="field-right">
                             <input type="number" id="login-iterations" value="1000" min="0" max="1000000" step="100" style="width:140px;text-align:center">

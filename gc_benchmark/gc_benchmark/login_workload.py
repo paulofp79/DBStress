@@ -33,7 +33,9 @@ class LoginWorkloadConfig:
     mode: str = "thin"
     sql_text: str = "select 1 from dual"
     thread_count: int = 20
+    stop_mode: str = "CYCLES"        # CYCLES | DURATION | MANUAL
     iterations_per_thread: int = 1000  # 0 = run until stopped
+    duration_seconds: int = 0
     think_time_ms: int = 0
     call_timeout_ms: int = DEFAULT_CALL_TIMEOUT_MS
 
@@ -54,6 +56,7 @@ class LoginWorkloadStatus:
     status_message: str = ""
     last_error: str = ""
     target_cycles: int = 0
+    target_seconds: int = 0
     avg_cycle_ms: float = 0.0
     _total_cycle_ms: float = field(default=0.0, init=False, repr=False)
     _lock: threading.Lock = field(
@@ -108,6 +111,7 @@ class LoginWorkloadStatus:
                 "status_message": self.status_message,
                 "last_error": self.last_error,
                 "target_cycles": self.target_cycles,
+                "target_seconds": self.target_seconds,
                 "avg_cycle_ms": round(self.avg_cycle_ms, 2),
             }
 
@@ -144,15 +148,20 @@ class LoginWorkloadRunner:
         self._stop_event.clear()
         self._start_time = time.monotonic()
 
+        stop_mode = str(config.stop_mode or "CYCLES").upper()
         target_cycles = 0
-        if config.iterations_per_thread > 0:
+        target_seconds = 0
+        if stop_mode == "CYCLES" and config.iterations_per_thread > 0:
             target_cycles = self._worker_count * config.iterations_per_thread
+        elif stop_mode == "DURATION" and config.duration_seconds > 0:
+            target_seconds = config.duration_seconds
 
         self.status = LoginWorkloadStatus(
             running=True,
             phase="RUNNING",
             status_message="Login/query/logout workload running.",
             target_cycles=target_cycles,
+            target_seconds=target_seconds,
         )
 
         if config.mode.lower() == "thick":
@@ -239,7 +248,12 @@ class LoginWorkloadRunner:
 
         try:
             while not self._stop_event.is_set():
-                if cfg.iterations_per_thread > 0 and iteration >= cfg.iterations_per_thread:
+                elapsed = time.monotonic() - self._start_time if self._start_time else 0.0
+                stop_mode = str(cfg.stop_mode or "CYCLES").upper()
+                if stop_mode == "DURATION" and cfg.duration_seconds > 0 and elapsed >= cfg.duration_seconds:
+                    self._stop_event.set()
+                    break
+                if stop_mode == "CYCLES" and cfg.iterations_per_thread > 0 and iteration >= cfg.iterations_per_thread:
                     break
                 iteration += 1
 
