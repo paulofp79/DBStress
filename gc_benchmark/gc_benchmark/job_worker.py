@@ -22,6 +22,7 @@ from oracle_session import (
     connect_from_state,
 )
 from schema import SchemaConfig, create_schema_parallel
+from sql_replay import SqlReplayConfig, SqlReplayRunner
 from workload import WorkloadConfig, WorkloadRunner
 
 
@@ -156,9 +157,46 @@ def run_schema_create(spec: dict) -> int:
         return 1
 
 
+def run_sql_replay(spec: dict) -> int:
+    shard_index = int(spec.get("shard_index", 0))
+    cfg = SqlReplayConfig(**dict(spec.get("config", {})))
+    runner = SqlReplayRunner()
+    stop_requested = threading.Event()
+    install_signal_handlers(stop_requested)
+
+    def on_progress(status_dict: dict) -> None:
+        emit("replay_progress", shard_index=shard_index, data=status_dict)
+
+    try:
+        runner.start(cfg, progress_callback=on_progress)
+        if stop_requested.is_set():
+            runner._stop_event.set()
+        while runner.is_running and not stop_requested.is_set():
+            time.sleep(0.5)
+        if stop_requested.is_set():
+            runner._stop_event.set()
+        final_status = runner.stop(timeout=1.0)
+        emit("replay_complete", shard_index=shard_index, summary=final_status)
+        return 0
+    except Exception as exc:
+        try:
+            runner._stop_event.set()
+            final_status = runner.stop(timeout=0.5)
+        except Exception:
+            final_status = {"running": False, "phase": "ERROR"}
+        emit(
+            "error",
+            shard_index=shard_index,
+            message=f"SQL replay shard failed: {exc}",
+            details=traceback.format_exc(),
+            summary=final_status,
+        )
+        return 1
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
-        sys.stderr.write("usage: job_worker.py <workload|login|schema-create> <spec.json>\n")
+        sys.stderr.write("usage: job_worker.py <workload|login|schema-create|sql-replay> <spec.json>\n")
         return 2
 
     job_type = argv[1].strip().lower()
@@ -170,6 +208,8 @@ def main(argv: list[str]) -> int:
         return run_login_workload(spec)
     if job_type == "schema-create":
         return run_schema_create(spec)
+    if job_type == "sql-replay":
+        return run_sql_replay(spec)
 
     sys.stderr.write(f"unknown job type: {job_type}\n")
     return 2

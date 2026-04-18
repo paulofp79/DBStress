@@ -61,6 +61,7 @@ from oracle_session import (
     connect_from_state,
     shard_worker_counts,
 )
+from sql_replay import SqlReplayConfig
 from workload import MAX_WORKLOAD_SEED_ROWS, WorkloadConfig
 import report
 
@@ -103,6 +104,8 @@ _workload_runners: dict[str, Any] = {}
 _workload_runners_lock = threading.Lock()
 _active_workloads_file_lock = threading.Lock()
 _login_runner: Optional[Any] = None
+_sql_replay_runner: Optional[Any] = None
+_sql_replay_runner_lock = threading.Lock()
 _schema_job = None
 _ws_clients: list[WebSocket] = []
 _ws_lock = asyncio.Lock()
@@ -851,6 +854,284 @@ def _query_connection_pool_stats(conn) -> list[dict]:
         cursor.close()
 
 
+def _parse_api_datetime(value: str) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("Start and end time are required.")
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+    for pattern in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%d-%b-%Y %H:%M", "%d-%b-%y %H:%M"):
+        try:
+            return datetime.strptime(raw, pattern)
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid datetime value: {value}")
+
+
+def _coerce_number(text: str) -> int | float | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
+
+def _safe_sql_statement_type(sql_text: str) -> str:
+    sql = str(sql_text or "").strip()
+    if not sql:
+        return "UNKNOWN"
+    first = sql.split(None, 1)[0].upper()
+    return first if first in {"SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "BEGIN", "DECLARE"} else "UNKNOWN"
+
+
+def _fetch_peak_replay_analysis(
+    conn,
+    *,
+    dbid: int,
+    start_time: datetime,
+    end_time: datetime,
+    top_n: int,
+) -> dict:
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM   dba_hist_active_sess_history
+            WHERE  dbid = :dbid
+            AND    sample_time BETWEEN :start_time AND :end_time
+            """,
+            {"dbid": dbid, "start_time": start_time, "end_time": end_time},
+        )
+        total_samples = int(cursor.fetchone()[0] or 0)
+        if total_samples <= 0:
+            return {
+                "dbid": dbid,
+                "start_time": start_time.isoformat(timespec="minutes"),
+                "end_time": end_time.isoformat(timespec="minutes"),
+                "sample_count": 0,
+                "waits": [],
+                "sql": [],
+                "summary": "No ASH rows found for that interval.",
+            }
+
+        cursor.execute(
+            """
+            SELECT NVL(event, 'ON CPU') AS event_name,
+                   NVL(wait_class, 'CPU') AS wait_class,
+                   COUNT(*) AS sample_count
+            FROM   dba_hist_active_sess_history
+            WHERE  dbid = :dbid
+            AND    sample_time BETWEEN :start_time AND :end_time
+            GROUP  BY event, wait_class
+            ORDER  BY sample_count DESC
+            FETCH FIRST 10 ROWS ONLY
+            """,
+            {"dbid": dbid, "start_time": start_time, "end_time": end_time},
+        )
+        waits = [
+            {
+                "event": row[0],
+                "wait_class": row[1],
+                "sample_count": int(row[2] or 0),
+                "sample_pct": round((int(row[2] or 0) / total_samples) * 100, 1),
+            }
+            for row in cursor.fetchall()
+        ]
+
+        safe_top_n = max(1, min(25, int(top_n or 8)))
+        cursor.execute(
+            f"""
+            WITH ash AS (
+                SELECT COALESCE(sql_id, top_level_sql_id) AS effective_sql_id,
+                       event,
+                       wait_class,
+                       session_id,
+                       session_serial#,
+                       instance_number
+                FROM   dba_hist_active_sess_history
+                WHERE  dbid = :dbid
+                AND    sample_time BETWEEN :start_time AND :end_time
+                AND    COALESCE(sql_id, top_level_sql_id) IS NOT NULL
+            ),
+            ranked AS (
+                SELECT effective_sql_id AS sql_id,
+                       COUNT(*) AS sample_count,
+                       COUNT(DISTINCT TO_CHAR(session_id) || ':' || TO_CHAR(session_serial#) || ':' || TO_CHAR(instance_number)) AS session_count
+                FROM   ash
+                GROUP  BY effective_sql_id
+            ),
+            top_event AS (
+                SELECT effective_sql_id AS sql_id,
+                       NVL(event, 'ON CPU') AS event_name,
+                       NVL(wait_class, 'CPU') AS wait_class,
+                       COUNT(*) AS event_samples,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY effective_sql_id
+                           ORDER BY COUNT(*) DESC, NVL(event, 'ON CPU')
+                       ) AS rn
+                FROM   ash
+                GROUP  BY effective_sql_id, event, wait_class
+            )
+            SELECT r.sql_id,
+                   r.sample_count,
+                   r.session_count,
+                   NVL(t.event_name, 'ON CPU') AS primary_event,
+                   NVL(t.wait_class, 'CPU') AS primary_wait_class,
+                   NVL(t.event_samples, r.sample_count) AS primary_event_samples,
+                   s.sql_text
+            FROM   ranked r
+                   LEFT JOIN top_event t
+                          ON t.sql_id = r.sql_id
+                         AND t.rn = 1
+                   LEFT JOIN dba_hist_sqltext s
+                          ON s.dbid = :dbid
+                         AND s.sql_id = r.sql_id
+            ORDER  BY r.sample_count DESC
+            FETCH FIRST {safe_top_n} ROWS ONLY
+            """,
+            {
+                "dbid": dbid,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+        )
+        sql_rows = cursor.fetchall()
+        statements: list[dict] = []
+        for row in sql_rows:
+            sql_id = str(row[0] or "")
+            sample_count = int(row[1] or 0)
+            statement = {
+                "sql_id": sql_id,
+                "sample_count": sample_count,
+                "sample_pct": round((sample_count / total_samples) * 100, 1),
+                "session_count": int(row[2] or 0),
+                "primary_event": row[3] or "ON CPU",
+                "primary_wait_class": row[4] or "CPU",
+                "primary_event_samples": int(row[5] or 0),
+                "module": "",
+                "program": "",
+                "top_object_id": 0,
+                "sql_text": str(row[6] or "").strip(),
+            }
+            statement["statement_type"] = _safe_sql_statement_type(statement["sql_text"])
+            statement["replayable"] = statement["statement_type"] != "UNKNOWN" and bool(statement["sql_text"])
+            statement["weight"] = max(1, sample_count)
+            cursor.execute(
+                """
+                SELECT NVL(module, ''),
+                       NVL(program, ''),
+                       NVL(current_obj#, 0),
+                       COUNT(*) AS sample_count
+                FROM   dba_hist_active_sess_history
+                WHERE  dbid = :dbid
+                AND    sample_time BETWEEN :start_time AND :end_time
+                AND    COALESCE(sql_id, top_level_sql_id) = :sql_id
+                GROUP  BY module, program, current_obj#
+                ORDER  BY sample_count DESC
+                FETCH FIRST 1 ROWS ONLY
+                """,
+                {
+                    "dbid": dbid,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "sql_id": statement["sql_id"],
+                },
+            )
+            top_dim = cursor.fetchone()
+            if top_dim:
+                statement["module"] = top_dim[0] or ""
+                statement["program"] = top_dim[1] or ""
+                statement["top_object_id"] = int(top_dim[2] or 0)
+            statements.append(statement)
+
+        for statement in statements:
+            cursor.execute(
+                """
+                SELECT position,
+                       MAX(name) KEEP (DENSE_RANK LAST ORDER BY last_captured) AS bind_name,
+                       MAX(datatype_string) KEEP (DENSE_RANK LAST ORDER BY last_captured) AS datatype_string,
+                       MAX(CASE WHEN was_captured = 'YES' THEN 1 ELSE 0 END) AS has_sample,
+                       MAX(CASE
+                               WHEN was_captured = 'YES'
+                               AND REGEXP_LIKE(datatype_string, 'NUMBER|INTEGER|DECIMAL', 'i')
+                               THEN TO_CHAR(ANYDATA.ACCESSNUMBER(value_anydata))
+                           END) AS number_text,
+                       MAX(CASE
+                               WHEN was_captured = 'YES'
+                               AND REGEXP_LIKE(datatype_string, 'DATE', 'i')
+                               THEN TO_CHAR(ANYDATA.ACCESSDATE(value_anydata), 'YYYY-MM-DD HH24:MI:SS')
+                           END) AS date_text,
+                       MAX(CASE
+                               WHEN was_captured = 'YES'
+                               AND REGEXP_LIKE(datatype_string, 'TIMESTAMP', 'i')
+                               THEN TO_CHAR(ANYDATA.ACCESSTIMESTAMP(value_anydata), 'YYYY-MM-DD HH24:MI:SS')
+                           END) AS timestamp_text,
+                       MAX(CASE
+                               WHEN was_captured = 'YES'
+                               THEN SUBSTR(ANYDATA.ACCESSVARCHAR2(value_anydata), 1, 200)
+                           END) AS varchar_text
+                FROM   dba_hist_sqlbind
+                WHERE  dbid = :dbid
+                AND    sql_id = :sql_id
+                GROUP  BY position
+                ORDER  BY position
+                """,
+                {"dbid": dbid, "sql_id": statement["sql_id"]},
+            )
+            binds = []
+            captured_values = 0
+            for bind_row in cursor.fetchall():
+                sample_text = bind_row[4] or bind_row[5] or bind_row[6] or bind_row[7] or ""
+                sample_kind = "text"
+                if bind_row[4]:
+                    sample_kind = "number"
+                elif bind_row[5]:
+                    sample_kind = "date"
+                elif bind_row[6]:
+                    sample_kind = "timestamp"
+                bind_entry = {
+                    "position": int(bind_row[0] or 0),
+                    "name": bind_row[1] or "",
+                    "datatype": bind_row[2] or "",
+                    "sample_value_text": str(sample_text or ""),
+                    "sample_value_kind": sample_kind if sample_text else "",
+                }
+                numeric_value = _coerce_number(bind_entry["sample_value_text"]) if sample_kind == "number" else None
+                bind_entry["sample_value"] = numeric_value if numeric_value is not None else None
+                if sample_text:
+                    captured_values += 1
+                binds.append(bind_entry)
+            statement["binds"] = binds
+            if not binds:
+                statement["bind_quality"] = "none"
+            elif captured_values > 0:
+                statement["bind_quality"] = "captured"
+            else:
+                statement["bind_quality"] = "metadata"
+
+        summary = waits[0]["event"] if waits else "Unknown"
+        return {
+            "dbid": dbid,
+            "start_time": start_time.isoformat(timespec="minutes"),
+            "end_time": end_time.isoformat(timespec="minutes"),
+            "sample_count": total_samples,
+            "waits": waits,
+            "sql": statements,
+            "summary": f"Dominant event: {summary}. Top SQL count: {len(statements)}.",
+        }
+    finally:
+        cursor.close()
+
+
 def _kill_sessions_for_user(connection, username: str):
     """Kill all non-background sessions for a database user except the current control session."""
     username = (username or "").strip().upper()
@@ -1090,6 +1371,18 @@ def _aggregate_login_metrics(statuses: list[dict]) -> dict:
         "target_cycles": sum(int(s.get("target_cycles", 0) or 0) for s in statuses),
         "target_seconds": max(int(s.get("target_seconds", 0) or 0) for s in statuses) if statuses else 0,
         "avg_cycle_ms": round(avg_cycle_ms, 2),
+    }
+
+
+def _aggregate_sql_replay_metrics(statuses: list[dict]) -> dict:
+    return {
+        "executions": sum(int(s.get("executions", 0) or 0) for s in statuses),
+        "selects": sum(int(s.get("selects", 0) or 0) for s in statuses),
+        "dml": sum(int(s.get("dml", 0) or 0) for s in statuses),
+        "plsql": sum(int(s.get("plsql", 0) or 0) for s in statuses),
+        "commits": sum(int(s.get("commits", 0) or 0) for s in statuses),
+        "rollbacks": sum(int(s.get("rollbacks", 0) or 0) for s in statuses),
+        "errors": sum(int(s.get("errors", 0) or 0) for s in statuses),
     }
 
 
@@ -2855,6 +3148,201 @@ async def login_workload_status(
             "think_time_ms": getattr(cfg, "think_time_ms", 0),
             "sql_text": getattr(cfg, "sql_text", ""),
             "execution_model": "dedicated child-process workers",
+        })
+    return payload
+
+
+@app.post("/api/peak-replay/analyze")
+async def peak_replay_analyze(body: dict):
+    """Analyze an AWR/ASH interval and return a replayable SQL mix."""
+    try:
+        dbid = int(body.get("dbid", 0) or 0)
+    except Exception:
+        dbid = 0
+    if dbid <= 0:
+        return {"ok": False, "message": "dbid is required."}
+
+    try:
+        start_time = _parse_api_datetime(body.get("start_time", ""))
+        end_time = _parse_api_datetime(body.get("end_time", ""))
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
+
+    if end_time < start_time:
+        return {"ok": False, "message": "End time must be after start time."}
+
+    top_n = max(1, min(25, int(body.get("top_n", 8) or 8)))
+
+    try:
+        conn = _get_connection()
+        analysis = _fetch_peak_replay_analysis(
+            conn,
+            dbid=dbid,
+            start_time=start_time,
+            end_time=end_time,
+            top_n=top_n,
+        )
+        conn.close()
+        return {"ok": True, "analysis": analysis}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+@app.post("/api/peak-replay/start")
+async def peak_replay_start(body: dict):
+    """Start replaying the selected SQL mix on the current connection."""
+    global _sql_replay_runner
+
+    with _sql_replay_runner_lock:
+        if _sql_replay_runner and _sql_replay_runner.is_running:
+            message = "A SQL peak replay is already running."
+            active_connection = getattr(_sql_replay_runner, "_connection_key", None)
+            if _has_connection_key(active_connection):
+                message += f" Active connection: {_format_connection_key(active_connection)}."
+            return {"ok": False, "message": message}
+
+    if not _conn_state.get("password"):
+        return {
+            "ok": False,
+            "message": (
+                "No password is set for this session. "
+                "Connect to the target database first from the Connection tab."
+            ),
+        }
+
+    selected_sql = [item for item in (body.get("statements") or []) if item.get("replayable", True)]
+    if not selected_sql:
+        return {"ok": False, "message": "Select at least one replayable SQL statement first."}
+
+    connection_state = build_connection_state(_conn_state)
+    cfg = SqlReplayConfig(
+        dsn=build_dsn_from_state(connection_state),
+        user=connection_state["user"],
+        password=connection_state["password"],
+        mode=connection_state.get("mode", "thin"),
+        statements=selected_sql,
+        thread_count=max(1, min(MAX_TOTAL_LOGIN_WORKERS, int(body.get("thread_count", 8) or 8))),
+        duration_seconds=max(10, min(86400, int(body.get("duration_seconds", 60) or 60))),
+        think_time_ms=max(0, min(60000, int(body.get("think_time_ms", 0) or 0))),
+        module=str(body.get("module", "GC_PEAK_REPLAY") or "GC_PEAK_REPLAY"),
+        action_prefix=str(body.get("action_prefix", "peak") or "peak"),
+        commit_every=max(1, min(1000, int(body.get("commit_every", 1) or 1))),
+    )
+
+    replay_connection_key = _connection_key_from_state(connection_state)
+    controller = ShardedSubprocessController(
+        job_type="sql-replay",
+        job_label="SQL replay",
+        base_config={
+            "dsn": cfg.dsn,
+            "user": cfg.user,
+            "password": cfg.password,
+            "mode": cfg.mode,
+            "statements": cfg.statements,
+            "thread_count": cfg.thread_count,
+            "duration_seconds": cfg.duration_seconds,
+            "think_time_ms": cfg.think_time_ms,
+            "module": cfg.module,
+            "action_prefix": cfg.action_prefix,
+            "commit_every": cfg.commit_every,
+            "call_timeout_ms": cfg.call_timeout_ms,
+        },
+        requested_threads=cfg.thread_count,
+        total_cap=MAX_TOTAL_LOGIN_WORKERS,
+        aggregate_metrics=_aggregate_sql_replay_metrics,
+        progress_event="replay_progress",
+        complete_event="replay_complete",
+        connection_key=replay_connection_key,
+    )
+    controller._connection_key = replay_connection_key
+    controller._analysis_summary = str(body.get("analysis_summary", "") or "")
+    controller._created_at = datetime.now(timezone.utc).isoformat()
+    controller._selected_sql_count = len(selected_sql)
+    controller._config = cfg
+
+    try:
+        controller.start()
+    except Exception as exc:
+        return {"ok": False, "message": f"Failed to start SQL replay: {exc}"}
+
+    with _sql_replay_runner_lock:
+        _sql_replay_runner = controller
+
+    def _watch() -> None:
+        global _sql_replay_runner
+        controller.done_event.wait()
+        with _sql_replay_runner_lock:
+            if _sql_replay_runner is controller:
+                _sql_replay_runner = None
+
+    threading.Thread(target=_watch, name="sql-replay-watch", daemon=True).start()
+
+    return {
+        "ok": True,
+        "message": (
+            f"SQL replay started with {controller._worker_count} physical workers "
+            f"across {controller._process_count} child processes."
+        ),
+    }
+
+
+@app.post("/api/peak-replay/stop")
+async def peak_replay_stop():
+    """Stop the running SQL peak replay."""
+    global _sql_replay_runner
+    with _sql_replay_runner_lock:
+        controller = _sql_replay_runner
+    if not controller:
+        return {"ok": False, "message": "No SQL peak replay is running."}
+
+    result = controller.stop()
+    with _sql_replay_runner_lock:
+        if _sql_replay_runner is controller:
+            _sql_replay_runner = None
+    return {"ok": True, "status": result}
+
+
+@app.get("/api/peak-replay/status")
+async def peak_replay_status(
+    host: str = "",
+    port: int = 0,
+    service_name: str = "",
+    user: str = "",
+):
+    """Return current SQL peak replay status."""
+    with _sql_replay_runner_lock:
+        controller = _sql_replay_runner
+    if not controller:
+        return {"running": False, "other_replay_running": False}
+
+    requested_connection = _connection_key(
+        host=host,
+        port=port,
+        service_name=service_name,
+        user=user,
+    )
+    runner_connection = getattr(controller, "_connection_key", None)
+    if _has_connection_key(requested_connection) and _has_connection_key(runner_connection):
+        if not _same_connection(requested_connection, runner_connection):
+            return {
+                "running": False,
+                "other_replay_running": bool(controller.status.running),
+                "other_connection_label": _format_connection_key(runner_connection),
+            }
+
+    payload = controller.status.to_dict()
+    payload["analysis_summary"] = getattr(controller, "_analysis_summary", "")
+    payload["selected_sql_count"] = int(getattr(controller, "_selected_sql_count", 0) or 0)
+    payload["connection_label"] = _format_connection_key(runner_connection) if _has_connection_key(runner_connection) else ""
+    cfg = getattr(controller, "_config", None)
+    if cfg:
+        payload.update({
+            "thread_count": getattr(cfg, "thread_count", 0),
+            "duration_seconds": getattr(cfg, "duration_seconds", 0),
+            "think_time_ms": getattr(cfg, "think_time_ms", 0),
+            "module": getattr(cfg, "module", ""),
+            "physical_workers": getattr(controller, "_worker_count", 0),
+            "process_count": getattr(controller, "_process_count", 0),
         })
     return payload
 

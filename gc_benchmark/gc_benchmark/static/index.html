@@ -37,6 +37,10 @@
                 <div class="nav-icon">&#9654;</div>
                 <span class="nav-label">Run Workload</span>
             </button>
+            <button class="nav-item" data-tab="peak-replay">
+                <div class="nav-icon">&#128200;</div>
+                <span class="nav-label">Peak Replay</span>
+            </button>
             <button class="nav-item" data-tab="login-sim">
                 <div class="nav-icon">&#8646;</div>
                 <span class="nav-label">Login Simulation</span>
@@ -710,7 +714,186 @@
             </section>
 
             <!-- ====================================================== -->
-            <!-- TAB 4: Login Workload Simulation                       -->
+            <!-- TAB 4: Peak Replay                                     -->
+            <!-- ====================================================== -->
+            <section id="tab-peak-replay" class="tab-panel">
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-orange">&#128200;</span>
+                            Historical Peak Analysis
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-secondary" id="btn-load-santander-peak">Load Santander Window</button>
+                            <button class="btn btn-primary" id="btn-analyze-peak">Analyze Peak</button>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Source DBID</span>
+                            <span class="field-desc">AWR DBID to mine for SQL activity.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="peak-dbid" value="1276751934" style="width:180px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Time Window</span>
+                            <span class="field-desc">Use the source database connection to inspect ASH between these timestamps.</span>
+                        </div>
+                        <div class="field-right" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                            <input type="datetime-local" id="peak-start-time" value="2026-03-27T11:15">
+                            <span class="text-muted">to</span>
+                            <input type="datetime-local" id="peak-end-time" value="2026-03-27T11:17">
+                            <label class="text-muted">Top SQLs
+                                <input type="number" id="peak-top-n" value="8" min="1" max="25" style="width:80px;text-align:center;margin-left:8px">
+                            </label>
+                        </div>
+                    </div>
+
+                    <div id="peak-analysis-status"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-blue">&#9881;</span>
+                            Replay On Test Database
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" id="btn-start-peak-replay">Start Replay</button>
+                            <button class="btn btn-danger" id="btn-stop-peak-replay" disabled>Stop Replay</button>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Target Connection</span>
+                            <span class="field-desc">After analysis, reconnect the GC Benchmark tool to your test database and start the replay here.</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="status-box status-info" style="margin:0">
+                                Uses the current Connection tab session as the replay target.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Concurrent Threads</span>
+                            <span class="field-desc">Persistent sessions replaying the weighted SQL mix.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="peak-replay-threads" value="16" min="1" max="2048" style="width:120px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Duration</span>
+                            <span class="field-desc">Replay duration in seconds.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="peak-replay-duration" value="120" min="10" max="86400" style="width:120px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Think Time</span>
+                            <span class="field-desc">Pause between executions for each worker. Use 0 for max pressure.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="peak-replay-think-time" value="0" min="0" max="60000" step="10" style="width:120px;text-align:center">
+                            <span class="text-muted text-sm">ms</span>
+                        </div>
+                    </div>
+
+                    <div id="peak-replay-running-banner" class="status-box status-warning" style="display:none; margin-top:12px"></div>
+
+                    <div class="metric-grid" id="peak-replay-metrics">
+                        <div class="metric-card">
+                            <div class="metric-label">Executions</div>
+                            <div class="metric-value" id="peak-counter-executions">0</div>
+                        </div>
+                        <div class="metric-card m-insert">
+                            <div class="metric-label">DML</div>
+                            <div class="metric-value" id="peak-counter-dml">0</div>
+                        </div>
+                        <div class="metric-card m-update">
+                            <div class="metric-label">SELECTs</div>
+                            <div class="metric-value" id="peak-counter-selects">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">PL/SQL</div>
+                            <div class="metric-value" id="peak-counter-plsql">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Commits</div>
+                            <div class="metric-value" id="peak-counter-commits">0</div>
+                        </div>
+                        <div class="metric-card m-error">
+                            <div class="metric-label">Errors</div>
+                            <div class="metric-value" id="peak-counter-errors">0</div>
+                        </div>
+                    </div>
+
+                    <div class="progress-info" style="margin-top:10px">
+                        <span id="peak-replay-progress-text">Analyze a peak first, then reconnect to your test database and start replay.</span>
+                        <span id="peak-replay-progress-side" class="text-muted">Idle</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-green">&#9776;</span>
+                            SQL Mix
+                        </div>
+                    </div>
+
+                    <div id="peak-analysis-summary">
+                        <div class="empty-state">
+                            <div class="empty-icon">&#128269;</div>
+                            No peak analysis loaded yet.<br>Use the source connection to analyze an AWR interval first.
+                        </div>
+                    </div>
+
+                    <div class="table-wrap" style="margin-top:16px">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:44px">Use</th>
+                                    <th>SQL ID</th>
+                                    <th>Samples</th>
+                                    <th>Primary Wait</th>
+                                    <th>Bind Quality</th>
+                                    <th class="text-col">Module</th>
+                                    <th class="text-col">SQL Text</th>
+                                </tr>
+                            </thead>
+                            <tbody id="peak-analysis-body">
+                                <tr>
+                                    <td colspan="7">
+                                        <div class="empty-state">
+                                            <div class="empty-icon">&#9881;</div>
+                                            Analyze the interval to populate replay candidates.
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- ====================================================== -->
+            <!-- TAB 5: Login Workload Simulation                       -->
             <!-- ====================================================== -->
             <section id="tab-login-sim" class="tab-panel">
 
