@@ -388,13 +388,15 @@
                     <div class="field-inline" id="normal-mix-row">
                         <div class="field-left">
                             <span class="field-name">Normal Mode Mix</span>
-                            <span class="field-desc">Relative weights for INSERT, UPDATE, DELETE and SELECT in Normal mode.</span>
+                            <span class="field-desc">Relative weights for INSERT, UPDATE, DELETE, SELECT, SELECT INTO and PEDT-style composite-key UPDATE in Normal mode.</span>
                         </div>
                         <div class="field-right" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                             <label>INS <input type="number" id="wl-insert-pct" value="40" min="0" max="1000" style="width:68px;text-align:center"></label>
                             <label>UPD <input type="number" id="wl-update-pct" value="40" min="0" max="1000" style="width:68px;text-align:center"></label>
                             <label>DEL <input type="number" id="wl-delete-pct" value="20" min="0" max="1000" style="width:68px;text-align:center"></label>
                             <label>SEL <input type="number" id="wl-select-pct" value="0" min="0" max="1000" style="width:68px;text-align:center"></label>
+                            <label>SEL INTO <input type="number" id="wl-select-into-pct" value="0" min="0" max="1000" style="width:88px;text-align:center"></label>
+                            <label>PEDT UPD <input type="number" id="wl-pedt-update-pct" value="0" min="0" max="1000" style="width:88px;text-align:center"></label>
                         </div>
                     </div>
 
@@ -684,6 +686,14 @@
                             <div class="metric-label">Selects</div>
                             <div class="metric-value" id="counter-selects">0</div>
                         </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Select Into</div>
+                            <div class="metric-value" id="counter-select-intos">0</div>
+                        </div>
+                        <div class="metric-card m-update">
+                            <div class="metric-label">PEDT Updates</div>
+                            <div class="metric-value" id="counter-pedt-updates">0</div>
+                        </div>
                         <div class="metric-card m-error">
                             <div class="metric-label">Errors</div>
                             <div class="metric-value" id="counter-errors">0</div>
@@ -691,7 +701,7 @@
                     </div>
 
                     <div class="progress-info" style="margin-top:8px">
-                        <span id="ops-per-sec">INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0</span>
+                        <span id="ops-per-sec">INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0 · SEL INTO/s 0.0 · PEDT/s 0.0</span>
                     </div>
 
                     <div class="chart-wrap">

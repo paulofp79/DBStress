@@ -1350,6 +1350,8 @@ def _aggregate_workload_metrics(statuses: list[dict]) -> dict:
         "updates": sum(int(s.get("updates", 0) or 0) for s in statuses),
         "deletes": sum(int(s.get("deletes", 0) or 0) for s in statuses),
         "selects": sum(int(s.get("selects", 0) or 0) for s in statuses),
+        "select_intos": sum(int(s.get("select_intos", 0) or 0) for s in statuses),
+        "pedt_updates": sum(int(s.get("pedt_updates", 0) or 0) for s in statuses),
         "errors": sum(int(s.get("errors", 0) or 0) for s in statuses),
     }
 
@@ -2579,6 +2581,8 @@ async def workload_start(body: dict):
         update_pct=max(0, int(body.get("update_pct", 40))),
         delete_pct=max(0, int(body.get("delete_pct", 20))),
         select_pct=max(0, int(body.get("select_pct", 0))),
+        select_into_pct=max(0, int(body.get("select_into_pct", 0))),
+        pedt_update_pct=max(0, int(body.get("pedt_update_pct", 0))),
         contention_mode=body.get("contention_mode", "NORMAL").upper(),
         lock_hold_ms=max(0, min(500, int(body.get("lock_hold_ms", 0)))),
     )
@@ -2751,6 +2755,8 @@ async def workload_start(body: dict):
             "update_pct": cfg.update_pct,
             "delete_pct": cfg.delete_pct,
             "select_pct": cfg.select_pct,
+            "select_into_pct": cfg.select_into_pct,
+            "pedt_update_pct": cfg.pedt_update_pct,
             "contention_mode": cfg.contention_mode,
             "lock_hold_ms": cfg.lock_hold_ms,
             "call_timeout_ms": cfg.call_timeout_ms,

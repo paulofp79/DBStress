@@ -1,6 +1,7 @@
 """Concurrent workload engine for driving GC contention.
 
-Spawns multiple threads that perform mixed DML (INSERT / UPDATE / DELETE)
+Spawns multiple threads that perform mixed DML (INSERT / UPDATE / DELETE /
+SELECT / SELECT INTO)
 across the benchmark tables using an oracledb connection pool.  A
 configurable hot-row percentage concentrates updates on a small set of
 rows to maximise cross-instance block transfers.
@@ -48,6 +49,8 @@ class WorkloadConfig:
     update_pct: int = 40
     delete_pct: int = 20
     select_pct: int = 0
+    select_into_pct: int = 0
+    pedt_update_pct: int = 0
 
     # ---- Contention mode ---------------------------------------------------
     # NORMAL     : mixed DML (INSERT/UPDATE/DELETE) spread across all tables
@@ -75,6 +78,8 @@ class WorkloadStatus:
     updates: int = 0
     deletes: int = 0
     selects: int = 0
+    select_intos: int = 0
+    pedt_updates: int = 0
     errors: int = 0
     elapsed: float = 0.0
     running: bool = False
@@ -86,7 +91,7 @@ class WorkloadStatus:
     )
 
     def increment(self, op: str, count: int = 1) -> None:
-        """Increment the counter for *op* (inserts / updates / deletes)."""
+        """Increment the counter for one workload operation."""
         with self._lock:
             current = getattr(self, op, 0)
             setattr(self, op, current + count)
@@ -110,6 +115,8 @@ class WorkloadStatus:
                 "updates": self.updates,
                 "deletes": self.deletes,
                 "selects": self.selects,
+                "select_intos": self.select_intos,
+                "pedt_updates": self.pedt_updates,
                 "errors": self.errors,
                 "elapsed": round(self.elapsed, 1),
                 "running": self.running,
@@ -140,6 +147,26 @@ def _random_status() -> str:
 
 def _random_payload(length: int = 200) -> str:
     return "".join(random.choices(string.ascii_letters + string.digits + " ", k=length))
+
+
+def _random_seg_class() -> str:
+    return "CLASS_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
+def _random_seg_manager() -> str:
+    return "MAN_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
+def _random_mod_user() -> str:
+    return "USR_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
+def _random_term_mod() -> str:
+    return "TERM_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+
+
+def _random_seg_calc() -> str:
+    return "CAL_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +238,7 @@ class WorkloadRunner:
             f"Preparing schema metadata for {config.table_count} tables and {config.seed_rows} rows/table...",
             "PREPARING",
         )
+        self._validate_schema_extensions()
         self._prepare_seed_data_parallel(prepare_callback)
         emit(
             f"Warming up {self._worker_count} worker sessions before timed run...",
@@ -346,6 +374,54 @@ class WorkloadRunner:
             window.extend(rows[:window_size - len(window)])
         return window
 
+    def _validate_schema_extensions(self) -> None:
+        """Fail early when optional workload columns are missing from the schema."""
+        assert self._config is not None
+        if self._config.pedt_update_pct <= 0:
+            return
+        assert self._pool is not None
+
+        conn = self._pool.acquire()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            tname = f"{self._config.table_prefix}_ORDER_01"
+            cursor.execute(
+                """
+                SELECT column_name
+                FROM   user_tab_columns
+                WHERE  table_name = :table_name
+                """,
+                {"table_name": tname.upper()},
+            )
+            present = {str(row[0]).upper() for row in cursor.fetchall()}
+            required = {
+                "PECDGENT",
+                "PENUMPER",
+                "PECLASEG",
+                "PESEGCLA",
+                "PEFECSEG",
+                "PESEGMAN",
+                "PEUSUMOD",
+                "PETERMOD",
+                "PESUCMOD",
+                "PESEGCAL",
+                "PEHSTAMP",
+            }
+            missing = sorted(required - present)
+            if missing:
+                raise RuntimeError(
+                    "PEDT-style update workload requires the extended benchmark schema. "
+                    "Recreate the schema first so these columns exist: " + ", ".join(missing)
+                )
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            self._pool.release(conn)
+
     def _worker(self) -> None:
         """Single worker thread: mixed DML loop until stop or duration."""
         assert self._config is not None
@@ -371,12 +447,25 @@ class WorkloadRunner:
                 table_idx = random.randint(1, cfg.table_count)
                 tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
 
-                total_mix = max(1, cfg.insert_pct + cfg.update_pct + cfg.delete_pct + cfg.select_pct)
+                total_mix = max(
+                    1,
+                    cfg.insert_pct + cfg.update_pct + cfg.delete_pct + cfg.select_pct + cfg.select_into_pct + cfg.pedt_update_pct,
+                )
                 roll = random.random()
                 try:
                     insert_cutoff = cfg.insert_pct / total_mix
                     update_cutoff = (cfg.insert_pct + cfg.update_pct) / total_mix
                     delete_cutoff = (cfg.insert_pct + cfg.update_pct + cfg.delete_pct) / total_mix
+                    select_cutoff = (
+                        cfg.insert_pct + cfg.update_pct + cfg.delete_pct + cfg.select_pct
+                    ) / total_mix
+                    select_into_cutoff = (
+                        cfg.insert_pct
+                        + cfg.update_pct
+                        + cfg.delete_pct
+                        + cfg.select_pct
+                        + cfg.select_into_pct
+                    ) / total_mix
 
                     if roll < insert_cutoff:
                         self._do_insert(cursor, tname, table_idx)
@@ -387,9 +476,15 @@ class WorkloadRunner:
                     elif roll < delete_cutoff:
                         self._do_delete_and_replace(cursor, tname, table_idx)
                         self.status.increment("deletes")
-                    else:
+                    elif roll < select_cutoff:
                         self._do_select(cursor, tname, table_idx)
                         self.status.increment("selects")
+                    elif roll < select_into_cutoff:
+                        self._do_select_into(cursor, tname, table_idx)
+                        self.status.increment("select_intos")
+                    else:
+                        self._do_pedt_like_update(cursor, tname, table_idx)
+                        self.status.increment("pedt_updates")
 
                     commit_counter += 1
                     if commit_counter >= cfg.commit_batch:
@@ -738,9 +833,10 @@ class WorkloadRunner:
         """Insert a new row with random data."""
         cursor.execute(
             f"INSERT INTO {tname} "
-            f"(order_ref, customer_name, status, order_date, amount, quantity, discount, payload) "
+            f"(order_ref, customer_name, status, order_date, amount, quantity, discount, payload, "
+            f"pecdgent, penumper, peclaseg, pesegcla, pefecseg, pesegman, peusumod, petermod, pesucmod, pesegcal, pehstamp) "
             f"VALUES (:ref, :cust, :st, SYSDATE - DBMS_RANDOM.VALUE(0, 365), "
-            f":amt, :qty, :disc, :pay)",
+            f":amt, :qty, :disc, :pay, :ent, :num, :claseg, :segcla, SYSDATE, :segman, :usumod, :termod, :sucmod, :segcal, :hstamp)",
             {
                 "ref": _random_ref(),
                 "cust": _random_name(),
@@ -749,6 +845,16 @@ class WorkloadRunner:
                 "qty": random.randint(1, 100),
                 "disc": round(random.uniform(0, 50), 2),
                 "pay": _random_payload(),
+                "ent": 1000 + random.randint(0, 63),
+                "num": random.randint(1, 10_000_000),
+                "claseg": random.choice(["SEG_A", "SEG_B", "SEG_C", "SEG_D"]),
+                "segcla": _random_seg_class(),
+                "segman": _random_seg_manager(),
+                "usumod": _random_mod_user(),
+                "termod": _random_term_mod(),
+                "sucmod": random.randint(1, 999),
+                "segcal": _random_seg_calc(),
+                "hstamp": random.randint(100000, 999999999),
             },
         )
 
@@ -807,6 +913,75 @@ class WorkloadRunner:
         )
         cursor.fetchone()
 
+    def _do_select_into(self, cursor, tname: str, table_idx: int) -> None:
+        """Run an Oracle SELECT INTO via an anonymous PL/SQL block."""
+        pk = self._pick_target_row(table_idx)
+        if pk is None:
+            return
+        cursor.execute(
+            f"""
+            DECLARE
+                v_order_id {tname}.order_id%TYPE;
+                v_status   {tname}.status%TYPE;
+                v_amount   {tname}.amount%TYPE;
+            BEGIN
+                SELECT order_id, status, amount
+                INTO   v_order_id, v_status, v_amount
+                FROM   {tname}
+                WHERE  order_id = :pk;
+            END;
+            """,
+            {"pk": pk},
+        )
+
+    def _do_pedt_like_update(self, cursor, tname: str, table_idx: int) -> None:
+        """Run a composite-key update shaped like the PEDT030 example."""
+        pk = self._pick_target_row(table_idx)
+        if pk is None:
+            self._do_insert(cursor, tname, table_idx)
+            return
+
+        cursor.execute(
+            f"""
+            SELECT pecdgent, penumper, peclaseg
+            FROM   {tname}
+            WHERE  order_id = :pk
+            """,
+            {"pk": pk},
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return
+
+        cursor.execute(
+            f"""
+            UPDATE {tname}
+            SET    pesegcla = :b1,
+                   pefecseg = SYSDATE,
+                   pesegman = :b2,
+                   peusumod = :b3,
+                   petermod = :b4,
+                   pesucmod = :b5,
+                   pesegcal = :b6,
+                   pehstamp = :b7
+            WHERE  pecdgent = :b8
+            AND    penumper = :b9
+            AND    peclaseg = :b10
+            """,
+            {
+                "b1": _random_seg_class(),
+                "b2": _random_seg_manager(),
+                "b3": _random_mod_user(),
+                "b4": _random_term_mod(),
+                "b5": random.randint(1, 999),
+                "b6": _random_seg_calc(),
+                "b7": random.randint(100000, 999999999),
+                "b8": row[0],
+                "b9": row[1],
+                "b10": row[2],
+            },
+        )
+
     # ---- seed data --------------------------------------------------------
 
     def _prepare_table_seed(self, table_idx: int) -> None:
@@ -841,11 +1016,22 @@ class WorkloadRunner:
                             random.randint(1, 100),
                             round(random.uniform(0, 50), 2),
                             _random_payload(100),
+                            1000 + random.randint(0, 63),
+                            random.randint(1, 10_000_000),
+                            random.choice(["SEG_A", "SEG_B", "SEG_C", "SEG_D"]),
+                            _random_seg_class(),
+                            _random_seg_manager(),
+                            _random_mod_user(),
+                            _random_term_mod(),
+                            random.randint(1, 999),
+                            _random_seg_calc(),
+                            random.randint(100000, 999999999),
                         ))
                     cursor.executemany(
                         f"INSERT INTO {tname} "
-                        f"(order_ref, customer_name, status, amount, quantity, discount, payload) "
-                        f"VALUES (:1, :2, :3, :4, :5, :6, :7)",
+                        f"(order_ref, customer_name, status, amount, quantity, discount, payload, "
+                        f"pecdgent, penumper, peclaseg, pesegcla, pefecseg, pesegman, peusumod, petermod, pesucmod, pesegcal, pehstamp) "
+                        f"VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, SYSDATE, :12, :13, :14, :15, :16, :17)",
                         rows,
                     )
                 conn.commit()

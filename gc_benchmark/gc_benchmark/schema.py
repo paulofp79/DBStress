@@ -116,6 +116,17 @@ def _create_table_ddl(config: SchemaConfig, idx: int) -> str:
         f"    quantity       NUMBER(8)     DEFAULT 1,",
         f"    discount       NUMBER(5,2)   DEFAULT 0,",
         f"    payload        VARCHAR2(400),",
+        f"    pecdgent       NUMBER(10)    NOT NULL,",
+        f"    penumper       NUMBER(12)    NOT NULL,",
+        f"    peclaseg       VARCHAR2(10)  NOT NULL,",
+        f"    pesegcla       VARCHAR2(32),",
+        f"    pefecseg       DATE,",
+        f"    pesegman       VARCHAR2(32),",
+        f"    peusumod       VARCHAR2(32),",
+        f"    petermod       VARCHAR2(64),",
+        f"    pesucmod       NUMBER(8),",
+        f"    pesegcal       VARCHAR2(32),",
+        f"    pehstamp       NUMBER(12),",
         f"    CONSTRAINT {tname}_PK PRIMARY KEY (order_id)",
         f")",
     ]
@@ -134,6 +145,7 @@ def _create_indexes_ddl(config: SchemaConfig, idx: int) -> list[str]:
         f"CREATE INDEX {tname}_REF_IX ON {tname} (order_ref)",
         f"CREATE INDEX {tname}_DATE_IX ON {tname} (order_date)",
         f"CREATE INDEX {tname}_STATUS_IX ON {tname} (status, order_date)",
+        f"CREATE INDEX {tname}_PEDT_IX ON {tname} (pecdgent, penumper, peclaseg)",
     ]
 
 
@@ -173,7 +185,18 @@ def _load_seed_rows(cursor, connection, tname: str, row_count: int) -> Generator
                 amount,
                 quantity,
                 discount,
-                payload
+                payload,
+                pecdgent,
+                penumper,
+                peclaseg,
+                pesegcla,
+                pefecseg,
+                pesegman,
+                peusumod,
+                petermod,
+                pesucmod,
+                pesegcal,
+                pehstamp
             )
             SELECT
                 'ORD-' || LPAD(:start_row + LEVEL, 12, '0'),
@@ -193,7 +216,23 @@ def _load_seed_rows(cursor, connection, tname: str, row_count: int) -> Generator
                 ROUND(25 + MOD(:start_row + LEVEL, 50000) / 10, 2),
                 1 + MOD(:start_row + LEVEL, 20),
                 ROUND(MOD(:start_row + LEVEL, 1500) / 100, 2),
-                RPAD('HOTBLOCK', 400, 'X')
+                RPAD('HOTBLOCK', 400, 'X'),
+                1000 + MOD(:start_row + LEVEL, 64),
+                :start_row + LEVEL,
+                CASE MOD(:start_row + LEVEL, 4)
+                    WHEN 0 THEN 'SEG_A'
+                    WHEN 1 THEN 'SEG_B'
+                    WHEN 2 THEN 'SEG_C'
+                    ELSE 'SEG_D'
+                END,
+                'CLASS_' || TO_CHAR(MOD(:start_row + LEVEL, 32)),
+                DATE '2024-01-01' + MOD(:start_row + LEVEL, 365),
+                'MAN_' || TO_CHAR(MOD(:start_row + LEVEL, 40)),
+                'USR_' || TO_CHAR(MOD(:start_row + LEVEL, 100)),
+                'TERM_' || TO_CHAR(MOD(:start_row + LEVEL, 1000)),
+                1 + MOD(:start_row + LEVEL, 999),
+                'CAL_' || TO_CHAR(MOD(:start_row + LEVEL, 50)),
+                100000 + MOD(:start_row + LEVEL, 1000000)
             FROM dual
             CONNECT BY LEVEL <= :chunk_rows
             """,

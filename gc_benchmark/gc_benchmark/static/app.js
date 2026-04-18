@@ -523,8 +523,10 @@
         $('counter-updates').textContent = '0';
         $('counter-deletes').textContent = '0';
         $('counter-selects').textContent = '0';
+        $('counter-select-intos').textContent = '0';
+        $('counter-pedt-updates').textContent = '0';
         $('counter-errors').textContent = '0';
-        $('ops-per-sec').textContent = 'INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0';
+        $('ops-per-sec').textContent = 'INS/s 0.0 · UPD/s 0.0 · DEL/s 0.0 · SEL/s 0.0 · SEL INTO/s 0.0 · PEDT/s 0.0';
         $('progress-fill').style.width = '0%';
         $('progress-text').textContent = 'Preparing workload...';
         $('progress-pct').textContent = '0%';
@@ -829,6 +831,8 @@
             update_pct:       parseInt($('wl-update-pct').value, 10) || 0,
             delete_pct:       parseInt($('wl-delete-pct').value, 10) || 0,
             select_pct:       parseInt($('wl-select-pct').value, 10) || 0,
+            select_into_pct:  parseInt($('wl-select-into-pct').value, 10) || 0,
+            pedt_update_pct:  parseInt($('wl-pedt-update-pct').value, 10) || 0,
             // Schema metadata — set by schema select dropdown
             partition_type:   $('wl-partition-type').value        || 'NONE',
             partition_detail: $('wl-partition-detail').value      || '',
@@ -1705,6 +1709,8 @@
         $('counter-updates').textContent = (data.updates || 0).toLocaleString();
         $('counter-deletes').textContent = (data.deletes || 0).toLocaleString();
         $('counter-selects').textContent = (data.selects || 0).toLocaleString();
+        $('counter-select-intos').textContent = (data.select_intos || 0).toLocaleString();
+        $('counter-pedt-updates').textContent = (data.pedt_updates || 0).toLocaleString();
         $('counter-errors').textContent = (data.errors || 0).toLocaleString();
 
         var elapsed = data.elapsed || 0;
@@ -1732,7 +1738,9 @@
             'INS/s ' + ((data.inserts || 0) / denom).toFixed(1) +
             ' · UPD/s ' + ((data.updates || 0) / denom).toFixed(1) +
             ' · DEL/s ' + ((data.deletes || 0) / denom).toFixed(1) +
-            ' · SEL/s ' + ((data.selects || 0) / denom).toFixed(1);
+            ' · SEL/s ' + ((data.selects || 0) / denom).toFixed(1) +
+            ' · SEL INTO/s ' + ((data.select_intos || 0) / denom).toFixed(1) +
+            ' · PEDT/s ' + ((data.pedt_updates || 0) / denom).toFixed(1);
 
         $('progress-fill').style.width = pct.toFixed(1) + '%';
         $('progress-pct').textContent = pct.toFixed(0) + '%';
