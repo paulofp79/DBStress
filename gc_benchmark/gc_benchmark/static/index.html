@@ -39,7 +39,7 @@
             </button>
             <button class="nav-item" data-tab="peak-replay">
                 <div class="nav-icon">&#128200;</div>
-                <span class="nav-label">Peak Replay</span>
+                <span class="nav-label">Peak Workload Lab</span>
             </button>
             <button class="nav-item" data-tab="login-sim">
                 <div class="nav-icon">&#8646;</div>
@@ -748,9 +748,9 @@
                         <div class="field-right" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
                             <input type="datetime-local" id="peak-start-time" value="2026-03-27T11:15">
                             <span class="text-muted">to</span>
-                            <input type="datetime-local" id="peak-end-time" value="2026-03-27T11:17">
+                            <input type="datetime-local" id="peak-end-time" value="2026-03-27T11:20">
                             <label class="text-muted">Top SQLs
-                                <input type="number" id="peak-top-n" value="8" min="1" max="25" style="width:80px;text-align:center;margin-left:8px">
+                                <input type="number" id="peak-top-n" value="20" min="1" max="25" style="width:80px;text-align:center;margin-left:8px">
                             </label>
                         </div>
                     </div>
@@ -761,12 +761,72 @@
                 <div class="card">
                     <div class="card-header">
                         <div class="card-title">
-                            <span class="title-icon icon-blue">&#9881;</span>
-                            Replay On Test Database
+                            <span class="title-icon icon-purple">&#9638;</span>
+                            Similar Objects And Rows
                         </div>
                         <div class="btn-group">
-                            <button class="btn btn-primary" id="btn-start-peak-replay">Start Replay</button>
-                            <button class="btn btn-danger" id="btn-stop-peak-replay" disabled>Stop Replay</button>
+                            <button class="btn btn-primary" id="btn-create-peak-objects">Create / Reload Objects</button>
+                            <button class="btn btn-danger" id="btn-drop-peak-objects">Drop Objects</button>
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Lab Table Prefix</span>
+                            <span class="field-desc">Prefix used for the similar objects created on the target database.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="text" id="peak-table-prefix" value="PEAKLAB" style="width:160px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Rows Per Table</span>
+                            <span class="field-desc">How many rows to seed into each similar object before simulation.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="number" id="peak-rows-per-table" value="1000" min="0" max="1000000" step="100" style="width:160px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div id="peak-object-status"></div>
+
+                    <div class="table-wrap" style="margin-top:16px">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:44px">Use</th>
+                                    <th>Source Table</th>
+                                    <th>Target Table</th>
+                                    <th>Columns</th>
+                                    <th>Key Columns</th>
+                                    <th class="text-col">Top SQLs</th>
+                                </tr>
+                            </thead>
+                            <tbody id="peak-table-models-body">
+                                <tr>
+                                    <td colspan="6">
+                                        <div class="empty-state">
+                                            <div class="empty-icon">&#9638;</div>
+                                            Analyze the peak first to discover similar objects.
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="title-icon icon-blue">&#9881;</span>
+                            Simulate Workload On Test Database
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" id="btn-start-peak-replay">Start Simulation</button>
+                            <button class="btn btn-danger" id="btn-stop-peak-replay" disabled>Stop Simulation</button>
                         </div>
                     </div>
 
@@ -843,7 +903,7 @@
                     </div>
 
                     <div class="progress-info" style="margin-top:10px">
-                        <span id="peak-replay-progress-text">Analyze a peak first, then reconnect to your test database and start replay.</span>
+                        <span id="peak-replay-progress-text">Analyze a peak, create similar objects, then reconnect to your test database and start the simulation.</span>
                         <span id="peak-replay-progress-side" class="text-muted">Idle</span>
                     </div>
                 </div>

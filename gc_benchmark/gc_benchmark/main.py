@@ -61,6 +61,16 @@ from oracle_session import (
     connect_from_state,
     shard_worker_counts,
 )
+from peak_workload_lab import (
+    build_lab_table_name,
+    build_simulation_statements,
+    create_lab_schema,
+    drop_lab_schema,
+    enrich_analysis_with_lab_metadata,
+    extract_table_refs,
+    normalize_sql_text,
+    statement_type,
+)
 from sql_replay import SqlReplayConfig
 from workload import MAX_WORKLOAD_SEED_ROWS, WorkloadConfig
 import report
@@ -1118,6 +1128,17 @@ def _fetch_peak_replay_analysis(
             else:
                 statement["bind_quality"] = "metadata"
 
+        for statement in statements:
+            normalized_sql, portable, portable_reason = normalize_sql_text(statement["sql_text"])
+            statement["normalized_sql"] = normalized_sql
+            statement["portable"] = portable
+            statement["portable_reason"] = portable_reason
+            statement["table_refs"] = extract_table_refs(normalized_sql if portable else statement["sql_text"])
+            statement["statement_type"] = statement_type(normalized_sql if portable else statement["sql_text"])
+            statement["lab_replayable"] = False
+
+        table_models = enrich_analysis_with_lab_metadata(conn, statements)
+
         summary = waits[0]["event"] if waits else "Unknown"
         return {
             "dbid": dbid,
@@ -1126,6 +1147,7 @@ def _fetch_peak_replay_analysis(
             "sample_count": total_samples,
             "waits": waits,
             "sql": statements,
+            "table_models": table_models,
             "summary": f"Dominant event: {summary}. Top SQL count: {len(statements)}.",
         }
     finally:
@@ -3190,12 +3212,12 @@ async def peak_replay_analyze(body: dict):
 
 @app.post("/api/peak-replay/start")
 async def peak_replay_start(body: dict):
-    """Start replaying the selected SQL mix on the current connection."""
+    """Start simulating the selected historical SQL mix on the current connection."""
     global _sql_replay_runner
 
     with _sql_replay_runner_lock:
         if _sql_replay_runner and _sql_replay_runner.is_running:
-            message = "A SQL peak replay is already running."
+            message = "A peak workload simulation is already running."
             active_connection = getattr(_sql_replay_runner, "_connection_key", None)
             if _has_connection_key(active_connection):
                 message += f" Active connection: {_format_connection_key(active_connection)}."
@@ -3210,7 +3232,21 @@ async def peak_replay_start(body: dict):
             ),
         }
 
-    selected_sql = [item for item in (body.get("statements") or []) if item.get("replayable", True)]
+    analysis = body.get("analysis") or {}
+    table_prefix = str(body.get("table_prefix", "PEAKLAB") or "PEAKLAB").upper()
+    selected_sql_ids = [str(item) for item in (body.get("selected_sql_ids") or []) if str(item or "").strip()]
+    selected_tables = [str(item) for item in (body.get("selected_tables") or []) if str(item or "").strip()]
+
+    if analysis and analysis.get("sql"):
+        selected_sql = build_simulation_statements(
+            statements=analysis.get("sql") or [],
+            selected_sql_ids=selected_sql_ids,
+            selected_tables=selected_tables,
+            table_prefix=table_prefix,
+        )
+    else:
+        selected_sql = [item for item in (body.get("statements") or []) if item.get("replayable", True)]
+
     if not selected_sql:
         return {"ok": False, "message": "Select at least one replayable SQL statement first."}
 
@@ -3232,7 +3268,7 @@ async def peak_replay_start(body: dict):
     replay_connection_key = _connection_key_from_state(connection_state)
     controller = ShardedSubprocessController(
         job_type="sql-replay",
-        job_label="SQL replay",
+        job_label="Peak workload simulation",
         base_config={
             "dsn": cfg.dsn,
             "user": cfg.user,
@@ -3259,11 +3295,12 @@ async def peak_replay_start(body: dict):
     controller._created_at = datetime.now(timezone.utc).isoformat()
     controller._selected_sql_count = len(selected_sql)
     controller._config = cfg
+    controller._table_prefix = table_prefix
 
     try:
         controller.start()
     except Exception as exc:
-        return {"ok": False, "message": f"Failed to start SQL replay: {exc}"}
+        return {"ok": False, "message": f"Failed to start peak workload simulation: {exc}"}
 
     with _sql_replay_runner_lock:
         _sql_replay_runner = controller
@@ -3280,20 +3317,105 @@ async def peak_replay_start(body: dict):
     return {
         "ok": True,
         "message": (
-            f"SQL replay started with {controller._worker_count} physical workers "
+            f"Peak workload simulation started with {controller._worker_count} physical workers "
             f"across {controller._process_count} child processes."
         ),
     }
 
 
+@app.post("/api/peak-replay/create-objects")
+async def peak_replay_create_objects(body: dict):
+    """Create similar lab tables and seed them on the current connection."""
+    if not _conn_state.get("password"):
+        return {
+            "ok": False,
+            "message": "Connect to the target database first from the Connection tab.",
+        }
+
+    analysis = body.get("analysis") or {}
+    table_models = analysis.get("table_models") or []
+    if not table_models:
+        return {"ok": False, "message": "Analyze the workload first so table models are available."}
+
+    table_prefix = str(body.get("table_prefix", "PEAKLAB") or "PEAKLAB").upper()
+    rows_per_table = max(0, min(1000000, int(body.get("rows_per_table", 1000) or 1000)))
+    selected_tables = {str(name).upper() for name in (body.get("selected_tables") or []) if str(name or "").strip()}
+    filtered_models = [
+        model for model in table_models
+        if not selected_tables or str(model.get("source_table", "")).upper() in selected_tables
+    ]
+    if not filtered_models:
+        return {"ok": False, "message": "Select at least one source table to build."}
+
+    try:
+        conn = _get_connection()
+        created = create_lab_schema(
+            conn,
+            table_models=filtered_models,
+            statements=analysis.get("sql") or [],
+            table_prefix=table_prefix,
+            rows_per_table=rows_per_table,
+        )
+        conn.close()
+        return {
+            "ok": True,
+            "created": created,
+            "table_prefix": table_prefix,
+            "message": f"Created {len(created)} similar table(s) with {rows_per_table} row(s) per table.",
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+@app.post("/api/peak-replay/drop-objects")
+async def peak_replay_drop_objects(body: dict):
+    """Drop previously created lab tables for the selected analysis snapshot."""
+    if not _conn_state.get("password"):
+        return {
+            "ok": False,
+            "message": "Connect to the target database first from the Connection tab.",
+        }
+
+    analysis = body.get("analysis") or {}
+    table_models = analysis.get("table_models") or []
+    if not table_models:
+        return {"ok": False, "message": "Analyze the workload first so table models are available."}
+
+    table_prefix = str(body.get("table_prefix", "PEAKLAB") or "PEAKLAB").upper()
+    selected_tables = {str(name).upper() for name in (body.get("selected_tables") or []) if str(name or "").strip()}
+    filtered_models = [
+        model for model in table_models
+        if not selected_tables or str(model.get("source_table", "")).upper() in selected_tables
+    ]
+    if not filtered_models:
+        return {"ok": False, "message": "Select at least one source table to drop."}
+
+    try:
+        conn = _get_connection()
+        dropped = drop_lab_schema(
+            conn,
+            table_models=filtered_models,
+            table_prefix=table_prefix,
+        )
+        conn.close()
+        return {
+            "ok": True,
+            "dropped": dropped,
+            "table_prefix": table_prefix,
+            "message": f"Dropped {len(dropped)} similar table(s) for prefix {table_prefix}.",
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
 @app.post("/api/peak-replay/stop")
 async def peak_replay_stop():
-    """Stop the running SQL peak replay."""
+    """Stop the running peak workload simulation."""
     global _sql_replay_runner
     with _sql_replay_runner_lock:
         controller = _sql_replay_runner
     if not controller:
-        return {"ok": False, "message": "No SQL peak replay is running."}
+        return {"ok": False, "message": "No peak workload simulation is running."}
 
     result = controller.stop()
     with _sql_replay_runner_lock:

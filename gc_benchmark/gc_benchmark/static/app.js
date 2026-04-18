@@ -46,7 +46,7 @@
         connection: 'Connection',
         schema: 'Schema Setup',
         workload: 'Run Workload',
-        'peak-replay': 'Peak Replay',
+        'peak-replay': 'Peak Workload Lab',
         'login-sim': 'Login Workload Simulation',
         results: 'Results & Comparison',
     };
@@ -1364,12 +1364,22 @@
         container.innerHTML = '<div class="status-box status-' + escapeHtml(type || 'info') + '">' + escapeHtml(message) + '</div>';
     }
 
+    function setPeakObjectStatus(message, type) {
+        var container = $('peak-object-status');
+        if (!container) return;
+        if (!message) {
+            container.innerHTML = '';
+            return;
+        }
+        container.innerHTML = '<div class="status-box status-' + escapeHtml(type || 'info') + '">' + escapeHtml(message) + '</div>';
+    }
+
     function loadSantanderPeakPreset() {
         $('peak-dbid').value = '1276751934';
         $('peak-start-time').value = '2026-03-27T11:15';
-        $('peak-end-time').value = '2026-03-27T11:17';
-        $('peak-top-n').value = '8';
-        setPeakReplayStatus('Preset loaded for March 27, 2026 11:15-11:17 on DBID 1276751934.', 'info');
+        $('peak-end-time').value = '2026-03-27T11:20';
+        $('peak-top-n').value = '20';
+        setPeakReplayStatus('Preset loaded for March 27, 2026 11:15-11:20 on DBID 1276751934.', 'info');
     }
 
     function getPeakReplayRequest() {
@@ -1394,6 +1404,48 @@
         });
     }
 
+    function getSelectedPeakTables() {
+        if (!peakReplayAnalysis || !peakReplayAnalysis.table_models) return [];
+        return peakReplayAnalysis.table_models.filter(function (item) {
+            return !!item.selected;
+        });
+    }
+
+    function getPeakTablePrefix() {
+        return ((($('peak-table-prefix') || {}).value || 'PEAKLAB').trim().toUpperCase() || 'PEAKLAB');
+    }
+
+    function computeLabTableName(sourceTable) {
+        var prefix = getPeakTablePrefix().replace(/[^A-Z0-9_]/g, '').slice(0, 18) || 'PEAKLAB';
+        var source = String(sourceTable || '').toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 22) || 'OBJ';
+        return (prefix + '_' + source).slice(0, 30);
+    }
+
+    function renderPeakTableModels() {
+        var body = $('peak-table-models-body');
+        if (!body) return;
+        if (!peakReplayAnalysis || !peakReplayAnalysis.table_models || !peakReplayAnalysis.table_models.length) {
+            body.innerHTML =
+                '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">&#9638;</div>' +
+                'Analyze the peak first to discover similar objects.</div></td></tr>';
+            return;
+        }
+
+        body.innerHTML = peakReplayAnalysis.table_models.map(function (item, idx) {
+            var checked = item.selected ? ' checked' : '';
+            var keys = (item.key_columns || []).length ? escapeHtml(item.key_columns.join(', ')) : '<span class="text-muted">None inferred</span>';
+            var replaySqls = (item.replay_sql_ids || []).length ? escapeHtml(item.replay_sql_ids.slice(0, 6).join(', ')) : '<span class="text-muted">None</span>';
+            return '<tr>' +
+                '<td><input type="checkbox" data-peak-table-select="' + idx + '"' + checked + '></td>' +
+                '<td><code>' + escapeHtml(item.source_owner + '.' + item.source_table) + '</code></td>' +
+                '<td><code>' + escapeHtml(computeLabTableName(item.source_table)) + '</code></td>' +
+                '<td>' + escapeHtml(String(item.column_count || 0)) + '</td>' +
+                '<td class="text-col">' + keys + '</td>' +
+                '<td class="text-col">' + replaySqls + '</td>' +
+            '</tr>';
+        }).join('');
+    }
+
     function renderPeakReplayAnalysis() {
         var summary = $('peak-analysis-summary');
         var body = $('peak-analysis-body');
@@ -1407,10 +1459,12 @@
             body.innerHTML =
                 '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">&#9881;</div>' +
                 'Analyze the interval to populate replay candidates.</div></td></tr>';
+            renderPeakTableModels();
             return;
         }
 
         var selected = getSelectedPeakReplayStatements().length;
+        var selectedTables = getSelectedPeakTables().length;
         var waits = (peakReplayAnalysis.waits || []).slice(0, 3).map(function (item) {
             return escapeHtml(item.event + ' (' + item.sample_pct + '%)');
         }).join(' · ');
@@ -1420,7 +1474,8 @@
                 '<strong>Interval:</strong> ' + escapeHtml(String(peakReplayAnalysis.start_time || '').replace('T', ' ')) +
                 ' to ' + escapeHtml(String(peakReplayAnalysis.end_time || '').replace('T', ' ')) +
                 ' &nbsp; <strong>ASH samples:</strong> ' + escapeHtml(Number(peakReplayAnalysis.sample_count || 0).toLocaleString()) +
-                ' &nbsp; <strong>Selected:</strong> ' + escapeHtml(String(selected)) +
+                ' &nbsp; <strong>Selected SQLs:</strong> ' + escapeHtml(String(selected)) +
+                ' &nbsp; <strong>Tables:</strong> ' + escapeHtml(String(selectedTables)) +
             '</div>' +
             '<div class="status-box status-info" style="margin-top:10px">' +
                 escapeHtml(peakReplayAnalysis.summary || 'Analysis loaded.') +
@@ -1429,7 +1484,7 @@
 
         body.innerHTML = peakReplayAnalysis.sql.map(function (item, idx) {
             var checked = item.selected ? ' checked' : '';
-            var disabled = item.replayable ? '' : ' disabled';
+            var disabled = item.lab_replayable ? '' : ' disabled';
             var sqlPreview = escapeHtml((item.sql_text || '').replace(/\s+/g, ' ').trim()).slice(0, 260);
             return '<tr>' +
                 '<td><input type="checkbox" data-peak-sql-select="' + idx + '"' + checked + disabled + '></td>' +
@@ -1438,9 +1493,14 @@
                 '<td class="text-col">' + escapeHtml(item.primary_event || 'ON CPU') + '</td>' +
                 '<td>' + escapeHtml(bindQualityLabel(item.bind_quality)) + '</td>' +
                 '<td class="text-col">' + escapeHtml(item.module || '-') + '</td>' +
-                '<td class="text-col"><code>' + sqlPreview + '</code></td>' +
+                '<td class="text-col"><code>' + sqlPreview + '</code>' +
+                    (!item.lab_replayable && item.portable_reason
+                        ? '<div class="text-muted text-sm" style="margin-top:6px">' + escapeHtml(item.portable_reason) + '</div>'
+                        : '') +
+                '</td>' +
             '</tr>';
         }).join('');
+        renderPeakTableModels();
     }
 
     async function analyzePeakReplay() {
@@ -1454,12 +1514,19 @@
             peakReplayAnalysis = result.analysis || null;
             if (peakReplayAnalysis && peakReplayAnalysis.sql) {
                 peakReplayAnalysis.sql = peakReplayAnalysis.sql.map(function (item) {
-                    item.selected = !!item.replayable;
+                    item.selected = !!item.lab_replayable;
+                    return item;
+                });
+            }
+            if (peakReplayAnalysis && peakReplayAnalysis.table_models) {
+                peakReplayAnalysis.table_models = peakReplayAnalysis.table_models.map(function (item) {
+                    item.selected = true;
                     return item;
                 });
             }
             renderPeakReplayAnalysis();
-            setPeakReplayStatus('Peak analysis loaded. You can now reconnect to a test database and start replay.', 'success');
+            setPeakReplayStatus('Peak analysis loaded. Next: create similar objects on the target database, then start the simulation.', 'success');
+            setPeakObjectStatus('', '');
         } catch (e) {
             setPeakReplayStatus('Peak analysis failed.', 'error');
         }
@@ -1472,7 +1539,7 @@
         $('peak-counter-plsql').textContent = '0';
         $('peak-counter-commits').textContent = '0';
         $('peak-counter-errors').textContent = '0';
-        $('peak-replay-progress-text').textContent = 'Analyze a peak first, then reconnect to your test database and start replay.';
+        $('peak-replay-progress-text').textContent = 'Analyze a peak, create similar objects, then reconnect to your test database and start the simulation.';
         $('peak-replay-progress-side').textContent = 'Idle';
     }
 
@@ -1486,14 +1553,59 @@
         }
         el.style.display = 'block';
         if (data.other_replay_running && !data.running) {
-            el.innerHTML = 'Another connection has an active SQL replay in this app: <b>' +
+            el.innerHTML = 'Another connection has an active peak simulation in this app: <b>' +
                 escapeHtml(data.other_connection_label || 'other connection') + '</b>.';
             return;
         }
-        el.innerHTML = '<b>RUNNING SQL replay</b> ' +
+        el.innerHTML = '<b>RUNNING peak simulation</b> ' +
             escapeHtml(data.selected_sql_count || 0) + ' SQLs · ' +
             escapeHtml(data.thread_count || 0) + ' threads · ' +
             escapeHtml(data.duration_seconds || 0) + ' sec.';
+    }
+
+    async function createPeakObjects() {
+        var selectedTables = getSelectedPeakTables();
+        if (!peakReplayAnalysis || !peakReplayAnalysis.table_models || !selectedTables.length) {
+            setPeakObjectStatus('Analyze the workload and select at least one table first.', 'error');
+            return;
+        }
+        setPeakObjectStatus('Creating similar objects and seeding rows on the current target connection...', 'info');
+        var payload = {
+            analysis: peakReplayAnalysis,
+            table_prefix: getPeakTablePrefix(),
+            rows_per_table: parseInt((($('peak-rows-per-table') || {}).value || '1000'), 10) || 1000,
+            selected_tables: selectedTables.map(function (item) { return item.source_table; }),
+        };
+        var result = await api('POST', '/api/peak-replay/create-objects', payload);
+        if (!result.ok) {
+            setPeakObjectStatus(result.message || 'Failed to create similar objects.', 'error');
+            return;
+        }
+        setPeakObjectStatus(result.message || 'Similar objects created.', 'success');
+        if (result.created && result.created.length) {
+            $('peak-replay-progress-text').textContent =
+                'Similar objects ready: ' + result.created.map(function (item) { return item.lab_table; }).join(', ');
+        }
+    }
+
+    async function dropPeakObjects() {
+        var selectedTables = getSelectedPeakTables();
+        if (!peakReplayAnalysis || !peakReplayAnalysis.table_models || !selectedTables.length) {
+            setPeakObjectStatus('Analyze the workload and select at least one table first.', 'error');
+            return;
+        }
+        setPeakObjectStatus('Dropping similar objects for the current prefix...', 'info');
+        var payload = {
+            analysis: peakReplayAnalysis,
+            table_prefix: getPeakTablePrefix(),
+            selected_tables: selectedTables.map(function (item) { return item.source_table; }),
+        };
+        var result = await api('POST', '/api/peak-replay/drop-objects', payload);
+        if (!result.ok) {
+            setPeakObjectStatus(result.message || 'Failed to drop similar objects.', 'error');
+            return;
+        }
+        setPeakObjectStatus(result.message || 'Similar objects dropped.', 'success');
     }
 
     function updatePeakReplayStatus(data) {
@@ -1547,8 +1659,16 @@
             setPeakReplayStatus('Select at least one replayable SQL statement first.', 'error');
             return;
         }
+        var selectedTables = getSelectedPeakTables();
+        if (!selectedTables.length) {
+            setPeakObjectStatus('Select at least one similar object table first.', 'error');
+            return;
+        }
         var payload = {
-            statements: selectedSql,
+            analysis: peakReplayAnalysis,
+            selected_sql_ids: selectedSql.map(function (item) { return item.sql_id; }),
+            selected_tables: selectedTables.map(function (item) { return item.source_table; }),
+            table_prefix: getPeakTablePrefix(),
             analysis_summary: peakReplayAnalysis ? peakReplayAnalysis.summary : '',
             thread_count: parseInt((($('peak-replay-threads') || {}).value || '16'), 10) || 16,
             duration_seconds: parseInt((($('peak-replay-duration') || {}).value || '120'), 10) || 120,
@@ -1558,20 +1678,20 @@
         };
         var result = await api('POST', '/api/peak-replay/start', payload);
         if (!result.ok) {
-            setPeakReplayStatus(result.message || 'Failed to start SQL replay.', 'error');
+            setPeakReplayStatus(result.message || 'Failed to start workload simulation.', 'error');
             return;
         }
-        setPeakReplayStatus(result.message || 'SQL replay started.', 'success');
+        setPeakReplayStatus(result.message || 'Workload simulation started.', 'success');
         loadPeakReplayStatus();
     }
 
     async function stopPeakReplay() {
         var result = await api('POST', '/api/peak-replay/stop');
         if (!result.ok) {
-            setPeakReplayStatus(result.message || 'Failed to stop SQL replay.', 'error');
+            setPeakReplayStatus(result.message || 'Failed to stop workload simulation.', 'error');
             return;
         }
-        setPeakReplayStatus('SQL replay stop requested.', 'info');
+        setPeakReplayStatus('Workload simulation stop requested.', 'info');
         loadPeakReplayStatus();
     }
 
@@ -2497,6 +2617,8 @@
         $('btn-stop-workload').addEventListener('click', stopWorkload);
         $('btn-load-santander-peak').addEventListener('click', loadSantanderPeakPreset);
         $('btn-analyze-peak').addEventListener('click', analyzePeakReplay);
+        $('btn-create-peak-objects').addEventListener('click', createPeakObjects);
+        $('btn-drop-peak-objects').addEventListener('click', dropPeakObjects);
         $('btn-start-peak-replay').addEventListener('click', startPeakReplay);
         $('btn-stop-peak-replay').addEventListener('click', stopPeakReplay);
         $('btn-start-login-workload').addEventListener('click', startLoginWorkload);
@@ -2531,6 +2653,24 @@
                 peakReplayAnalysis.sql[index].selected = !!checkbox.checked;
                 renderPeakReplayAnalysis();
             });
+        }
+
+        var peakTableBody = $('peak-table-models-body');
+        if (peakTableBody) {
+            peakTableBody.addEventListener('change', function (event) {
+                var checkbox = event.target.closest('input[data-peak-table-select]');
+                if (!checkbox || !peakReplayAnalysis || !peakReplayAnalysis.table_models) return;
+                var index = parseInt(checkbox.getAttribute('data-peak-table-select'), 10);
+                if (isNaN(index) || !peakReplayAnalysis.table_models[index]) return;
+                peakReplayAnalysis.table_models[index].selected = !!checkbox.checked;
+                renderPeakReplayAnalysis();
+            });
+        }
+
+        var peakPrefix = $('peak-table-prefix');
+        if (peakPrefix) {
+            peakPrefix.addEventListener('input', renderPeakTableModels);
+            peakPrefix.addEventListener('change', renderPeakTableModels);
         }
 
         // Results buttons
