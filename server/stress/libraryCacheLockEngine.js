@@ -195,6 +195,7 @@ class LibraryCacheLockEngine {
       Math.min(100, maxSessions)
     );
     const schemaPrefix = normalizeUpper(config.schemaPrefix, '');
+    const tableOwner = normalizeUpper(config.tableOwner, '');
     const modulePrefix = normalizeFreeText(config.modulePrefix, 'MFES').replace(/\s+/g, '_').slice(0, 18) || 'MFES';
 
     return {
@@ -206,6 +207,7 @@ class LibraryCacheLockEngine {
       moduleLength: clampInt(config.moduleLength, 30, 96, 42),
       modulePrefix,
       schemaPrefix,
+      tableOwner,
       waitSampleSeconds: clampInt(config.waitSampleSeconds, 2, 30, 5),
       durationMinutes: clampInt(config.durationMinutes, 0, 1440, 0),
       selectsPerTxn: clampInt(config.selectsPerTxn, 1, 10, 2),
@@ -242,6 +244,14 @@ class LibraryCacheLockEngine {
     return this.config.schemaPrefix ? `${this.config.schemaPrefix}_` : '';
   }
 
+  qualifyTable(tableName) {
+    return this.config.tableOwner ? `${this.config.tableOwner}.${tableName}` : tableName;
+  }
+
+  getQualifiedTableName(baseTableName) {
+    return this.qualifyTable(`${this.getTablePrefix()}${baseTableName}`);
+  }
+
   isAuthError(err) {
     const message = String(err?.message || '');
     return AUTH_ERROR_CODES.some((code) => message.includes(code));
@@ -267,12 +277,21 @@ class LibraryCacheLockEngine {
     });
 
     const result = await connection.execute(
-      `
-        SELECT table_name
-        FROM user_tables
-        WHERE table_name IN (${placeholders.join(', ')})
-      `,
-      binds,
+      this.config.tableOwner
+        ? `
+          SELECT table_name
+          FROM all_tables
+          WHERE owner = :tableOwner
+            AND table_name IN (${placeholders.join(', ')})
+        `
+        : `
+          SELECT table_name
+          FROM user_tables
+          WHERE table_name IN (${placeholders.join(', ')})
+        `,
+      this.config.tableOwner
+        ? { ...binds, tableOwner: this.config.tableOwner }
+        : binds,
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
 
@@ -282,7 +301,7 @@ class LibraryCacheLockEngine {
     if (missing.length > 0) {
       throw new Error(
         `Route ${route.name} is missing workload tables: ${missing.join(', ')}. ` +
-        `Check the service/PDB and schema prefix before starting the run.`
+        `Check the service/PDB, schema prefix${this.config.tableOwner ? `, and table owner ${this.config.tableOwner}` : ''} before starting the run.`
       );
     }
   }
@@ -656,7 +675,6 @@ class LibraryCacheLockEngine {
   }
 
   async executeBusinessTransaction(connection, route, workerId, iteration) {
-    const p = this.getTablePrefix();
     await connection.execute(
       this.buildAnonymousBlock(route),
       { moduleName: this.buildModuleName(route, workerId, iteration) },
@@ -664,27 +682,33 @@ class LibraryCacheLockEngine {
     );
 
     for (let i = 0; i < this.config.selectsPerTxn; i++) {
-      await this.performSelect(connection, p, workerId, i);
+      await this.performSelect(connection, workerId, i);
     }
     for (let i = 0; i < this.config.insertsPerTxn; i++) {
-      await this.performInsert(connection, p, workerId, iteration, i);
+      await this.performInsert(connection, workerId, iteration, i);
     }
     for (let i = 0; i < this.config.updatesPerTxn; i++) {
-      await this.performUpdate(connection, p, workerId, i);
+      await this.performUpdate(connection, workerId, i);
     }
     for (let i = 0; i < this.config.deletesPerTxn; i++) {
-      await this.performDelete(connection, p, workerId, i);
+      await this.performDelete(connection, workerId, i);
     }
   }
 
-  async performSelect(connection, p = '', workerId = 0, selectIndex = 0) {
+  async performSelect(connection, workerId = 0, selectIndex = 0) {
     const type = (workerId + selectIndex + Date.now()) % 4;
+    const ordersTable = this.getQualifiedTableName('orders');
+    const customersTable = this.getQualifiedTableName('customers');
+    const inventoryTable = this.getQualifiedTableName('inventory');
+    const productsTable = this.getQualifiedTableName('products');
+    const warehousesTable = this.getQualifiedTableName('warehouses');
+    const orderItemsTable = this.getQualifiedTableName('order_items');
 
     if (type === 0) {
       await connection.execute(
         `SELECT o.order_id, o.status, o.total_amount, c.customer_id, c.first_name, c.last_name
-         FROM ${p}orders o
-         JOIN ${p}customers c ON c.customer_id = o.customer_id
+         FROM ${ordersTable} o
+         JOIN ${customersTable} c ON c.customer_id = o.customer_id
          WHERE ROWNUM <= 25`,
         [],
         { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
@@ -693,12 +717,12 @@ class LibraryCacheLockEngine {
     }
 
     if (type === 1) {
-      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+      const customerId = await this.getRandomId(connection, customersTable, 'customer_id');
       if (!customerId) return;
 
       await connection.execute(
         `SELECT o.order_id, o.order_date, o.status, o.total_amount
-         FROM ${p}orders o
+         FROM ${ordersTable} o
          WHERE o.customer_id = :customerId
          ORDER BY o.order_date DESC
          FETCH FIRST 20 ROWS ONLY`,
@@ -711,9 +735,9 @@ class LibraryCacheLockEngine {
     if (type === 2) {
       await connection.execute(
         `SELECT p.product_id, p.product_name, i.quantity_on_hand, w.warehouse_name
-         FROM ${p}inventory i
-         JOIN ${p}products p ON p.product_id = i.product_id
-         JOIN ${p}warehouses w ON w.warehouse_id = i.warehouse_id
+         FROM ${inventoryTable} i
+         JOIN ${productsTable} p ON p.product_id = i.product_id
+         JOIN ${warehousesTable} w ON w.warehouse_id = i.warehouse_id
          WHERE ROWNUM <= 25`,
         [],
         { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
@@ -721,28 +745,33 @@ class LibraryCacheLockEngine {
       return;
     }
 
-    const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
+    const orderId = await this.getRandomId(connection, ordersTable, 'order_id');
     if (!orderId) return;
 
     await connection.execute(
       `SELECT oi.order_id, oi.product_id, oi.quantity, oi.unit_price, p.product_name
-       FROM ${p}order_items oi
-       JOIN ${p}products p ON p.product_id = oi.product_id
+       FROM ${orderItemsTable} oi
+       JOIN ${productsTable} p ON p.product_id = oi.product_id
        WHERE oi.order_id = :orderId`,
       { orderId },
       { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
     );
   }
 
-  async performInsert(connection, p = '', workerId = 0, iteration = 0, insertIndex = 0) {
+  async performInsert(connection, workerId = 0, iteration = 0, insertIndex = 0) {
     const type = (workerId + iteration + insertIndex) % 2;
+    const ordersTable = this.getQualifiedTableName('orders');
+    const orderHistoryTable = this.getQualifiedTableName('order_history');
+    const productsTable = this.getQualifiedTableName('products');
+    const customersTable = this.getQualifiedTableName('customers');
+    const productReviewsTable = this.getQualifiedTableName('product_reviews');
 
     if (type === 0) {
-      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
+      const orderId = await this.getRandomId(connection, ordersTable, 'order_id');
       if (!orderId) return;
 
       await connection.execute(
-        `INSERT INTO ${p}order_history (
+        `INSERT INTO ${orderHistoryTable} (
            order_id,
            old_status,
            new_status,
@@ -765,12 +794,12 @@ class LibraryCacheLockEngine {
       return;
     }
 
-    const productId = await this.getRandomId(connection, `${p}products`, 'product_id');
-    const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+    const productId = await this.getRandomId(connection, productsTable, 'product_id');
+    const customerId = await this.getRandomId(connection, customersTable, 'customer_id');
     if (!productId || !customerId) return;
 
     await connection.execute(
-      `INSERT INTO ${p}product_reviews (
+      `INSERT INTO ${productReviewsTable} (
          product_id,
          customer_id,
          rating,
@@ -796,17 +825,20 @@ class LibraryCacheLockEngine {
     );
   }
 
-  async performUpdate(connection, p = '', workerId = 0, updateIndex = 0) {
+  async performUpdate(connection, workerId = 0, updateIndex = 0) {
     const type = (workerId + updateIndex + Date.now()) % 3;
+    const ordersTable = this.getQualifiedTableName('orders');
+    const customersTable = this.getQualifiedTableName('customers');
+    const inventoryTable = this.getQualifiedTableName('inventory');
 
     if (type === 0) {
-      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
+      const orderId = await this.getRandomId(connection, ordersTable, 'order_id');
       if (!orderId) return;
 
       const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
       const status = statuses[(workerId + updateIndex) % statuses.length];
       await connection.execute(
-        `UPDATE ${p}orders
+        `UPDATE ${ordersTable}
          SET status = :status,
              updated_at = CURRENT_TIMESTAMP
          WHERE order_id = :orderId`,
@@ -817,11 +849,11 @@ class LibraryCacheLockEngine {
     }
 
     if (type === 1) {
-      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+      const customerId = await this.getRandomId(connection, customersTable, 'customer_id');
       if (!customerId) return;
 
       await connection.execute(
-        `UPDATE ${p}customers
+        `UPDATE ${customersTable}
          SET balance = balance + :delta,
              updated_at = CURRENT_TIMESTAMP
          WHERE customer_id = :customerId`,
@@ -834,11 +866,11 @@ class LibraryCacheLockEngine {
       return;
     }
 
-    const inventoryId = await this.getRandomId(connection, `${p}inventory`, 'inventory_id');
+    const inventoryId = await this.getRandomId(connection, inventoryTable, 'inventory_id');
     if (!inventoryId) return;
 
     await connection.execute(
-      `UPDATE ${p}inventory
+      `UPDATE ${inventoryTable}
        SET quantity_on_hand = GREATEST(0, quantity_on_hand + :delta),
            updated_at = CURRENT_TIMESTAMP
        WHERE inventory_id = :inventoryId`,
@@ -850,26 +882,28 @@ class LibraryCacheLockEngine {
     );
   }
 
-  async performDelete(connection, p = '', workerId = 0, deleteIndex = 0) {
+  async performDelete(connection, workerId = 0, deleteIndex = 0) {
     const type = (workerId + deleteIndex) % 2;
+    const productReviewsTable = this.getQualifiedTableName('product_reviews');
+    const orderHistoryTable = this.getQualifiedTableName('order_history');
 
     if (type === 0) {
-      const reviewId = await this.getRandomId(connection, `${p}product_reviews`, 'review_id');
+      const reviewId = await this.getRandomId(connection, productReviewsTable, 'review_id');
       if (!reviewId) return;
 
       await connection.execute(
-        `DELETE FROM ${p}product_reviews WHERE review_id = :reviewId`,
+        `DELETE FROM ${productReviewsTable} WHERE review_id = :reviewId`,
         { reviewId },
         { autoCommit: false }
       );
       return;
     }
 
-    const historyId = await this.getRandomId(connection, `${p}order_history`, 'history_id');
+    const historyId = await this.getRandomId(connection, orderHistoryTable, 'history_id');
     if (!historyId) return;
 
     await connection.execute(
-      `DELETE FROM ${p}order_history WHERE history_id = :historyId`,
+      `DELETE FROM ${orderHistoryTable} WHERE history_id = :historyId`,
       { historyId },
       { autoCommit: false }
     );
@@ -1083,6 +1117,7 @@ class LibraryCacheLockEngine {
       scenario: this.config?.scenario || 'single-service',
       loginMode: this.config?.loginMode || 'persistent',
       schemaPrefix: this.config?.schemaPrefix || '',
+      tableOwner: this.config?.tableOwner || '',
       durationMinutes: this.config?.durationMinutes || 0,
       initialSessions: this.config?.initialSessions || 0,
       maxSessions: this.config?.maxSessions || 0,
@@ -1119,6 +1154,7 @@ class LibraryCacheLockEngine {
       scenario: this.config.scenario,
       loginMode: this.config.loginMode,
       schemaPrefix: this.config.schemaPrefix,
+      tableOwner: this.config.tableOwner,
       durationMinutes: this.config.durationMinutes,
       initialSessions: this.config.initialSessions,
       maxSessions: this.config.maxSessions,

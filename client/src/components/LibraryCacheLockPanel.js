@@ -264,6 +264,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
     durationMinutes: 0,
     loopDelay: 0,
     schemaPrefix: '',
+    tableOwner: '',
     modulePrefix: 'MFES',
     moduleLength: 42,
     selectsPerTxn: 2,
@@ -813,6 +814,20 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="form-group">
+            <label>Table Owner</label>
+            <input
+              value={config.tableOwner}
+              onChange={(e) => setConfig((prev) => ({ ...prev, tableOwner: e.target.value.toUpperCase() }))}
+              disabled={isRunning}
+              placeholder="current schema"
+            />
+          </div>
+
+          <div style={{ marginTop: '-0.15rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+            Set <code>Table Owner</code> when the workload tables belong to another schema. The tool will validate through that owner and qualify the SQL as <code>OWNER.TABLE</code>.
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
