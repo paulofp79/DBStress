@@ -46,6 +46,11 @@ const AUTH_ERROR_CODES = [
   'ORA-28040'
 ];
 
+const SCHEMA_ERROR_CODES = [
+  'ORA-00942',
+  'ORA-04043'
+];
+
 const REQUIRED_WORKLOAD_TABLES = [
   'ORDERS',
   'CUSTOMERS',
@@ -171,7 +176,7 @@ class LibraryCacheLockEngine {
 
     return {
       scenario,
-      loginMode: config.loginMode === 'pool' ? 'pool' : 'dedicated',
+      loginMode: 'persistent',
       threads,
       loopDelay: clampInt(config.loopDelay, 0, 5000, 0),
       moduleLength: clampInt(config.moduleLength, 30, 96, 42),
@@ -209,6 +214,11 @@ class LibraryCacheLockEngine {
   isAuthError(err) {
     const message = String(err?.message || '');
     return AUTH_ERROR_CODES.some((code) => message.includes(code));
+  }
+
+  isSchemaError(err) {
+    const message = String(err?.message || '');
+    return SCHEMA_ERROR_CODES.some((code) => message.includes(code));
   }
 
   buildRequiredTableNames() {
@@ -252,7 +262,9 @@ class LibraryCacheLockEngine {
       return this.stopPromise;
     }
 
-    this.stats.lastError = reason;
+    if (fatal) {
+      this.stats.lastError = reason;
+    }
     this.emitStatus(`${fatal ? 'Fatal error' : 'Stopping'}: ${reason}`);
     this.stopPromise = this.stop();
     try {
@@ -290,9 +302,7 @@ class LibraryCacheLockEngine {
     this.runStartSnapshot = await this.captureSystemSnapshot();
     this.lastSampleSnapshot = this.runStartSnapshot;
 
-    if (this.config.loginMode === 'pool') {
-      await this.createRoutePools();
-    }
+    await this.createRoutePools();
 
     this.isRunning = true;
     this.workers = [];
@@ -428,53 +438,67 @@ class LibraryCacheLockEngine {
       let connection;
       try {
         connection = await this.acquireConnection(route);
-        iteration += 1;
         route.stats.totalLogons += 1;
         this.stats.totalLogons += 1;
 
-        const start = process.hrtime.bigint();
-
-        try {
-          await this.executeBusinessTransaction(connection, route, workerId, iteration);
-          await connection.commit();
-
-          const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
-          route.stats.totalTransactions += 1;
-          route.stats.responseTimes.push(elapsedMs);
-          if (route.stats.responseTimes.length > 2000) {
-            route.stats.responseTimes.shift();
-          }
-
-          this.stats.totalTransactions += 1;
-          this.stats.responseTimes.push(elapsedMs);
-          if (this.stats.responseTimes.length > 4000) {
-            this.stats.responseTimes.shift();
-          }
-        } catch (err) {
-          route.stats.totalErrors += 1;
-          this.stats.totalErrors += 1;
-          this.stats.lastError = err.message;
+        while (this.isRunning) {
+          iteration += 1;
+          const start = process.hrtime.bigint();
 
           try {
-            await connection.rollback();
-          } catch (rollbackErr) {
-            // Ignore rollback failures during error handling.
+            await this.executeBusinessTransaction(connection, route, workerId, iteration);
+            await connection.commit();
+
+            const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+            route.stats.totalTransactions += 1;
+            route.stats.responseTimes.push(elapsedMs);
+            if (route.stats.responseTimes.length > 2000) {
+              route.stats.responseTimes.shift();
+            }
+
+            this.stats.totalTransactions += 1;
+            this.stats.responseTimes.push(elapsedMs);
+            if (this.stats.responseTimes.length > 4000) {
+              this.stats.responseTimes.shift();
+            }
+          } catch (err) {
+            route.stats.totalErrors += 1;
+            this.stats.totalErrors += 1;
+            this.stats.lastError = err.message;
+
+            try {
+              await connection.rollback();
+            } catch (rollbackErr) {
+              // Ignore rollback failures during error handling.
+            }
+
+            if (this.isAuthError(err)) {
+              await this.stopForReason(`Authentication/account error on ${route.name}: ${err.message}`, { fatal: true });
+              return;
+            }
+
+            if (this.isSchemaError(err)) {
+              await this.stopForReason(`Missing object on ${route.name}: ${err.message}`, { fatal: true });
+              return;
+            }
+
+            if (this.stats.totalErrors <= 5 || this.stats.totalErrors % 100 === 0) {
+              console.log(`Library Cache Lock route ${route.name} worker ${workerId} error:`, err.message);
+            }
+
+            if (
+              String(err.message).includes('DPI-1010') ||
+              String(err.message).includes('NJS-500') ||
+              String(err.message).includes('ORA-03113') ||
+              String(err.message).includes('ORA-03114') ||
+              String(err.message).includes('ORA-12537')
+            ) {
+              break;
+            }
           }
 
-          if (this.stats.totalErrors <= 5 || this.stats.totalErrors % 100 === 0) {
-            console.log(`Library Cache Lock route ${route.name} worker ${workerId} error:`, err.message);
-          }
-        } finally {
-          if (connection) {
-            try {
-              await connection.close();
-              if (this.config.loginMode === 'dedicated') {
-                route.stats.totalLogoffs += 1;
-                this.stats.totalLogoffs += 1;
-              }
-            } catch (closeErr) {
-              this.stats.lastError = closeErr.message;
-            }
+          if (this.isRunning && this.config.loopDelay > 0) {
+            await this.sleep(this.config.loopDelay);
           }
         }
       } catch (err) {
@@ -488,32 +512,31 @@ class LibraryCacheLockEngine {
         if (!String(err.message).includes('pool is terminating')) {
           console.log(`Library Cache Lock connection error on ${route.name}:`, err.message);
         }
+      } finally {
+        if (connection) {
+          try {
+            await connection.close();
+            route.stats.totalLogoffs += 1;
+            this.stats.totalLogoffs += 1;
+          } catch (closeErr) {
+            this.stats.lastError = closeErr.message;
+          }
+        }
       }
 
-      if (this.isRunning && this.config.loopDelay > 0) {
-        await this.sleep(this.config.loopDelay);
+      if (this.isRunning) {
+        await this.sleep(100);
       }
     }
   }
 
   async acquireConnection(route) {
-    if (this.config.loginMode === 'pool') {
-      const pool = this.routePools.get(route.id);
-      if (!pool) {
-        throw new Error(`No pool available for ${route.name}`);
-      }
-      try {
-        return await pool.getConnection();
-      } catch (err) {
-        if (this.isAuthError(err)) {
-          throw new Error(`Authentication failed on pooled route ${route.name}: ${err.message}`);
-        }
-        throw err;
-      }
+    const pool = this.routePools.get(route.id);
+    if (!pool) {
+      throw new Error(`No pool available for ${route.name}`);
     }
-
     try {
-      return await this.db.createDirectConnection({ connectionString: route.connectionString });
+      return await pool.getConnection();
     } catch (err) {
       if (this.isAuthError(err)) {
         throw new Error(`Authentication failed on route ${route.name}: ${err.message}`);

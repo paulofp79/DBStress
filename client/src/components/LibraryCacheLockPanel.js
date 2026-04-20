@@ -80,7 +80,7 @@ const emptyMetrics = {
   latestSample: null,
   lastError: null,
   scenario: 'single-service',
-  loginMode: 'dedicated'
+  loginMode: 'persistent'
 };
 
 const chartOptions = {
@@ -204,7 +204,6 @@ function MetricCard({ title, value, hint }) {
 function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
   const [config, setConfig] = useState({
     scenario: 'single-service',
-    loginMode: 'dedicated',
     runLabel: 'Scenario 1 Baseline',
     threads: 1000,
     durationMinutes: 0,
@@ -295,7 +294,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
         latestSample: data.latestSample || null,
         lastError: data.lastError || null,
         scenario: data.scenario || 'single-service',
-        loginMode: data.loginMode || 'dedicated'
+        loginMode: data.loginMode || 'persistent'
       });
 
       if (data.latestSample?.capturedAt && data.latestSample.capturedAt !== lastSampleAtRef.current) {
@@ -584,7 +583,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
         <div style={cardStyle}>
           <h2 style={{ margin: 0, fontSize: '1.15rem' }}>Library Cache Lock</h2>
           <p style={{ marginTop: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            Session lifecycle workload: logon, call the procedure, run mixed SELECT/INSERT/UPDATE/DELETE, commit, logout, then compare single-service and split-service runs.
+            Reused application-session workload: each session stays open, calls the procedure on every transaction, runs mixed SELECT/INSERT/UPDATE/DELETE, commits, and continues processing more work.
           </p>
           <div style={{
             marginTop: '0.85rem',
@@ -613,18 +612,6 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             >
               <option value="single-service">Scenario 1: Single service / one procedure</option>
               <option value="split-services">Scenario 2: Four services / four procedures</option>
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label>Login Model</label>
-            <select
-              value={config.loginMode}
-              onChange={(e) => setConfig((prev) => ({ ...prev, loginMode: e.target.value }))}
-              disabled={isRunning}
-            >
-              <option value="dedicated">Dedicated logon/logoff per transaction</option>
-              <option value="pool">Pooled sessions with checkout/close</option>
             </select>
           </div>
 
@@ -923,7 +910,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
           <MetricCard title="Avg ms / Txn" value={formatNumber(metrics.avgTransactionMs, 2)} hint="Average end-to-end transaction time" />
           <MetricCard title="Total Txns" value={formatNumber(metrics.totalTransactions, 0)} hint="Committed business transactions" />
           <MetricCard title="Errors" value={formatNumber(metrics.totalErrors, 0)} hint="Rolled back or failed transaction attempts" />
-          <MetricCard title="Logons" value={formatNumber(metrics.totalLogons, 0)} hint="Actual logons in dedicated mode, logical opens in pool mode" />
+          <MetricCard title="Sessions Opened" value={formatNumber(metrics.totalLogons, 0)} hint="Long-lived workload sessions opened for this run" />
           <MetricCard title="AAS" value={formatNumber(sample?.averageActiveSessions || latestSummary?.averageActiveSessions, 2)} hint="DB time divided by elapsed run time" />
           <MetricCard title="DB CPU Share" value={`${formatNumber(sample?.dbCpuSharePct || latestSummary?.dbCpuSharePct, 2)}%`} hint="How much DB time stayed on CPU" />
           <MetricCard title="Commits / Sec" value={formatNumber(sample?.commitRatePerSecond || latestSummary?.commitRatePerSecond, 2)} hint="Environment commit rate during the run" />
@@ -1059,13 +1046,13 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
               <div style={{ display: 'grid', gap: '0.45rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
                 <div><strong style={{ color: 'white' }}>{latestSummary.runLabel}</strong></div>
                 <div>Scenario: {latestSummary.scenario}</div>
-                <div>Login mode: {latestSummary.loginMode}</div>
+                <div>Session model: reused persistent sessions</div>
                 <div>Configured run time: {latestSummary.durationMinutes > 0 ? `${latestSummary.durationMinutes} min` : 'manual stop'}</div>
                 <div>Started: {formatDateTime(latestSummary.startedAt)}</div>
                 <div>Finished: {formatDateTime(latestSummary.completedAt)}</div>
                 <div>Total transactions: {formatNumber(latestSummary.totalTransactions, 0)}</div>
                 <div>Average ms/txn: {formatNumber(latestSummary.avgTransactionMs, 2)}</div>
-                <div>Logons: {formatNumber(latestSummary.totalLogons, 0)}</div>
+                <div>Sessions opened: {formatNumber(latestSummary.totalLogons, 0)}</div>
                 <div>User calls/sec: {formatNumber(latestSummary.userCallsPerSecond, 2)}</div>
                 <div>Execute count/sec: {formatNumber(latestSummary.executeCountPerSecond, 2)}</div>
               </div>
@@ -1185,7 +1172,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                   <div key={summary.runId} style={{ padding: '0.85rem', borderRadius: '10px', border: '1px solid var(--border)', background: 'rgba(15,23,42,0.45)' }}>
                     <div style={{ fontWeight: 600 }}>{summary.runLabel}</div>
                     <div style={{ marginTop: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                      Scenario: {summary.scenario} | Login mode: {summary.loginMode}
+                      Scenario: {summary.scenario} | Session model: persistent
                     </div>
                     <div style={{ marginTop: '0.65rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                       Route totals
