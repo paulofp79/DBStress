@@ -77,6 +77,7 @@ class LibraryCacheLockEngine {
 
     this.statsInterval = null;
     this.waitEventsInterval = null;
+    this.expansionInterval = null;
     this.autoStopTimer = null;
     this.runStartSnapshot = null;
     this.lastSampleSnapshot = null;
@@ -84,6 +85,8 @@ class LibraryCacheLockEngine {
     this.lastRunSummary = null;
     this.runId = null;
     this.stopPromise = null;
+    this.nextWorkerId = 0;
+    this.workerStates = new Map();
   }
 
   createEmptyStats() {
@@ -92,6 +95,8 @@ class LibraryCacheLockEngine {
       totalErrors: 0,
       totalLogons: 0,
       totalLogoffs: 0,
+      currentSessions: 0,
+      peakSessions: 0,
       responseTimes: [],
       startTime: null,
       lastError: null,
@@ -99,13 +104,16 @@ class LibraryCacheLockEngine {
     };
   }
 
-  createRouteStats(assignedWorkers = 0) {
+  createRouteStats() {
     return {
-      assignedWorkers,
       totalTransactions: 0,
       totalErrors: 0,
       totalLogons: 0,
       totalLogoffs: 0,
+      currentSessions: 0,
+      peakSessions: 0,
+      initialSessions: 0,
+      maxSessions: 0,
       responseTimes: [],
       previousTransactions: 0,
       tps: 0
@@ -142,7 +150,11 @@ class LibraryCacheLockEngine {
     const defaultConnectionString = credentials.connectionString;
     const defaultProcedureName = normalizeUpper(config.procedureName, 'GRAV_SESSION_MFES_ONLINE');
     const defaultOwner = normalizeUpper(config.procedureOwner, '');
-    const scenario = config.scenario === 'split-services' ? 'split-services' : 'single-service';
+    const scenario = config.scenario === 'split-services'
+      ? 'split-services'
+      : config.scenario === 'no-alter-session'
+        ? 'no-alter-session'
+        : 'single-service';
 
     let routes;
     if (scenario === 'split-services') {
@@ -170,14 +182,26 @@ class LibraryCacheLockEngine {
       ];
     }
 
-    const threads = clampInt(config.threads, 1, 5000, 500);
+    const maxSessions = clampInt(
+      config.maxSessions ?? config.threads,
+      1,
+      5000,
+      500
+    );
+    const initialSessions = clampInt(
+      config.initialSessions,
+      1,
+      maxSessions,
+      Math.min(100, maxSessions)
+    );
     const schemaPrefix = normalizeUpper(config.schemaPrefix, '');
     const modulePrefix = normalizeFreeText(config.modulePrefix, 'MFES').replace(/\s+/g, '_').slice(0, 18) || 'MFES';
 
     return {
       scenario,
       loginMode: 'persistent',
-      threads,
+      initialSessions,
+      maxSessions,
       loopDelay: clampInt(config.loopDelay, 0, 5000, 0),
       moduleLength: clampInt(config.moduleLength, 30, 96, 42),
       modulePrefix,
@@ -188,7 +212,14 @@ class LibraryCacheLockEngine {
       insertsPerTxn: clampInt(config.insertsPerTxn, 0, 10, 1),
       updatesPerTxn: clampInt(config.updatesPerTxn, 0, 10, 1),
       deletesPerTxn: clampInt(config.deletesPerTxn, 0, 10, 1),
-      runLabel: normalizeFreeText(config.runLabel, scenario === 'split-services' ? 'Split Services' : 'Single Service'),
+      runLabel: normalizeFreeText(
+        config.runLabel,
+        scenario === 'split-services'
+          ? 'Split Services'
+          : scenario === 'no-alter-session'
+            ? 'No ALTER SESSION'
+            : 'Single Service'
+      ),
       routes
     };
   }
@@ -286,10 +317,12 @@ class LibraryCacheLockEngine {
     this.runId = `lcl-${Date.now()}`;
     this.lastRunSummary = null;
     this.latestSample = null;
+    this.nextWorkerId = 0;
+    this.workerStates = new Map();
 
     await this.validateRoutes();
 
-    this.distributeWorkersAcrossRoutes();
+    this.planRouteSessionTargets();
 
     this.stats = this.createEmptyStats();
     this.stats.startTime = Date.now();
@@ -307,15 +340,14 @@ class LibraryCacheLockEngine {
     this.isRunning = true;
     this.workers = [];
 
-    for (let workerId = 0; workerId < this.config.threads; workerId++) {
-      this.workers.push(this.runWorker(workerId));
-    }
+    this.spawnWorkers(this.config.initialSessions);
 
     this.statsInterval = setInterval(() => this.reportStats(), 1000);
     this.waitEventsInterval = setInterval(
       () => this.captureAndEmitSample(),
       this.config.waitSampleSeconds * 1000
     );
+    this.expansionInterval = setInterval(() => this.evaluatePressureAndExpand(), 3000);
 
     if (this.config.durationMinutes > 0) {
       this.autoStopTimer = setTimeout(() => {
@@ -325,10 +357,13 @@ class LibraryCacheLockEngine {
       }, this.config.durationMinutes * 60 * 1000);
     }
 
-    this.emitStatus(`Running ${this.config.threads.toLocaleString()} sessions across ${this.routes.length} route(s)`, {
+    this.emitStatus(
+      `Running ${this.config.initialSessions.toLocaleString()} initial session(s), auto-expanding up to ${this.config.maxSessions.toLocaleString()} across ${this.routes.length} route(s)`,
+      {
       config: this.config,
       routes: this.describeRoutes()
-    });
+      }
+    );
   }
 
   async validateRoutes() {
@@ -393,20 +428,23 @@ class LibraryCacheLockEngine {
     }
   }
 
-  distributeWorkersAcrossRoutes() {
+  planRouteSessionTargets() {
     this.routes.forEach((route) => {
-      route.stats = this.createRouteStats(0);
+      route.stats = this.createRouteStats();
     });
 
-    for (let workerId = 0; workerId < this.config.threads; workerId++) {
+    for (let workerId = 0; workerId < this.config.maxSessions; workerId++) {
       const route = this.routes[workerId % this.routes.length];
-      route.stats.assignedWorkers += 1;
+      route.stats.maxSessions += 1;
+      if (workerId < this.config.initialSessions) {
+        route.stats.initialSessions += 1;
+      }
     }
   }
 
   async createRoutePools() {
     for (const route of this.routes) {
-      const poolSize = Math.max(2, route.stats.assignedWorkers + 2);
+      const poolSize = Math.max(2, route.stats.maxSessions + 2);
       try {
         const pool = await this.db.createStressPool(poolSize, { connectionString: route.connectionString });
         this.routePools.set(route.id, pool);
@@ -425,13 +463,78 @@ class LibraryCacheLockEngine {
       name: route.name,
       connectionString: route.connectionString,
       procedure: this.qualifyProcedure(route),
-      assignedWorkers: route.stats?.assignedWorkers || 0,
+      assignedWorkers: route.stats?.currentSessions || 0,
+      initialSessions: route.stats?.initialSessions || 0,
+      maxSessions: route.stats?.maxSessions || 0,
       instanceName: route.instanceName
     }));
   }
 
+  spawnWorkers(count) {
+    for (let i = 0; i < count; i++) {
+      if (this.nextWorkerId >= this.config.maxSessions) {
+        return;
+      }
+
+      const workerId = this.nextWorkerId;
+      const route = this.routes[workerId % this.routes.length];
+      this.nextWorkerId += 1;
+
+      route.stats.currentSessions += 1;
+      route.stats.peakSessions = Math.max(route.stats.peakSessions, route.stats.currentSessions);
+      this.stats.currentSessions += 1;
+      this.stats.peakSessions = Math.max(this.stats.peakSessions, this.stats.currentSessions);
+
+      this.workerStates.set(workerId, {
+        workerId,
+        routeId: route.id,
+        completedTransactions: 0,
+        lastSeenCompletedTransactions: 0
+      });
+
+      this.workers.push(this.runWorker(workerId));
+    }
+  }
+
+  evaluatePressureAndExpand() {
+    if (!this.isRunning || this.stats.currentSessions >= this.config.maxSessions) {
+      return;
+    }
+
+    let activeWorkers = 0;
+    let busyWorkers = 0;
+
+    for (const workerState of this.workerStates.values()) {
+      activeWorkers += 1;
+      if (workerState.completedTransactions > workerState.lastSeenCompletedTransactions) {
+        busyWorkers += 1;
+      }
+      workerState.lastSeenCompletedTransactions = workerState.completedTransactions;
+    }
+
+    if (activeWorkers === 0) {
+      return;
+    }
+
+    const utilization = busyWorkers / activeWorkers;
+    if (utilization < 0.85) {
+      return;
+    }
+
+    const remaining = this.config.maxSessions - this.stats.currentSessions;
+    const expansionStep = Math.min(remaining, Math.max(1, Math.ceil(activeWorkers * 0.1)));
+    this.spawnWorkers(expansionStep);
+    this.emitStatus(
+      `Pressure detected (${Math.round(utilization * 100)}% busy). Expanded to ${this.stats.currentSessions.toLocaleString()} session(s).`,
+      {
+        routes: this.describeRoutes()
+      }
+    );
+  }
+
   async runWorker(workerId) {
     const route = this.routes[workerId % this.routes.length];
+    const workerState = this.workerStates.get(workerId);
     let iteration = 0;
 
     while (this.isRunning) {
@@ -460,6 +563,9 @@ class LibraryCacheLockEngine {
             this.stats.responseTimes.push(elapsedMs);
             if (this.stats.responseTimes.length > 4000) {
               this.stats.responseTimes.shift();
+            }
+            if (workerState) {
+              workerState.completedTransactions += 1;
             }
           } catch (err) {
             route.stats.totalErrors += 1;
@@ -528,6 +634,10 @@ class LibraryCacheLockEngine {
         await this.sleep(100);
       }
     }
+
+    route.stats.currentSessions = Math.max(0, route.stats.currentSessions - 1);
+    this.stats.currentSessions = Math.max(0, this.stats.currentSessions - 1);
+    this.workerStates.delete(workerId);
   }
 
   async acquireConnection(route) {
@@ -811,7 +921,11 @@ class LibraryCacheLockEngine {
         instanceName: route.instanceName,
         procedure: this.qualifyProcedure(route),
         connectionString: route.connectionString,
-        assignedWorkers: route.stats.assignedWorkers,
+        assignedWorkers: route.stats.currentSessions,
+        currentSessions: route.stats.currentSessions,
+        peakSessions: route.stats.peakSessions,
+        initialSessions: route.stats.initialSessions,
+        maxSessions: route.stats.maxSessions,
         totalTransactions: route.stats.totalTransactions,
         totalErrors: route.stats.totalErrors,
         transactionsPerSecond: Number(route.stats.tps.toFixed(2)),
@@ -827,6 +941,10 @@ class LibraryCacheLockEngine {
       totalErrors: this.stats.totalErrors,
       totalLogons: this.stats.totalLogons,
       totalLogoffs: this.stats.totalLogoffs,
+      currentSessions: this.stats.currentSessions,
+      peakSessions: this.stats.peakSessions,
+      initialSessions: this.config.initialSessions,
+      maxSessions: this.config.maxSessions,
       transactionsPerSecond: Number(transactionsPerSecond.toFixed(2)),
       avgTransactionMs: Number(average(this.stats.responseTimes).toFixed(2)),
       durationSeconds: this.stats.startTime
@@ -870,6 +988,11 @@ class LibraryCacheLockEngine {
     if (this.waitEventsInterval) {
       clearInterval(this.waitEventsInterval);
       this.waitEventsInterval = null;
+    }
+
+    if (this.expansionInterval) {
+      clearInterval(this.expansionInterval);
+      this.expansionInterval = null;
     }
 
     if (this.autoStopTimer) {
@@ -920,6 +1043,8 @@ class LibraryCacheLockEngine {
     this.lastSampleSnapshot = null;
     this.latestSample = null;
     this.workers = [];
+    this.workerStates.clear();
+    this.nextWorkerId = 0;
 
     return payload;
   }
@@ -931,7 +1056,11 @@ class LibraryCacheLockEngine {
       instanceName: route.instanceName,
       connectionString: route.connectionString,
       procedure: this.qualifyProcedure(route),
-      assignedWorkers: route.stats.assignedWorkers,
+      assignedWorkers: route.stats.currentSessions,
+      currentSessions: route.stats.currentSessions,
+      peakSessions: route.stats.peakSessions,
+      initialSessions: route.stats.initialSessions,
+      maxSessions: route.stats.maxSessions,
       totalTransactions: route.stats.totalTransactions,
       totalErrors: route.stats.totalErrors,
       avgTransactionMs: Number(average(route.stats.responseTimes).toFixed(2)),
@@ -952,9 +1081,12 @@ class LibraryCacheLockEngine {
       runId: this.runId,
       runLabel: this.config?.runLabel || 'Library Cache Lock',
       scenario: this.config?.scenario || 'single-service',
-      loginMode: this.config?.loginMode || 'dedicated',
+      loginMode: this.config?.loginMode || 'persistent',
       schemaPrefix: this.config?.schemaPrefix || '',
       durationMinutes: this.config?.durationMinutes || 0,
+      initialSessions: this.config?.initialSessions || 0,
+      maxSessions: this.config?.maxSessions || 0,
+      peakSessions: this.stats.peakSessions,
       startedAt: this.stats.startTime ? new Date(this.stats.startTime).toISOString() : null,
       completedAt: new Date().toISOString(),
       durationSeconds: Number(durationSeconds.toFixed(2)),
@@ -988,6 +1120,9 @@ class LibraryCacheLockEngine {
       loginMode: this.config.loginMode,
       schemaPrefix: this.config.schemaPrefix,
       durationMinutes: this.config.durationMinutes,
+      initialSessions: this.config.initialSessions,
+      maxSessions: this.config.maxSessions,
+      peakSessions: this.stats.peakSessions,
       startedAt: new Date(this.stats.startTime).toISOString(),
       completedAt: new Date().toISOString(),
       totalTransactions: this.stats.totalTransactions,

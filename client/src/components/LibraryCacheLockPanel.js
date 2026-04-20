@@ -56,6 +56,22 @@ BEGIN
 END;
 /`;
 
+const NO_ALTER_PROCEDURE_SQL = `CREATE OR REPLACE NONEDITIONABLE PROCEDURE GRAV_SESSION_MFES_ONLINE_NOALTER (
+  pModuleName VARCHAR2
+)
+IS
+  pActionName     VARCHAR2(14);
+  pModuleName_mod VARCHAR2(48);
+BEGIN
+  pActionName := 'MFES_ONLINE';
+
+  pModuleName_mod := SUBSTR(pModuleName, 1, 22) || '0000000' || SUBSTR(pModuleName, 30);
+
+  DBMS_APPLICATION_INFO.SET_MODULE(pModuleName_mod, pActionName);
+  DBMS_SESSION.SET_IDENTIFIER(pModuleName);
+END;
+/`;
+
 const WAIT_EVENT_ORDER = [
   'library cache: mutex X',
   'latch: ges resource hash list',
@@ -73,6 +89,10 @@ const emptyMetrics = {
   totalErrors: 0,
   totalLogons: 0,
   totalLogoffs: 0,
+  currentSessions: 0,
+  peakSessions: 0,
+  initialSessions: 0,
+  maxSessions: 0,
   transactionsPerSecond: 0,
   avgTransactionMs: 0,
   durationSeconds: 0,
@@ -138,6 +158,30 @@ const makeService = (index) => ({
   procedureName: `GRAV_SESSION_MFES_ONLINE_${index + 1}`
 });
 
+const SCENARIO_DEFAULTS = {
+  'single-service': {
+    runLabel: 'Scenario 1 Baseline',
+    procedureName: 'GRAV_SESSION_MFES_ONLINE',
+    procedureSql: DEFAULT_PROCEDURE_SQL
+  },
+  'split-services': {
+    runLabel: 'Scenario 2 Split Services',
+    procedureName: 'GRAV_SESSION_MFES_ONLINE',
+    procedureSql: DEFAULT_PROCEDURE_SQL
+  },
+  'no-alter-session': {
+    runLabel: 'Scenario 3 No ALTER SESSION',
+    procedureName: 'GRAV_SESSION_MFES_ONLINE_NOALTER',
+    procedureSql: NO_ALTER_PROCEDURE_SQL
+  }
+};
+
+const getScenarioLabel = (scenario) => {
+  if (scenario === 'split-services') return 'Scenario 2 - Split Services';
+  if (scenario === 'no-alter-session') return 'Scenario 3 - No ALTER SESSION';
+  return 'Scenario 1 - Single Service';
+};
+
 const formatNumber = (value, digits = 0) => {
   const numeric = Number(value || 0);
   return numeric.toLocaleString(undefined, {
@@ -185,6 +229,16 @@ const replaceProcedureIdentifier = (sqlText, nextIdentifier) => {
   );
 };
 
+const applyScenarioDefaults = (previousConfig, nextScenario) => {
+  const defaults = SCENARIO_DEFAULTS[nextScenario] || SCENARIO_DEFAULTS['single-service'];
+  return {
+    ...previousConfig,
+    scenario: nextScenario,
+    runLabel: defaults.runLabel,
+    procedureName: defaults.procedureName
+  };
+};
+
 function MetricCard({ title, value, hint }) {
   return (
     <div style={{
@@ -205,7 +259,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
   const [config, setConfig] = useState({
     scenario: 'single-service',
     runLabel: 'Scenario 1 Baseline',
-    threads: 1000,
+    initialSessions: 50,
+    maxSessions: 1000,
     durationMinutes: 0,
     loopDelay: 0,
     schemaPrefix: '',
@@ -287,6 +342,10 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
         totalErrors: data.totalErrors || 0,
         totalLogons: data.totalLogons || 0,
         totalLogoffs: data.totalLogoffs || 0,
+        currentSessions: data.currentSessions || 0,
+        peakSessions: data.peakSessions || 0,
+        initialSessions: data.initialSessions || 0,
+        maxSessions: data.maxSessions || 0,
         transactionsPerSecond: data.transactionsPerSecond || 0,
         avgTransactionMs: data.avgTransactionMs || 0,
         durationSeconds: data.durationSeconds || 0,
@@ -409,6 +468,31 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
         delta: Number(b.timeWaitedSeconds || 0) - Number(a.timeWaitedSeconds || 0)
       };
     });
+  })();
+
+  const compareHint = (() => {
+    if (!compareSummaryA || !compareSummaryB) return null;
+
+    const waitMapA = buildWaitMap(compareSummaryA);
+    const waitMapB = buildWaitMap(compareSummaryB);
+    const mutexWaitA = Number(waitMapA.get('library cache: mutex X')?.timeWaitedSeconds || 0);
+    const mutexWaitB = Number(waitMapB.get('library cache: mutex X')?.timeWaitedSeconds || 0);
+    const tpsA = Number(compareSummaryA.transactionsPerSecond || 0);
+    const tpsB = Number(compareSummaryB.transactionsPerSecond || 0);
+
+    const lowerMutexWinner = mutexWaitA <= mutexWaitB ? compareSummaryA : compareSummaryB;
+    const lowerMutexValue = Math.min(mutexWaitA, mutexWaitB);
+    const betterTpsWinner = tpsA >= tpsB ? compareSummaryA : compareSummaryB;
+    const betterTpsValue = Math.max(tpsA, tpsB);
+
+    return {
+      lowerMutexWinner,
+      lowerMutexValue,
+      betterTpsWinner,
+      betterTpsValue,
+      mutexDelta: Math.abs(mutexWaitA - mutexWaitB),
+      tpsDelta: Math.abs(tpsA - tpsB)
+    };
   })();
 
   const lineData = (label, data, color, fillColor) => ({
@@ -594,7 +678,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             fontSize: '0.82rem',
             color: 'var(--text-secondary)'
           }}>
-            Scenario 1 runs one service with <code>GRAV_SESSION_MFES_ONLINE</code>. Scenario 2 splits the same workload across 4 services and 4 procedures, one per route.
+            Scenario 1 runs one service with <code>GRAV_SESSION_MFES_ONLINE</code>. Scenario 2 splits the same workload across 4 services and 4 procedures. Scenario 3 keeps one service but uses a dedicated procedure with no <code>ALTER SESSION</code> statements.
           </div>
         </div>
 
@@ -603,15 +687,16 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             <label>Scenario</label>
             <select
               value={config.scenario}
-              onChange={(e) => setConfig((prev) => ({
-                ...prev,
-                scenario: e.target.value,
-                runLabel: e.target.value === 'split-services' ? 'Scenario 2 Split Services' : 'Scenario 1 Baseline'
-              }))}
+              onChange={(e) => {
+                const nextScenario = e.target.value;
+                setConfig((prev) => applyScenarioDefaults(prev, nextScenario));
+                setProcedureSql(SCENARIO_DEFAULTS[nextScenario]?.procedureSql || DEFAULT_PROCEDURE_SQL);
+              }}
               disabled={isRunning}
             >
               <option value="single-service">Scenario 1: Single service / one procedure</option>
               <option value="split-services">Scenario 2: Four services / four procedures</option>
+              <option value="no-alter-session">Scenario 3: Single service / no ALTER SESSION</option>
             </select>
           </div>
 
@@ -626,13 +711,38 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
 
           <div className="form-row">
             <div className="form-group">
-              <label>Concurrent Sessions</label>
+              <label>Initial Sessions</label>
               <input
                 type="number"
                 min="1"
                 max="5000"
-                value={config.threads}
-                onChange={(e) => setConfig((prev) => ({ ...prev, threads: Math.max(1, Number.parseInt(e.target.value || '1', 10)) }))}
+                value={config.initialSessions}
+                onChange={(e) => setConfig((prev) => {
+                  const initialSessions = Math.max(1, Number.parseInt(e.target.value || '1', 10));
+                  return {
+                    ...prev,
+                    initialSessions: Math.min(initialSessions, prev.maxSessions)
+                  };
+                })}
+                disabled={isRunning}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Max Sessions</label>
+              <input
+                type="number"
+                min="1"
+                max="5000"
+                value={config.maxSessions}
+                onChange={(e) => setConfig((prev) => {
+                  const maxSessions = Math.max(1, Number.parseInt(e.target.value || '1', 10));
+                  return {
+                    ...prev,
+                    maxSessions,
+                    initialSessions: Math.min(prev.initialSessions, maxSessions)
+                  };
+                })}
                 disabled={isRunning}
               />
             </div>
@@ -660,6 +770,10 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 disabled={isRunning}
               />
             </div>
+          </div>
+
+          <div style={{ marginTop: '-0.15rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+            The run starts with reusable sessions from <code>Initial Sessions</code> and can open more under pressure until it reaches <code>Max Sessions</code>.
           </div>
 
           <div className="form-row">
@@ -750,7 +864,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
         </div>
 
         <div style={cardStyle}>
-          {config.scenario === 'single-service' ? (
+          {config.scenario !== 'split-services' ? (
             <>
               <div className="form-group">
                 <label>Service Name</label>
@@ -885,6 +999,12 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             {isInstalling ? 'Compiling...' : 'Compile Current Procedure'}
           </button>
 
+          {config.scenario === 'no-alter-session' && (
+            <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              Scenario 3 template removes the four <code>ALTER SESSION</code> statements and compiles the default procedure as <code>GRAV_SESSION_MFES_ONLINE_NOALTER</code>.
+            </div>
+          )}
+
           {config.scenario === 'split-services' && (
             <>
               <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
@@ -910,7 +1030,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
           <MetricCard title="Avg ms / Txn" value={formatNumber(metrics.avgTransactionMs, 2)} hint="Average end-to-end transaction time" />
           <MetricCard title="Total Txns" value={formatNumber(metrics.totalTransactions, 0)} hint="Committed business transactions" />
           <MetricCard title="Errors" value={formatNumber(metrics.totalErrors, 0)} hint="Rolled back or failed transaction attempts" />
-          <MetricCard title="Sessions Opened" value={formatNumber(metrics.totalLogons, 0)} hint="Long-lived workload sessions opened for this run" />
+          <MetricCard title="Current Sessions" value={formatNumber(metrics.currentSessions, 0)} hint="Sessions currently open and processing work" />
+          <MetricCard title="Peak Sessions" value={formatNumber(metrics.peakSessions, 0)} hint="Highest session count reached during expansion" />
           <MetricCard title="AAS" value={formatNumber(sample?.averageActiveSessions || latestSummary?.averageActiveSessions, 2)} hint="DB time divided by elapsed run time" />
           <MetricCard title="DB CPU Share" value={`${formatNumber(sample?.dbCpuSharePct || latestSummary?.dbCpuSharePct, 2)}%`} hint="How much DB time stayed on CPU" />
           <MetricCard title="Commits / Sec" value={formatNumber(sample?.commitRatePerSecond || latestSummary?.commitRatePerSecond, 2)} hint="Environment commit rate during the run" />
@@ -1004,7 +1125,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                   <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Route</th>
                   <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Instance</th>
                   <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Procedure</th>
-                  <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Workers</th>
+                      <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Sessions</th>
                   <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Txn/s</th>
                   <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Avg ms</th>
                   <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Txns</th>
@@ -1020,7 +1141,9 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                     </td>
                     <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{route.instanceName || '-'}</td>
                     <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{route.procedure}</td>
-                    <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{formatNumber(route.assignedWorkers, 0)}</td>
+                    <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                      {formatNumber(route.currentSessions || route.assignedWorkers, 0)} / {formatNumber(route.maxSessions || 0, 0)}
+                    </td>
                     <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{formatNumber(route.transactionsPerSecond, 2)}</td>
                     <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{formatNumber(route.avgTransactionMs, 2)}</td>
                     <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{formatNumber(route.totalTransactions, 0)}</td>
@@ -1045,14 +1168,17 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             {latestSummary ? (
               <div style={{ display: 'grid', gap: '0.45rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
                 <div><strong style={{ color: 'white' }}>{latestSummary.runLabel}</strong></div>
-                <div>Scenario: {latestSummary.scenario}</div>
+                <div>Scenario: {getScenarioLabel(latestSummary.scenario)}</div>
                 <div>Session model: reused persistent sessions</div>
                 <div>Configured run time: {latestSummary.durationMinutes > 0 ? `${latestSummary.durationMinutes} min` : 'manual stop'}</div>
+                <div>Initial sessions: {formatNumber(latestSummary.initialSessions, 0)}</div>
+                <div>Max sessions: {formatNumber(latestSummary.maxSessions, 0)}</div>
+                <div>Peak sessions: {formatNumber(latestSummary.peakSessions, 0)}</div>
                 <div>Started: {formatDateTime(latestSummary.startedAt)}</div>
                 <div>Finished: {formatDateTime(latestSummary.completedAt)}</div>
                 <div>Total transactions: {formatNumber(latestSummary.totalTransactions, 0)}</div>
                 <div>Average ms/txn: {formatNumber(latestSummary.avgTransactionMs, 2)}</div>
-                <div>Sessions opened: {formatNumber(latestSummary.totalLogons, 0)}</div>
+                <div>Connections opened: {formatNumber(latestSummary.totalLogons, 0)}</div>
                 <div>User calls/sec: {formatNumber(latestSummary.userCallsPerSecond, 2)}</div>
                 <div>Execute count/sec: {formatNumber(latestSummary.executeCountPerSecond, 2)}</div>
               </div>
@@ -1121,6 +1247,21 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
 
           {compareSummaryA && compareSummaryB ? (
             <div style={{ display: 'grid', gap: '1rem' }}>
+              <div style={{
+                padding: '0.9rem 1rem',
+                borderRadius: '10px',
+                border: '1px solid rgba(34,197,94,0.22)',
+                background: 'linear-gradient(135deg, rgba(34,197,94,0.12), rgba(59,130,246,0.10))'
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: '0.3rem' }}>Quick Comparison Hint</div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', lineHeight: 1.45 }}>
+                  Lower <code>library cache: mutex X</code>: <strong style={{ color: 'white' }}>{compareHint.lowerMutexWinner.runLabel}</strong> with {formatNumber(compareHint.lowerMutexValue, 3)} s
+                  {' '}({formatNumber(compareHint.mutexDelta, 3)} s difference).
+                  {' '}Better TPS: <strong style={{ color: 'white' }}>{compareHint.betterTpsWinner.runLabel}</strong> with {formatNumber(compareHint.betterTpsValue, 2)} txn/s
+                  {' '}({formatNumber(compareHint.tpsDelta, 2)} txn/s difference).
+                </div>
+              </div>
+
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
                 {compareMetrics.map(([title, leftValue, rightValue, digits, higherIsBetter]) => {
                   const delta = Number(rightValue || 0) - Number(leftValue || 0);
@@ -1172,12 +1313,14 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                   <div key={summary.runId} style={{ padding: '0.85rem', borderRadius: '10px', border: '1px solid var(--border)', background: 'rgba(15,23,42,0.45)' }}>
                     <div style={{ fontWeight: 600 }}>{summary.runLabel}</div>
                     <div style={{ marginTop: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                      Scenario: {summary.scenario} | Session model: persistent
+                      Scenario: {getScenarioLabel(summary.scenario)} | Session model: persistent
                     </div>
                     <div style={{ marginTop: '0.65rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                       Route totals
                     </div>
                     <div style={{ marginTop: '0.35rem', display: 'grid', gap: '0.35rem', fontSize: '0.84rem', color: 'var(--text-secondary)' }}>
+                      <div>Initial / max sessions: {formatNumber(summary.initialSessions, 0)} / {formatNumber(summary.maxSessions, 0)}</div>
+                      <div>Peak sessions: {formatNumber(summary.peakSessions, 0)}</div>
                       <div>Routes: {summary.routes?.length || 0}</div>
                       <div>Total route TPS: {formatNumber(averageRouteMetric(summary.routes, 'transactionsPerSecond'), 2)}</div>
                       <div>Average route ms/txn: {summary.routes?.length ? formatNumber(averageRouteMetric(summary.routes, 'avgTransactionMs') / summary.routes.length, 2) : '0.00'}</div>
