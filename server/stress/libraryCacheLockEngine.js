@@ -1,3 +1,5 @@
+const oracledb = require('oracledb');
+
 const KEY_WAIT_EVENTS = [
   'library cache: mutex X',
   'library cache: mutex S',
@@ -25,27 +27,28 @@ const clampInt = (value, min, max, fallback) => {
   return Math.min(max, Math.max(min, num));
 };
 
-const toPlainProcedureName = (value, fallback) => {
-  const cleaned = String(value || fallback || '')
-    .trim()
-    .replace(/^"+|"+$/g, '');
-  return cleaned || fallback;
-};
+const normalizeUpper = (value, fallback = '') =>
+  String(value || fallback).trim().replace(/^"+|"+$/g, '').toUpperCase();
+
+const normalizeFreeText = (value, fallback = '') =>
+  String(value || fallback).trim() || fallback;
+
+const average = (values = []) => (
+  values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
+);
 
 class LibraryCacheLockEngine {
   constructor() {
     this.isRunning = false;
     this.config = null;
-    this.pool = null;
-    this.io = null;
     this.db = null;
+    this.io = null;
     this.workers = [];
+    this.routePools = new Map();
+    this.routes = [];
 
     this.stats = this.createEmptyStats();
-    this.previousStats = {
-      totalCalls: 0,
-      lastTick: Date.now()
-    };
+    this.previousStats = { totalTransactions: 0, lastTick: Date.now() };
 
     this.statsInterval = null;
     this.waitEventsInterval = null;
@@ -58,47 +61,28 @@ class LibraryCacheLockEngine {
 
   createEmptyStats() {
     return {
-      totalCalls: 0,
-      errors: 0,
+      totalTransactions: 0,
+      totalErrors: 0,
+      totalLogons: 0,
+      totalLogoffs: 0,
       responseTimes: [],
-      callsPerSecond: 0,
       startTime: null,
-      lastError: null
+      lastError: null,
+      transactionsPerSecond: 0
     };
   }
 
-  normalizeConfig(config = {}) {
-    const procedureName = toPlainProcedureName(config.procedureName, 'GRAV_SESSION_MFES_ONLINE');
-    const procedureOwner = toPlainProcedureName(config.procedureOwner, '');
-    const modulePrefix = String(config.modulePrefix || 'MFES')
-      .replace(/\s+/g, '_')
-      .slice(0, 18) || 'MFES';
-
+  createRouteStats(assignedWorkers = 0) {
     return {
-      threads: clampInt(config.threads, 1, 500, 64),
-      loopDelay: clampInt(config.loopDelay, 0, 5000, 0),
-      moduleLength: clampInt(config.moduleLength, 30, 96, 42),
-      procedureName,
-      procedureOwner,
-      modulePrefix,
-      runLabel: String(config.runLabel || '').trim() || procedureName,
-      waitSampleSeconds: clampInt(config.waitSampleSeconds, 2, 30, 5)
+      assignedWorkers,
+      totalTransactions: 0,
+      totalErrors: 0,
+      totalLogons: 0,
+      totalLogoffs: 0,
+      responseTimes: [],
+      previousTransactions: 0,
+      tps: 0
     };
-  }
-
-  qualifyProcedure() {
-    const { procedureOwner, procedureName } = this.config;
-    return procedureOwner ? `${procedureOwner}.${procedureName}` : procedureName;
-  }
-
-  buildAnonymousBlock() {
-    return `BEGIN ${this.qualifyProcedure()}(:moduleName); END;`;
-  }
-
-  buildModuleName(workerId, iteration) {
-    const base = `${this.config.modulePrefix}_${workerId.toString(36).toUpperCase()}_${iteration.toString(36).toUpperCase()}_${Date.now().toString(36).toUpperCase()}`;
-    const padded = `${base}_LIBCACHELOCK_SIMULATION_PAYLOAD`;
-    return padded.slice(0, this.config.moduleLength).padEnd(this.config.moduleLength, 'X');
   }
 
   emitStatus(message, extra = {}) {
@@ -110,6 +94,95 @@ class LibraryCacheLockEngine {
     });
   }
 
+  normalizeRoute(route = {}, index, defaultConnectionString, defaultProcedureName, defaultOwner) {
+    const name = normalizeFreeText(route.name, `Service ${index + 1}`);
+    const connectionString = normalizeFreeText(route.connectionString, defaultConnectionString);
+    const procedureName = normalizeUpper(route.procedureName, defaultProcedureName);
+    const procedureOwner = normalizeUpper(route.procedureOwner, defaultOwner);
+
+    return {
+      id: `route-${index + 1}`,
+      name,
+      connectionString,
+      procedureName,
+      procedureOwner,
+      instanceName: null
+    };
+  }
+
+  normalizeConfig(config = {}) {
+    const credentials = this.db.getCredentials();
+    const defaultConnectionString = credentials.connectionString;
+    const defaultProcedureName = normalizeUpper(config.procedureName, 'GRAV_SESSION_MFES_ONLINE');
+    const defaultOwner = normalizeUpper(config.procedureOwner, '');
+    const scenario = config.scenario === 'split-services' ? 'split-services' : 'single-service';
+
+    let routes;
+    if (scenario === 'split-services') {
+      const incomingRoutes = Array.isArray(config.services) ? config.services : [];
+      routes = incomingRoutes
+        .map((route, index) => this.normalizeRoute(route, index, defaultConnectionString, defaultProcedureName, defaultOwner))
+        .filter((route) => route.connectionString && route.procedureName);
+
+      if (routes.length === 0) {
+        routes = [
+          this.normalizeRoute({ name: 'Service 1' }, 0, defaultConnectionString, `${defaultProcedureName}_1`, defaultOwner),
+          this.normalizeRoute({ name: 'Service 2' }, 1, defaultConnectionString, `${defaultProcedureName}_2`, defaultOwner),
+          this.normalizeRoute({ name: 'Service 3' }, 2, defaultConnectionString, `${defaultProcedureName}_3`, defaultOwner),
+          this.normalizeRoute({ name: 'Service 4' }, 3, defaultConnectionString, `${defaultProcedureName}_4`, defaultOwner)
+        ];
+      }
+    } else {
+      routes = [
+        this.normalizeRoute({
+          name: normalizeFreeText(config.singleServiceName, 'Primary Service'),
+          connectionString: normalizeFreeText(config.singleServiceConnectionString, defaultConnectionString),
+          procedureName: defaultProcedureName,
+          procedureOwner: defaultOwner
+        }, 0, defaultConnectionString, defaultProcedureName, defaultOwner)
+      ];
+    }
+
+    const threads = clampInt(config.threads, 1, 5000, 500);
+    const schemaPrefix = normalizeUpper(config.schemaPrefix, '');
+    const modulePrefix = normalizeFreeText(config.modulePrefix, 'MFES').replace(/\s+/g, '_').slice(0, 18) || 'MFES';
+
+    return {
+      scenario,
+      loginMode: config.loginMode === 'pool' ? 'pool' : 'dedicated',
+      threads,
+      loopDelay: clampInt(config.loopDelay, 0, 5000, 0),
+      moduleLength: clampInt(config.moduleLength, 30, 96, 42),
+      modulePrefix,
+      schemaPrefix,
+      waitSampleSeconds: clampInt(config.waitSampleSeconds, 2, 30, 5),
+      selectsPerTxn: clampInt(config.selectsPerTxn, 1, 10, 2),
+      insertsPerTxn: clampInt(config.insertsPerTxn, 0, 10, 1),
+      updatesPerTxn: clampInt(config.updatesPerTxn, 0, 10, 1),
+      deletesPerTxn: clampInt(config.deletesPerTxn, 0, 10, 1),
+      runLabel: normalizeFreeText(config.runLabel, scenario === 'split-services' ? 'Split Services' : 'Single Service'),
+      routes
+    };
+  }
+
+  qualifyProcedure(route) {
+    return route.procedureOwner ? `${route.procedureOwner}.${route.procedureName}` : route.procedureName;
+  }
+
+  buildAnonymousBlock(route) {
+    return `BEGIN ${this.qualifyProcedure(route)}(:moduleName); END;`;
+  }
+
+  buildModuleName(route, workerId, iteration) {
+    const base = `${this.config.modulePrefix}_${route.name.replace(/\s+/g, '').slice(0, 10)}_${workerId.toString(36).toUpperCase()}_${iteration.toString(36).toUpperCase()}_${Date.now().toString(36).toUpperCase()}`;
+    const padded = `${base}_LIBCACHELOCK_WORKLOAD`;
+    return padded.slice(0, this.config.moduleLength).padEnd(this.config.moduleLength, 'X');
+  }
+
+  getTablePrefix() {
+    return this.config.schemaPrefix ? `${this.config.schemaPrefix}_` : '';
+  }
+
   async start(db, incomingConfig, io) {
     if (this.isRunning) {
       throw new Error('Library Cache Lock workload is already running');
@@ -118,31 +191,35 @@ class LibraryCacheLockEngine {
     this.db = db;
     this.io = io;
     this.config = this.normalizeConfig(incomingConfig);
+    this.routes = this.config.routes.map((route) => ({ ...route }));
     this.runId = `lcl-${Date.now()}`;
     this.lastRunSummary = null;
+    this.latestSample = null;
 
-    await this.validateProcedureExists();
+    await this.validateRoutes();
+
+    this.distributeWorkersAcrossRoutes();
 
     this.stats = this.createEmptyStats();
     this.stats.startTime = Date.now();
     this.previousStats = {
-      totalCalls: 0,
+      totalTransactions: 0,
       lastTick: Date.now()
     };
-    this.latestSample = null;
 
-    this.emitStatus(`Capturing baseline for ${this.qualifyProcedure()}...`);
-
+    this.emitStatus('Capturing baseline snapshot...');
     this.runStartSnapshot = await this.captureSystemSnapshot();
     this.lastSampleSnapshot = this.runStartSnapshot;
 
-    this.pool = await db.createStressPool(this.config.threads + 8);
-    this.workers = [];
-    this.isRunning = true;
+    if (this.config.loginMode === 'pool') {
+      await this.createRoutePools();
+    }
 
-    const block = this.buildAnonymousBlock();
-    for (let i = 0; i < this.config.threads; i++) {
-      this.workers.push(this.runWorker(i, block));
+    this.isRunning = true;
+    this.workers = [];
+
+    for (let workerId = 0; workerId < this.config.threads; workerId++) {
+      this.workers.push(this.runWorker(workerId));
     }
 
     this.statsInterval = setInterval(() => this.reportStats(), 1000);
@@ -151,126 +228,476 @@ class LibraryCacheLockEngine {
       this.config.waitSampleSeconds * 1000
     );
 
-    this.emitStatus(`Running ${this.qualifyProcedure()} with ${this.config.threads} sessions`, {
-      config: this.config
+    this.emitStatus(`Running ${this.config.threads.toLocaleString()} sessions across ${this.routes.length} route(s)`, {
+      config: this.config,
+      routes: this.describeRoutes()
     });
   }
 
-  async validateProcedureExists() {
-    const owner = this.config.procedureOwner.toUpperCase();
-    const name = this.config.procedureName.toUpperCase();
+  async validateRoutes() {
+    const seen = new Set();
 
-    const sql = owner
-      ? `
-        SELECT COUNT(*) AS total
-        FROM all_objects
-        WHERE owner = :owner
-          AND object_name = :name
-          AND object_type = 'PROCEDURE'
-      `
-      : `
-        SELECT COUNT(*) AS total
-        FROM user_objects
-        WHERE object_name = :name
-          AND object_type = 'PROCEDURE'
-      `;
+    for (const route of this.routes) {
+      const dedupeKey = `${route.connectionString}::${this.qualifyProcedure(route)}`;
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
 
-    const binds = owner ? { owner, name } : { name };
-    const result = await this.db.execute(sql, binds);
-    const total = result.rows?.[0]?.TOTAL || 0;
-
-    if (!total) {
-      throw new Error(`Procedure ${this.qualifyProcedure()} was not found. Compile it first or change the target name.`);
-    }
-  }
-
-  async runWorker(workerId, block) {
-    let iteration = 0;
-
-    while (this.isRunning) {
       let connection;
-
       try {
-        connection = await this.pool.getConnection();
+        connection = await this.db.createDirectConnection({ connectionString: route.connectionString });
+        const objectResult = await connection.execute(
+          route.procedureOwner
+            ? `
+              SELECT COUNT(*) AS total
+              FROM all_objects
+              WHERE owner = :owner
+                AND object_name = :name
+                AND object_type = 'PROCEDURE'
+            `
+            : `
+              SELECT COUNT(*) AS total
+              FROM user_objects
+              WHERE object_name = :name
+                AND object_type = 'PROCEDURE'
+            `,
+          route.procedureOwner
+            ? { owner: route.procedureOwner, name: route.procedureName }
+            : { name: route.procedureName },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
 
-        while (this.isRunning) {
-          iteration += 1;
-          const start = process.hrtime.bigint();
-
-          try {
-            await connection.execute(block, {
-              moduleName: this.buildModuleName(workerId, iteration)
-            }, {
-              autoCommit: false
-            });
-
-            const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
-            this.stats.totalCalls += 1;
-            this.stats.responseTimes.push(elapsedMs);
-            if (this.stats.responseTimes.length > 2000) {
-              this.stats.responseTimes.shift();
-            }
-          } catch (err) {
-            this.stats.errors += 1;
-            this.stats.lastError = err.message;
-            if (this.stats.errors <= 5 || this.stats.errors % 100 === 0) {
-              console.log(`Library Cache Lock worker ${workerId} error:`, err.message);
-            }
-          }
-
-          if (this.isRunning && this.config.loopDelay > 0) {
-            await this.sleep(this.config.loopDelay);
-          }
+        if (!(objectResult.rows?.[0]?.TOTAL > 0)) {
+          throw new Error(`Procedure ${this.qualifyProcedure(route)} not found on ${route.connectionString}`);
         }
-      } catch (err) {
-        this.stats.errors += 1;
-        this.stats.lastError = err.message;
-        if (!String(err.message).includes('pool is terminating')) {
-          console.log(`Library Cache Lock connection error (worker ${workerId}):`, err.message);
+
+        try {
+          const instanceResult = await connection.execute(
+            `SELECT instance_name FROM v$instance`,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+          );
+          route.instanceName = instanceResult.rows?.[0]?.INSTANCE_NAME || null;
+        } catch (err) {
+          route.instanceName = null;
         }
       } finally {
         if (connection) {
           try {
             await connection.close();
           } catch (closeErr) {
-            // Ignore close errors during shutdown.
+            // Ignore close failures during validation.
           }
         }
       }
+    }
+  }
 
-      if (this.isRunning) {
-        await this.sleep(100);
+  distributeWorkersAcrossRoutes() {
+    this.routes.forEach((route) => {
+      route.stats = this.createRouteStats(0);
+    });
+
+    for (let workerId = 0; workerId < this.config.threads; workerId++) {
+      const route = this.routes[workerId % this.routes.length];
+      route.stats.assignedWorkers += 1;
+    }
+  }
+
+  async createRoutePools() {
+    for (const route of this.routes) {
+      const poolSize = Math.max(2, route.stats.assignedWorkers + 2);
+      const pool = await this.db.createStressPool(poolSize, { connectionString: route.connectionString });
+      this.routePools.set(route.id, pool);
+    }
+  }
+
+  describeRoutes() {
+    return this.routes.map((route) => ({
+      id: route.id,
+      name: route.name,
+      connectionString: route.connectionString,
+      procedure: this.qualifyProcedure(route),
+      assignedWorkers: route.stats?.assignedWorkers || 0,
+      instanceName: route.instanceName
+    }));
+  }
+
+  async runWorker(workerId) {
+    const route = this.routes[workerId % this.routes.length];
+    let iteration = 0;
+
+    while (this.isRunning) {
+      let connection;
+      try {
+        connection = await this.acquireConnection(route);
+        iteration += 1;
+        route.stats.totalLogons += 1;
+        this.stats.totalLogons += 1;
+
+        const start = process.hrtime.bigint();
+
+        try {
+          await this.executeBusinessTransaction(connection, route, workerId, iteration);
+          await connection.commit();
+
+          const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+          route.stats.totalTransactions += 1;
+          route.stats.responseTimes.push(elapsedMs);
+          if (route.stats.responseTimes.length > 2000) {
+            route.stats.responseTimes.shift();
+          }
+
+          this.stats.totalTransactions += 1;
+          this.stats.responseTimes.push(elapsedMs);
+          if (this.stats.responseTimes.length > 4000) {
+            this.stats.responseTimes.shift();
+          }
+        } catch (err) {
+          route.stats.totalErrors += 1;
+          this.stats.totalErrors += 1;
+          this.stats.lastError = err.message;
+
+          try {
+            await connection.rollback();
+          } catch (rollbackErr) {
+            // Ignore rollback failures during error handling.
+          }
+
+          if (this.stats.totalErrors <= 5 || this.stats.totalErrors % 100 === 0) {
+            console.log(`Library Cache Lock route ${route.name} worker ${workerId} error:`, err.message);
+          }
+        } finally {
+          if (connection) {
+            try {
+              await connection.close();
+              if (this.config.loginMode === 'dedicated') {
+                route.stats.totalLogoffs += 1;
+                this.stats.totalLogoffs += 1;
+              }
+            } catch (closeErr) {
+              this.stats.lastError = closeErr.message;
+            }
+          }
+        }
+      } catch (err) {
+        route.stats.totalErrors += 1;
+        this.stats.totalErrors += 1;
+        this.stats.lastError = err.message;
+        if (!String(err.message).includes('pool is terminating')) {
+          console.log(`Library Cache Lock connection error on ${route.name}:`, err.message);
+        }
       }
+
+      if (this.isRunning && this.config.loopDelay > 0) {
+        await this.sleep(this.config.loopDelay);
+      }
+    }
+  }
+
+  async acquireConnection(route) {
+    if (this.config.loginMode === 'pool') {
+      const pool = this.routePools.get(route.id);
+      if (!pool) {
+        throw new Error(`No pool available for ${route.name}`);
+      }
+      return await pool.getConnection();
+    }
+
+    return await this.db.createDirectConnection({ connectionString: route.connectionString });
+  }
+
+  async executeBusinessTransaction(connection, route, workerId, iteration) {
+    const p = this.getTablePrefix();
+    await connection.execute(
+      this.buildAnonymousBlock(route),
+      { moduleName: this.buildModuleName(route, workerId, iteration) },
+      { autoCommit: false }
+    );
+
+    for (let i = 0; i < this.config.selectsPerTxn; i++) {
+      await this.performSelect(connection, p, workerId, i);
+    }
+    for (let i = 0; i < this.config.insertsPerTxn; i++) {
+      await this.performInsert(connection, p, workerId, iteration, i);
+    }
+    for (let i = 0; i < this.config.updatesPerTxn; i++) {
+      await this.performUpdate(connection, p, workerId, i);
+    }
+    for (let i = 0; i < this.config.deletesPerTxn; i++) {
+      await this.performDelete(connection, p, workerId, i);
+    }
+  }
+
+  async performSelect(connection, p = '', workerId = 0, selectIndex = 0) {
+    const type = (workerId + selectIndex + Date.now()) % 4;
+
+    if (type === 0) {
+      await connection.execute(
+        `SELECT o.order_id, o.status, o.total_amount, c.customer_id, c.first_name, c.last_name
+         FROM ${p}orders o
+         JOIN ${p}customers c ON c.customer_id = o.customer_id
+         WHERE ROWNUM <= 25`,
+        [],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+      );
+      return;
+    }
+
+    if (type === 1) {
+      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+      if (!customerId) return;
+
+      await connection.execute(
+        `SELECT o.order_id, o.order_date, o.status, o.total_amount
+         FROM ${p}orders o
+         WHERE o.customer_id = :customerId
+         ORDER BY o.order_date DESC
+         FETCH FIRST 20 ROWS ONLY`,
+        { customerId },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+      );
+      return;
+    }
+
+    if (type === 2) {
+      await connection.execute(
+        `SELECT p.product_id, p.product_name, i.quantity_on_hand, w.warehouse_name
+         FROM ${p}inventory i
+         JOIN ${p}products p ON p.product_id = i.product_id
+         JOIN ${p}warehouses w ON w.warehouse_id = i.warehouse_id
+         WHERE ROWNUM <= 25`,
+        [],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+      );
+      return;
+    }
+
+    const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
+    if (!orderId) return;
+
+    await connection.execute(
+      `SELECT oi.order_id, oi.product_id, oi.quantity, oi.unit_price, p.product_name
+       FROM ${p}order_items oi
+       JOIN ${p}products p ON p.product_id = oi.product_id
+       WHERE oi.order_id = :orderId`,
+      { orderId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+    );
+  }
+
+  async performInsert(connection, p = '', workerId = 0, iteration = 0, insertIndex = 0) {
+    const type = (workerId + iteration + insertIndex) % 2;
+
+    if (type === 0) {
+      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
+      if (!orderId) return;
+
+      await connection.execute(
+        `INSERT INTO ${p}order_history (
+           order_id,
+           old_status,
+           new_status,
+           changed_by,
+           change_reason
+         ) VALUES (
+           :orderId,
+           'PENDING',
+           'PROCESSING',
+           :changedBy,
+           :reason
+         )`,
+        {
+          orderId,
+          changedBy: `LCL_${workerId}`,
+          reason: `Iteration ${iteration}`
+        },
+        { autoCommit: false }
+      );
+      return;
+    }
+
+    const productId = await this.getRandomId(connection, `${p}products`, 'product_id');
+    const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+    if (!productId || !customerId) return;
+
+    await connection.execute(
+      `INSERT INTO ${p}product_reviews (
+         product_id,
+         customer_id,
+         rating,
+         review_title,
+         review_text,
+         is_verified_purchase
+       ) VALUES (
+         :productId,
+         :customerId,
+         :rating,
+         :title,
+         :reviewText,
+         1
+       )`,
+      {
+        productId,
+        customerId,
+        rating: ((workerId + insertIndex) % 5) + 1,
+        title: `LCL-${workerId}-${iteration}-${insertIndex}`,
+        reviewText: `Library Cache Lock run ${this.runId}`
+      },
+      { autoCommit: false }
+    );
+  }
+
+  async performUpdate(connection, p = '', workerId = 0, updateIndex = 0) {
+    const type = (workerId + updateIndex + Date.now()) % 3;
+
+    if (type === 0) {
+      const orderId = await this.getRandomId(connection, `${p}orders`, 'order_id');
+      if (!orderId) return;
+
+      const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+      const status = statuses[(workerId + updateIndex) % statuses.length];
+      await connection.execute(
+        `UPDATE ${p}orders
+         SET status = :status,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE order_id = :orderId`,
+        { status, orderId },
+        { autoCommit: false }
+      );
+      return;
+    }
+
+    if (type === 1) {
+      const customerId = await this.getRandomId(connection, `${p}customers`, 'customer_id');
+      if (!customerId) return;
+
+      await connection.execute(
+        `UPDATE ${p}customers
+         SET balance = balance + :delta,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE customer_id = :customerId`,
+        {
+          delta: Number((((workerId % 7) - 3) * 5.25).toFixed(2)),
+          customerId
+        },
+        { autoCommit: false }
+      );
+      return;
+    }
+
+    const inventoryId = await this.getRandomId(connection, `${p}inventory`, 'inventory_id');
+    if (!inventoryId) return;
+
+    await connection.execute(
+      `UPDATE ${p}inventory
+       SET quantity_on_hand = GREATEST(0, quantity_on_hand + :delta),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE inventory_id = :inventoryId`,
+      {
+        delta: ((workerId + updateIndex) % 9) - 4,
+        inventoryId
+      },
+      { autoCommit: false }
+    );
+  }
+
+  async performDelete(connection, p = '', workerId = 0, deleteIndex = 0) {
+    const type = (workerId + deleteIndex) % 2;
+
+    if (type === 0) {
+      const reviewId = await this.getRandomId(connection, `${p}product_reviews`, 'review_id');
+      if (!reviewId) return;
+
+      await connection.execute(
+        `DELETE FROM ${p}product_reviews WHERE review_id = :reviewId`,
+        { reviewId },
+        { autoCommit: false }
+      );
+      return;
+    }
+
+    const historyId = await this.getRandomId(connection, `${p}order_history`, 'history_id');
+    if (!historyId) return;
+
+    await connection.execute(
+      `DELETE FROM ${p}order_history WHERE history_id = :historyId`,
+      { historyId },
+      { autoCommit: false }
+    );
+  }
+
+  async getRandomId(connection, tableName, idColumn) {
+    try {
+      const sampleResult = await connection.execute(
+        `SELECT ${idColumn} FROM ${tableName} SAMPLE(1) WHERE ROWNUM = 1`,
+        [],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+      );
+      const fromSample = sampleResult.rows?.[0]?.[idColumn.toUpperCase()];
+      if (fromSample !== undefined && fromSample !== null) {
+        return fromSample;
+      }
+
+      const fallbackResult = await connection.execute(
+        `SELECT MIN(${idColumn}) AS id_value FROM ${tableName}`,
+        [],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+      );
+      return fallbackResult.rows?.[0]?.ID_VALUE || null;
+    } catch (err) {
+      return null;
     }
   }
 
   reportStats() {
     const now = Date.now();
     const elapsedSeconds = Math.max(0.001, (now - this.previousStats.lastTick) / 1000);
-    const totalCalls = this.stats.totalCalls;
-    const callsDelta = totalCalls - this.previousStats.totalCalls;
-    const callsPerSecond = callsDelta / elapsedSeconds;
+    const txDelta = this.stats.totalTransactions - this.previousStats.totalTransactions;
+    const transactionsPerSecond = txDelta / elapsedSeconds;
+    this.stats.transactionsPerSecond = transactionsPerSecond;
 
     this.previousStats = {
-      totalCalls,
+      totalTransactions: this.stats.totalTransactions,
       lastTick: now
     };
-    this.stats.callsPerSecond = callsPerSecond;
 
-    const responseTimes = this.stats.responseTimes;
-    const avgLatencyMs = responseTimes.length
-      ? responseTimes.reduce((sum, value) => sum + value, 0) / responseTimes.length
-      : 0;
+    const routeMetrics = this.routes.map((route) => {
+      const delta = route.stats.totalTransactions - route.stats.previousTransactions;
+      route.stats.previousTransactions = route.stats.totalTransactions;
+      route.stats.tps = delta / elapsedSeconds;
+
+      return {
+        routeId: route.id,
+        name: route.name,
+        instanceName: route.instanceName,
+        procedure: this.qualifyProcedure(route),
+        connectionString: route.connectionString,
+        assignedWorkers: route.stats.assignedWorkers,
+        totalTransactions: route.stats.totalTransactions,
+        totalErrors: route.stats.totalErrors,
+        transactionsPerSecond: Number(route.stats.tps.toFixed(2)),
+        avgTransactionMs: Number(average(route.stats.responseTimes).toFixed(2)),
+        totalLogons: route.stats.totalLogons,
+        totalLogoffs: route.stats.totalLogoffs
+      };
+    });
 
     this.io?.emit('library-cache-lock-metrics', {
       runId: this.runId,
-      totalCalls,
-      errors: this.stats.errors,
-      callsPerSecond: Number(callsPerSecond.toFixed(2)),
-      avgLatencyMs: Number(avgLatencyMs.toFixed(2)),
+      totalTransactions: this.stats.totalTransactions,
+      totalErrors: this.stats.totalErrors,
+      totalLogons: this.stats.totalLogons,
+      totalLogoffs: this.stats.totalLogoffs,
+      transactionsPerSecond: Number(transactionsPerSecond.toFixed(2)),
+      avgTransactionMs: Number(average(this.stats.responseTimes).toFixed(2)),
       durationSeconds: this.stats.startTime
         ? Math.floor((Date.now() - this.stats.startTime) / 1000)
         : 0,
+      loginMode: this.config.loginMode,
+      scenario: this.config.scenario,
+      routeMetrics,
       latestSample: this.latestSample,
       lastError: this.stats.lastError
     });
@@ -296,16 +723,6 @@ class LibraryCacheLockEngine {
   }
 
   async stop() {
-    if (!this.isRunning && !this.pool) {
-      return {
-        summary: this.lastRunSummary,
-        stats: {
-          totalCalls: this.stats.totalCalls,
-          errors: this.stats.errors
-        }
-      };
-    }
-
     this.isRunning = false;
 
     if (this.statsInterval) {
@@ -327,16 +744,14 @@ class LibraryCacheLockEngine {
       console.log('Unable to capture final Library Cache Lock snapshot:', err.message);
     }
 
-    if (this.pool) {
+    for (const pool of this.routePools.values()) {
       try {
-        await this.pool.close(2);
+        await pool.close(2);
       } catch (err) {
         console.log('Library Cache Lock pool close warning:', err.message);
       }
-      this.pool = null;
     }
-
-    this.workers = [];
+    this.routePools.clear();
 
     const summary = finalSnapshot && this.runStartSnapshot
       ? this.buildRunSummary(finalSnapshot)
@@ -348,8 +763,10 @@ class LibraryCacheLockEngine {
       runId: this.runId,
       summary,
       stats: {
-        totalCalls: this.stats.totalCalls,
-        errors: this.stats.errors,
+        totalTransactions: this.stats.totalTransactions,
+        totalErrors: this.stats.totalErrors,
+        totalLogons: this.stats.totalLogons,
+        totalLogoffs: this.stats.totalLogoffs,
         lastError: this.stats.lastError
       }
     };
@@ -360,31 +777,52 @@ class LibraryCacheLockEngine {
     this.runStartSnapshot = null;
     this.lastSampleSnapshot = null;
     this.latestSample = null;
+    this.workers = [];
 
     return payload;
+  }
+
+  buildRouteSummaries(durationSeconds) {
+    return this.routes.map((route) => ({
+      routeId: route.id,
+      name: route.name,
+      instanceName: route.instanceName,
+      connectionString: route.connectionString,
+      procedure: this.qualifyProcedure(route),
+      assignedWorkers: route.stats.assignedWorkers,
+      totalTransactions: route.stats.totalTransactions,
+      totalErrors: route.stats.totalErrors,
+      avgTransactionMs: Number(average(route.stats.responseTimes).toFixed(2)),
+      transactionsPerSecond: durationSeconds > 0
+        ? Number((route.stats.totalTransactions / durationSeconds).toFixed(2))
+        : 0,
+      totalLogons: route.stats.totalLogons,
+      totalLogoffs: route.stats.totalLogoffs
+    }));
   }
 
   buildFallbackSummary() {
     const durationSeconds = this.stats.startTime
       ? Math.max(0.001, (Date.now() - this.stats.startTime) / 1000)
       : 0;
-    const avgLatencyMs = this.stats.responseTimes.length
-      ? this.stats.responseTimes.reduce((sum, value) => sum + value, 0) / this.stats.responseTimes.length
-      : 0;
 
     return {
       runId: this.runId,
-      runLabel: this.config?.runLabel || this.config?.procedureName || 'Library Cache Lock',
-      qualifiedProcedure: this.qualifyProcedure(),
+      runLabel: this.config?.runLabel || 'Library Cache Lock',
+      scenario: this.config?.scenario || 'single-service',
+      loginMode: this.config?.loginMode || 'dedicated',
+      schemaPrefix: this.config?.schemaPrefix || '',
       startedAt: this.stats.startTime ? new Date(this.stats.startTime).toISOString() : null,
       completedAt: new Date().toISOString(),
       durationSeconds: Number(durationSeconds.toFixed(2)),
-      totalCalls: this.stats.totalCalls,
-      errors: this.stats.errors,
-      avgLatencyMs: Number(avgLatencyMs.toFixed(2)),
-      callsPerSecond: durationSeconds > 0
-        ? Number((this.stats.totalCalls / durationSeconds).toFixed(2))
+      totalTransactions: this.stats.totalTransactions,
+      transactionsPerSecond: durationSeconds > 0
+        ? Number((this.stats.totalTransactions / durationSeconds).toFixed(2))
         : 0,
+      avgTransactionMs: Number(average(this.stats.responseTimes).toFixed(2)),
+      totalErrors: this.stats.totalErrors,
+      totalLogons: this.stats.totalLogons,
+      totalLogoffs: this.stats.totalLogoffs,
       dbCpuSharePct: 0,
       averageActiveSessions: 0,
       commitRatePerSecond: 0,
@@ -393,7 +831,8 @@ class LibraryCacheLockEngine {
       executeCountPerSecond: 0,
       keyWaits: [],
       topWaitEvents: [],
-      matchedSql: []
+      matchedSql: [],
+      routes: this.buildRouteSummaries(durationSeconds)
     };
   }
 
@@ -402,17 +841,20 @@ class LibraryCacheLockEngine {
     return {
       runId: this.runId,
       runLabel: this.config.runLabel,
-      qualifiedProcedure: this.qualifyProcedure(),
+      scenario: this.config.scenario,
+      loginMode: this.config.loginMode,
+      schemaPrefix: this.config.schemaPrefix,
       startedAt: new Date(this.stats.startTime).toISOString(),
       completedAt: new Date().toISOString(),
-      totalCalls: this.stats.totalCalls,
-      errors: this.stats.errors,
-      avgLatencyMs: this.stats.responseTimes.length
-        ? Number((this.stats.responseTimes.reduce((sum, value) => sum + value, 0) / this.stats.responseTimes.length).toFixed(2))
+      totalTransactions: this.stats.totalTransactions,
+      transactionsPerSecond: summary.durationSeconds > 0
+        ? Number((this.stats.totalTransactions / summary.durationSeconds).toFixed(2))
         : 0,
-      callsPerSecond: summary.durationSeconds > 0
-        ? Number((this.stats.totalCalls / summary.durationSeconds).toFixed(2))
-        : 0,
+      avgTransactionMs: Number(average(this.stats.responseTimes).toFixed(2)),
+      totalErrors: this.stats.totalErrors,
+      totalLogons: this.stats.totalLogons,
+      totalLogoffs: this.stats.totalLogoffs,
+      routes: this.buildRouteSummaries(summary.durationSeconds),
       ...summary
     };
   }
@@ -464,8 +906,6 @@ class LibraryCacheLockEngine {
     const userCalls = this.computeStatDelta(startSnapshot.sysstat, endSnapshot.sysstat, 'user calls');
     const executeCount = this.computeStatDelta(startSnapshot.sysstat, endSnapshot.sysstat, 'execute count');
 
-    const matchedSql = this.computeSqlDelta(startSnapshot.targetSql, endSnapshot.targetSql);
-
     return {
       durationSeconds: Number(durationSeconds.toFixed(2)),
       dbTimeSeconds: Number(dbTimeSeconds.toFixed(3)),
@@ -480,7 +920,7 @@ class LibraryCacheLockEngine {
       executeCountPerSecond: Number((executeCount / durationSeconds).toFixed(2)),
       keyWaits,
       topWaitEvents,
-      matchedSql
+      matchedSql: this.computeSqlDelta(startSnapshot.targetSql, endSnapshot.targetSql)
     };
   }
 
@@ -666,7 +1106,18 @@ class LibraryCacheLockEngine {
   }
 
   async queryTargetSql() {
-    const likeExpr = `%${this.config.procedureName.toUpperCase()}%`;
+    const procedureNames = Array.from(new Set(this.routes.map((route) => route.procedureName))).filter(Boolean);
+    if (procedureNames.length === 0) {
+      return { rows: [] };
+    }
+
+    const bindNames = {};
+    const predicates = procedureNames.map((procedureName, index) => {
+      const bindName = `likeExpr${index}`;
+      bindNames[bindName] = `%${procedureName.toUpperCase()}%`;
+      return `UPPER(sql_text) LIKE :${bindName}`;
+    });
+    const whereClause = predicates.join(' OR ');
 
     return this.queryWithFallback(
       `
@@ -680,10 +1131,10 @@ class LibraryCacheLockEngine {
             SUBSTR(sql_text, 1, 200) AS sql_text,
             last_active_time
           FROM gv$sqlstats
-          WHERE UPPER(sql_text) LIKE :likeExpr
+          WHERE ${whereClause}
           ORDER BY last_active_time DESC
         )
-        WHERE ROWNUM <= 20
+        WHERE ROWNUM <= 30
       `,
       `
         SELECT * FROM (
@@ -696,12 +1147,12 @@ class LibraryCacheLockEngine {
             SUBSTR(sql_text, 1, 200) AS sql_text,
             last_active_time
           FROM v$sqlstats
-          WHERE UPPER(sql_text) LIKE :likeExpr
+          WHERE ${whereClause}
           ORDER BY last_active_time DESC
         )
-        WHERE ROWNUM <= 20
+        WHERE ROWNUM <= 30
       `,
-      { likeExpr }
+      bindNames
     );
   }
 

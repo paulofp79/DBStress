@@ -80,6 +80,23 @@ class OracleDatabase {
     return await this.pool.getConnection();
   }
 
+  getCredentials(overrides = {}) {
+    if (!this.config) {
+      throw new Error('Database not configured. Connect first.');
+    }
+
+    return {
+      user: overrides.user || this.config.user,
+      password: overrides.password || this.config.password,
+      connectionString: overrides.connectionString || this.config.connectionString
+    };
+  }
+
+  async createDirectConnection(overrides = {}) {
+    const credentials = this.getCredentials(overrides);
+    return await oracledb.getConnection(credentials);
+  }
+
   async execute(sql, binds = [], options = {}) {
     let connection;
     try {
@@ -144,15 +161,12 @@ class OracleDatabase {
   }
 
   // Create a new pool with specified size for stress testing
-  async createStressPool(sessionCount) {
-    if (!this.config) {
-      throw new Error('Database not configured. Connect first.');
-    }
-
+  async createStressPool(sessionCount, overrides = {}) {
+    const credentials = this.getCredentials(overrides);
     return await oracledb.createPool({
-      user: this.config.user,
-      password: this.config.password,
-      connectionString: this.config.connectionString,
+      user: credentials.user,
+      password: credentials.password,
+      connectionString: credentials.connectionString,
       poolMin: Math.min(sessionCount, 10),
       poolMax: sessionCount,
       poolIncrement: 5,
