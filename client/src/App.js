@@ -435,7 +435,7 @@ function App() {
               fontSize: '0.95rem'
             }}
           >
-            Library Cache Lock Demo
+            Library Cache Lock
           </button>
           <button
             onClick={() => setActiveTab('hw-contention')}
@@ -631,7 +631,7 @@ function App() {
           />
         )}
 
-        {/* Library Cache Lock Demo Tab */}
+        {/* Library Cache Lock Tab */}
         {activeTab === 'library-cache-lock' && (
           <LibraryCacheLockPanel
             dbStatus={dbStatus}

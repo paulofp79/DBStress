@@ -1,16 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Line, Bar } from 'react-chartjs-2';
+import React, { useEffect, useRef, useState } from 'react';
+import { Bar, Line } from 'react-chartjs-2';
 import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
   BarElement,
-  Title,
-  Tooltip,
+  CategoryScale,
+  Chart as ChartJS,
+  Filler,
   Legend,
-  Filler
+  LinearScale,
+  LineElement,
+  PointElement,
+  Title,
+  Tooltip
 } from 'chart.js';
 
 ChartJS.register(
@@ -25,7 +25,6 @@ ChartJS.register(
   Filler
 );
 
-// Auto-detect server URL
 const getServerUrl = () => {
   if (window.location.hostname !== 'localhost') {
     return `http://${window.location.host}`;
@@ -34,661 +33,694 @@ const getServerUrl = () => {
 };
 
 const API_BASE = `${getServerUrl()}/api`;
+const LOCAL_STORAGE_KEY = 'dbstress-library-cache-lock-runs';
 
-function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
-  // Configuration state - using non-existent sequence pattern
+const DEFAULT_PROCEDURE_SQL = `CREATE OR REPLACE NONEDITIONABLE PROCEDURE GRAV_SESSION_MFES_ONLINE (
+  pModuleName VARCHAR2
+)
+IS
+  pActionName     VARCHAR2(14);
+  pModuleName_mod VARCHAR2(48);
+BEGIN
+  pActionName := 'MFES_ONLINE';
+
+  pModuleName_mod := SUBSTR(pModuleName, 1, 22) || '0000000' || SUBSTR(pModuleName, 30);
+
+  DBMS_APPLICATION_INFO.SET_MODULE(pModuleName_mod, pActionName);
+  DBMS_SESSION.SET_IDENTIFIER(pModuleName);
+
+  EXECUTE IMMEDIATE 'ALTER SESSION SET OPTIMIZER_MODE = first_rows_1';
+  EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_use_feedback" = false';
+  EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_adaptive_cursor_sharing" = false';
+  EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_extended_cursor_sharing_rel" = none';
+END;
+/`;
+
+const KEY_WAIT_ORDER = [
+  'library cache: mutex X',
+  'latch: ges resource hash list',
+  'gc current block congested',
+  'gc cr failure',
+  'gc buffer busy acquire',
+  'cursor: mutex X',
+  'cursor: pin S wait on X',
+  'library cache lock'
+];
+
+const cardStyle = {
+  background: 'var(--surface)',
+  border: '1px solid var(--border)',
+  borderRadius: '12px',
+  padding: '1rem'
+};
+
+const chartOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: { duration: 0 },
+  plugins: {
+    legend: { display: false }
+  },
+  scales: {
+    x: {
+      grid: { color: 'rgba(255,255,255,0.08)' },
+      ticks: { color: '#9ca3af', maxTicksLimit: 8 }
+    },
+    y: {
+      beginAtZero: true,
+      grid: { color: 'rgba(255,255,255,0.08)' },
+      ticks: { color: '#9ca3af' }
+    }
+  }
+};
+
+const waitChartOptions = {
+  indexAxis: 'y',
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: { duration: 0 },
+  plugins: {
+    legend: { display: false }
+  },
+  scales: {
+    x: {
+      beginAtZero: true,
+      grid: { color: 'rgba(255,255,255,0.08)' },
+      ticks: { color: '#9ca3af' }
+    },
+    y: {
+      grid: { display: false },
+      ticks: { color: '#cbd5e1' }
+    }
+  }
+};
+
+const emptyMetrics = {
+  runId: null,
+  totalCalls: 0,
+  errors: 0,
+  callsPerSecond: 0,
+  avgLatencyMs: 0,
+  durationSeconds: 0,
+  latestSample: null,
+  lastError: null
+};
+
+const formatNumber = (value, digits = 0) => {
+  const num = Number(value || 0);
+  return num.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  });
+};
+
+const formatDateTime = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+};
+
+const buildWaitMap = (summary) => {
+  const map = new Map();
+  (summary?.keyWaits || []).forEach((wait) => {
+    map.set(wait.event, wait);
+  });
+  return map;
+};
+
+function MetricCard({ title, value, hint, accent }) {
+  return (
+    <div style={{
+      ...cardStyle,
+      minHeight: '110px',
+      background: `linear-gradient(180deg, rgba(15,23,42,0.96), rgba(30,41,59,0.96)), ${accent || 'var(--surface)'}`
+    }}>
+      <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+        {title}
+      </div>
+      <div style={{ fontSize: '1.7rem', fontWeight: 700, marginTop: '0.35rem' }}>{value}</div>
+      <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '0.35rem' }}>{hint}</div>
+    </div>
+  );
+}
+
+function LibraryCacheLockPanel({ dbStatus, socket }) {
   const [config, setConfig] = useState({
-    threads: 50,                    // Number of workers
-    sequenceCount: 3,               // Number of non-existent sequences to query per iteration
-    loopDelay: 0                    // Delay between loops (ms), 0 = tight loop
+    threads: 96,
+    loopDelay: 0,
+    moduleLength: 42,
+    procedureOwner: '',
+    procedureName: 'GRAV_SESSION_MFES_ONLINE',
+    modulePrefix: 'MFES',
+    runLabel: 'Baseline'
   });
-
-  // Runtime state
+  const [procedureSql, setProcedureSql] = useState(DEFAULT_PROCEDURE_SQL);
+  const [isInstalling, setIsInstalling] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
-  const [selectedSchema, setSelectedSchema] = useState('');
-
-  // Metrics state
-  const [metrics, setMetrics] = useState({
-    tps: 0,
-    avgResponseTime: 0,
-    totalCalls: 0,
-    totalSelects: 0,
-    errors: 0
-  });
-
-  // Wait events state
-  const [libraryCacheEvents, setLibraryCacheEvents] = useState({});
-  const [top10WaitEvents, setTop10WaitEvents] = useState([]);
-  const [hardParses, setHardParses] = useState(0);
-  const [parseCount, setParseCount] = useState(0);
-
-  // Chart data - keep last 60 seconds
-  const maxDataPoints = 60;
-  const [tpsHistory, setTpsHistory] = useState([]);
-  const [responseTimeHistory, setResponseTimeHistory] = useState([]);
-  const [labels, setLabels] = useState([]);
-
-  // Status message
   const [statusMessage, setStatusMessage] = useState('');
+  const [metrics, setMetrics] = useState(emptyMetrics);
+  const [sample, setSample] = useState(null);
+  const [latestSummary, setLatestSummary] = useState(null);
+  const [savedRuns, setSavedRuns] = useState([]);
+  const [compareRunA, setCompareRunA] = useState('');
+  const [compareRunB, setCompareRunB] = useState('');
 
-  // Timer for uptime
-  const [uptime, setUptime] = useState(0);
-  const uptimeRef = useRef(null);
-  const startTimeRef = useRef(null);
+  const [labels, setLabels] = useState([]);
+  const [callsHistory, setCallsHistory] = useState([]);
+  const [latencyHistory, setLatencyHistory] = useState([]);
+  const [aasHistory, setAasHistory] = useState([]);
+  const [cpuShareHistory, setCpuShareHistory] = useState([]);
 
-  // Select first schema by default
+  const maxDataPoints = 60;
+  const lastSampleAtRef = useRef(null);
+
+  const addOrUpdateSavedRun = (runSummary) => {
+    if (!runSummary?.runId) return;
+
+    setSavedRuns((prev) => {
+      const next = [runSummary, ...prev.filter((item) => item.runId !== runSummary.runId)].slice(0, 12);
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
   useEffect(() => {
-    if (schemas && schemas.length > 0 && !selectedSchema) {
-      setSelectedSchema(schemas[0].prefix || '');
+    try {
+      const stored = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
+      if (Array.isArray(stored)) {
+        setSavedRuns(stored);
+      }
+    } catch (err) {
+      // Ignore corrupted local storage.
     }
-  }, [schemas, selectedSchema]);
+  }, []);
 
-  // Listen for library cache lock metrics
   useEffect(() => {
-    if (socket) {
-      socket.on('library-cache-lock-metrics', (data) => {
-        setMetrics({
-          tps: data.tps || 0,
-          avgResponseTime: data.avgResponseTime || 0,
-          totalCalls: data.totalCalls || 0,
-          totalSelects: data.totalSelects || 0,
-          errors: data.errors || 0
-        });
+    if (!socket) return undefined;
 
-        // Only update chart data if we have actual TPS
-        if (data.tps > 0) {
-          const now = new Date();
-          const timeLabel = `${now.getMinutes()}:${now.getSeconds().toString().padStart(2, '0')}`;
-
-          setLabels(prev => {
-            const newLabels = [...prev, timeLabel];
-            return newLabels.slice(-maxDataPoints);
-          });
-
-          setTpsHistory(prev => {
-            const newData = [...prev, data.tps || 0];
-            return newData.slice(-maxDataPoints);
-          });
-
-          setResponseTimeHistory(prev => {
-            const newData = [...prev, data.avgResponseTime || 0];
-            return newData.slice(-maxDataPoints);
-          });
-        }
+    const onMetrics = (data) => {
+      setMetrics({
+        runId: data.runId || null,
+        totalCalls: data.totalCalls || 0,
+        errors: data.errors || 0,
+        callsPerSecond: data.callsPerSecond || 0,
+        avgLatencyMs: data.avgLatencyMs || 0,
+        durationSeconds: data.durationSeconds || 0,
+        latestSample: data.latestSample || null,
+        lastError: data.lastError || null
       });
 
-      socket.on('library-cache-lock-status', (data) => {
-        setStatusMessage(data.message || '');
-        if (data.running !== undefined) {
-          setIsRunning(data.running);
-        }
-      });
+      if (data.latestSample?.capturedAt && data.latestSample.capturedAt !== lastSampleAtRef.current) {
+        lastSampleAtRef.current = data.latestSample.capturedAt;
+        const stamp = new Date(data.latestSample.capturedAt);
+        const label = `${stamp.getHours().toString().padStart(2, '0')}:${stamp.getMinutes().toString().padStart(2, '0')}:${stamp.getSeconds().toString().padStart(2, '0')}`;
 
-      socket.on('library-cache-lock-wait-events', (data) => {
-        if (data.libraryCacheEvents) {
-          setLibraryCacheEvents(data.libraryCacheEvents);
-        }
-        if (data.top10WaitEvents) {
-          setTop10WaitEvents(data.top10WaitEvents);
-        }
-        if (data.hardParses !== undefined) {
-          setHardParses(data.hardParses);
-        }
-        if (data.parseCount !== undefined) {
-          setParseCount(data.parseCount);
-        }
-      });
+        setLabels((prev) => [...prev, label].slice(-maxDataPoints));
+        setCallsHistory((prev) => [...prev, data.callsPerSecond || 0].slice(-maxDataPoints));
+        setLatencyHistory((prev) => [...prev, data.avgLatencyMs || 0].slice(-maxDataPoints));
+        setAasHistory((prev) => [...prev, data.latestSample.averageActiveSessions || 0].slice(-maxDataPoints));
+        setCpuShareHistory((prev) => [...prev, data.latestSample.dbCpuSharePct || 0].slice(-maxDataPoints));
+      }
+    };
 
-      socket.on('library-cache-lock-stopped', (data) => {
-        setIsRunning(false);
-        setStatusMessage('Stopped');
-      });
-    }
+    const onStatus = (data) => {
+      setStatusMessage(data.message || '');
+      if (typeof data.running === 'boolean') {
+        setIsRunning(data.running);
+      }
+    };
+
+    const onWaits = (data) => {
+      setSample(data.sample || null);
+    };
+
+    const onStopped = (data) => {
+      setIsRunning(false);
+      setStatusMessage('Stopped');
+      if (data.summary) {
+        setLatestSummary(data.summary);
+        setSample(data.summary);
+        addOrUpdateSavedRun(data.summary);
+      }
+    };
+
+    socket.on('library-cache-lock-metrics', onMetrics);
+    socket.on('library-cache-lock-status', onStatus);
+    socket.on('library-cache-lock-wait-events', onWaits);
+    socket.on('library-cache-lock-stopped', onStopped);
 
     return () => {
-      if (socket) {
-        socket.off('library-cache-lock-metrics');
-        socket.off('library-cache-lock-status');
-        socket.off('library-cache-lock-wait-events');
-        socket.off('library-cache-lock-stopped');
-      }
+      socket.off('library-cache-lock-metrics', onMetrics);
+      socket.off('library-cache-lock-status', onStatus);
+      socket.off('library-cache-lock-wait-events', onWaits);
+      socket.off('library-cache-lock-stopped', onStopped);
     };
   }, [socket]);
 
-  // Uptime timer
   useEffect(() => {
-    if (isRunning) {
-      if (!startTimeRef.current) {
-        startTimeRef.current = Date.now();
-      }
-      uptimeRef.current = setInterval(() => {
-        setUptime(Math.floor((Date.now() - startTimeRef.current) / 1000));
-      }, 1000);
-    } else {
-      if (uptimeRef.current) {
-        clearInterval(uptimeRef.current);
-        uptimeRef.current = null;
-      }
-      startTimeRef.current = null;
-      setUptime(0);
-    }
-
-    return () => {
-      if (uptimeRef.current) {
-        clearInterval(uptimeRef.current);
+    const loadStatus = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/library-cache-lock/status`);
+        const data = await response.json();
+        setIsRunning(!!data.isRunning);
+        if (data.lastRunSummary) {
+          setLatestSummary(data.lastRunSummary);
+          setSample(data.lastRunSummary);
+        }
+      } catch (err) {
+        // Ignore status bootstrap failures.
       }
     };
-  }, [isRunning]);
+
+    loadStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!compareRunA && savedRuns[0]) {
+      setCompareRunA(savedRuns[0].runId);
+    }
+    if (!compareRunB && savedRuns[1]) {
+      setCompareRunB(savedRuns[1].runId);
+    }
+  }, [savedRuns, compareRunA, compareRunB]);
+
+  const handleInstallProcedure = async () => {
+    try {
+      setIsInstalling(true);
+      setStatusMessage('Compiling procedure...');
+
+      const response = await fetch(`${API_BASE}/library-cache-lock/install-procedure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sqlText: procedureSql })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        const compileErrors = (data.compileErrors || [])
+          .map((err) => `line ${err.line}:${err.position} ${err.text}`)
+          .join(' | ');
+        throw new Error(compileErrors || data.error || 'Compilation failed');
+      }
+
+      setStatusMessage(data.message || 'Procedure compiled successfully');
+    } catch (err) {
+      setStatusMessage(`Compile error: ${err.message}`);
+    } finally {
+      setIsInstalling(false);
+    }
+  };
 
   const handleStart = async () => {
     try {
-      setStatusMessage('Starting Library Cache Lock Demo...');
-      // Clear chart data
-      setTpsHistory([]);
-      setResponseTimeHistory([]);
-      setLabels([]);
-      setLibraryCacheEvents({});
-      setTop10WaitEvents([]);
-
-      // Set running immediately for UI responsiveness
       setIsRunning(true);
+      setStatusMessage('Starting workload...');
+      setMetrics(emptyMetrics);
+      setSample(null);
+      setLatestSummary(null);
+      lastSampleAtRef.current = null;
+      setLabels([]);
+      setCallsHistory([]);
+      setLatencyHistory([]);
+      setAasHistory([]);
+      setCpuShareHistory([]);
 
       const response = await fetch(`${API_BASE}/library-cache-lock/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...config,
-          schemaPrefix: selectedSchema
-        })
+        body: JSON.stringify(config)
       });
 
       const data = await response.json();
-
       if (!response.ok) {
-        setIsRunning(false);
-        throw new Error(data.error || 'Failed to start');
+        throw new Error(data.error || 'Failed to start workload');
       }
 
-      setStatusMessage('Running...');
+      setStatusMessage(data.message || 'Running');
     } catch (err) {
       setIsRunning(false);
-      setStatusMessage(`Error: ${err.message}`);
+      setStatusMessage(`Start error: ${err.message}`);
     }
   };
 
   const handleStop = async () => {
     try {
-      setStatusMessage('Stopping...');
-
-      await fetch(`${API_BASE}/library-cache-lock/stop`, { method: 'POST' });
-
-      setIsRunning(false);
-      setStatusMessage('Stopped');
-
-      if (uptimeRef.current) {
-        clearInterval(uptimeRef.current);
-        uptimeRef.current = null;
+      setStatusMessage('Stopping workload...');
+      const response = await fetch(`${API_BASE}/library-cache-lock/stop`, {
+        method: 'POST'
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to stop workload');
       }
-    } catch (err) {
+
       setIsRunning(false);
-      setStatusMessage(`Error: ${err.message}`);
+      if (data.summary) {
+        setLatestSummary(data.summary);
+        setSample(data.summary);
+        addOrUpdateSavedRun(data.summary);
+      }
+      setStatusMessage('Stopped');
+    } catch (err) {
+      setStatusMessage(`Stop error: ${err.message}`);
     }
   };
 
   const handleReset = () => {
-    setTpsHistory([]);
-    setResponseTimeHistory([]);
+    setMetrics(emptyMetrics);
+    setSample(null);
+    setLatestSummary(null);
     setLabels([]);
-    setMetrics({ tps: 0, avgResponseTime: 0, totalCalls: 0, totalSelects: 0, errors: 0 });
-    setLibraryCacheEvents({});
-    setTop10WaitEvents([]);
-    setHardParses(0);
-    setParseCount(0);
+    setCallsHistory([]);
+    setLatencyHistory([]);
+    setAasHistory([]);
+    setCpuShareHistory([]);
+    lastSampleAtRef.current = null;
+    setStatusMessage('Charts and current run summary cleared');
   };
 
-  const formatUptime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+  const currentWaits = sample?.keyWaits || latestSummary?.keyWaits || [];
+  const currentTopWaits = sample?.topWaitEvents || latestSummary?.topWaitEvents || [];
+  const currentMatchedSql = latestSummary?.matchedSql || sample?.matchedSql || [];
 
-  // TPS Chart configuration
-  const tpsChartData = {
+  const lineData = (label, data, color, fillColor) => ({
     labels,
     datasets: [{
-      label: 'Iterations/sec',
-      data: tpsHistory,
-      borderColor: '#f59e0b',
-      backgroundColor: 'rgba(245, 158, 11, 0.2)',
+      label,
+      data,
+      borderColor: color,
+      backgroundColor: fillColor,
       fill: true,
       tension: 0.3,
       pointRadius: 0
     }]
-  };
+  });
 
-  // Response Time Chart configuration
-  const responseTimeChartData = {
-    labels,
-    datasets: [{
-      label: 'Response Time (ms)',
-      data: responseTimeHistory,
-      borderColor: '#ef4444',
-      backgroundColor: 'rgba(239, 68, 68, 0.3)',
-      fill: true,
-      tension: 0.3,
-      pointRadius: 0
-    }]
-  };
+  const compareSummaryA = savedRuns.find((run) => run.runId === compareRunA) || null;
+  const compareSummaryB = savedRuns.find((run) => run.runId === compareRunB) || null;
+  const compareWaitMapA = buildWaitMap(compareSummaryA);
+  const compareWaitMapB = buildWaitMap(compareSummaryB);
 
-  // TOP 10 Wait Events Chart configuration (horizontal bar)
-  const top10WaitEventsChartData = {
-    labels: top10WaitEvents.map(e => e.event?.substring(0, 30) || 'Unknown'),
-    datasets: [{
-      label: 'Time Waited (seconds)',
-      data: top10WaitEvents.map(e => e.timeSeconds || 0),
-      backgroundColor: [
-        'rgba(239, 68, 68, 0.7)',
-        'rgba(249, 115, 22, 0.7)',
-        'rgba(245, 158, 11, 0.7)',
-        'rgba(234, 179, 8, 0.7)',
-        'rgba(132, 204, 22, 0.7)',
-        'rgba(34, 197, 94, 0.7)',
-        'rgba(20, 184, 166, 0.7)',
-        'rgba(6, 182, 212, 0.7)',
-        'rgba(59, 130, 246, 0.7)',
-        'rgba(139, 92, 246, 0.7)'
-      ],
-      borderColor: [
-        'rgb(239, 68, 68)',
-        'rgb(249, 115, 22)',
-        'rgb(245, 158, 11)',
-        'rgb(234, 179, 8)',
-        'rgb(132, 204, 22)',
-        'rgb(34, 197, 94)',
-        'rgb(20, 184, 166)',
-        'rgb(6, 182, 212)',
-        'rgb(59, 130, 246)',
-        'rgb(139, 92, 246)'
-      ],
-      borderWidth: 1
-    }]
-  };
+  const compareMetrics = compareSummaryA && compareSummaryB
+    ? [
+        ['Calls/sec', compareSummaryA.callsPerSecond, compareSummaryB.callsPerSecond, 2],
+        ['Avg latency ms', compareSummaryA.avgLatencyMs, compareSummaryB.avgLatencyMs, 2],
+        ['AAS', compareSummaryA.averageActiveSessions, compareSummaryB.averageActiveSessions, 2],
+        ['DB CPU share %', compareSummaryA.dbCpuSharePct, compareSummaryB.dbCpuSharePct, 2],
+        ['Hard parses/sec', compareSummaryA.parseHardPerSecond, compareSummaryB.parseHardPerSecond, 2],
+        ['Commits/sec', compareSummaryA.commitRatePerSecond, compareSummaryB.commitRatePerSecond, 2]
+      ]
+    : [];
 
-  const top10WaitEventsChartOptions = {
-    indexAxis: 'y',
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: { duration: 0 },
-    scales: {
-      x: {
-        display: true,
-        beginAtZero: true,
-        grid: { color: 'rgba(255,255,255,0.1)' },
-        ticks: { color: '#9ca3af' },
-        title: { display: true, text: 'Time (seconds)', color: '#9ca3af' }
-      },
-      y: {
-        display: true,
-        grid: { display: false },
-        ticks: { color: '#9ca3af', font: { size: 11 } }
-      }
-    },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        callbacks: {
-          label: (context) => {
-            const event = top10WaitEvents[context.dataIndex];
-            return [
-              `Time: ${event?.timeSeconds?.toFixed(2) || 0} seconds`,
-              `Waits: ${event?.totalWaits?.toLocaleString() || 0}`
-            ];
-          }
-        }
-      }
-    }
-  };
-
-  const chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: { duration: 0 },
-    scales: {
-      x: {
-        display: true,
-        grid: { color: 'rgba(255,255,255,0.1)' },
-        ticks: { color: '#9ca3af', maxTicksLimit: 10 }
-      },
-      y: {
-        display: true,
-        beginAtZero: true,
-        grid: { color: 'rgba(255,255,255,0.1)' },
-        ticks: { color: '#9ca3af' }
-      }
-    },
-    plugins: {
-      legend: { display: false }
-    }
-  };
-
-  const existingSchemas = schemas || [];
-  const hasSchemas = existingSchemas.length > 0;
-
-  // Key library cache events to highlight
-  const keyEvents = [
-    'library cache lock',
-    'library cache pin',
-    'cursor: pin S wait on X',
-    'cursor: pin S',
-    'cursor: mutex S',
-    'cursor: mutex X',
-    'latch: shared pool',
-    'latch: library cache'
-  ];
+  const waitComparisonRows = compareSummaryA && compareSummaryB
+    ? KEY_WAIT_ORDER.map((eventName) => {
+        const a = compareWaitMapA.get(eventName) || { timeWaitedSeconds: 0, totalWaits: 0 };
+        const b = compareWaitMapB.get(eventName) || { timeWaitedSeconds: 0, totalWaits: 0 };
+        return {
+          event: eventName,
+          aTime: a.timeWaitedSeconds || 0,
+          bTime: b.timeWaitedSeconds || 0,
+          delta: (b.timeWaitedSeconds || 0) - (a.timeWaitedSeconds || 0)
+        };
+      })
+    : [];
 
   if (!dbStatus.connected) {
     return (
       <div className="panel" style={{ height: '100%' }}>
         <div className="panel-header">
-          <h2>Library Cache Lock Demo</h2>
+          <h2>Library Cache Lock</h2>
         </div>
         <div className="panel-content">
-          <p style={{ color: 'var(--text-muted)' }}>Connect to database first</p>
+          <p style={{ color: 'var(--text-muted)' }}>Connect to the database first.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', gap: '1rem', height: '100%', padding: '1rem' }}>
-      {/* Left Panel - Controls */}
+    <div style={{ display: 'flex', gap: '1rem', height: '100%', padding: '1rem', alignItems: 'flex-start' }}>
       <div style={{
-        width: '300px',
+        width: '360px',
         flexShrink: 0,
-        background: 'var(--surface)',
-        borderRadius: '8px',
-        padding: '1rem',
         display: 'flex',
         flexDirection: 'column',
         gap: '1rem',
+        maxHeight: 'calc(100vh - 160px)',
         overflowY: 'auto'
       }}>
-        <h2 style={{ margin: 0, fontSize: '1.1rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.5rem' }}>
-          Library Cache Lock Demo
-        </h2>
-
-        {/* Info Box */}
-        <div style={{
-          padding: '0.75rem',
-          background: 'rgba(239, 68, 68, 0.1)',
-          border: '1px solid rgba(239, 68, 68, 0.3)',
-          borderRadius: '4px',
-          fontSize: '0.75rem',
-          color: 'var(--text-muted)'
-        }}>
-          <strong style={{ color: '#ef4444' }}>Non-Existent Sequence Pattern:</strong>
-          <ul style={{ margin: '0.25rem 0 0 0', paddingLeft: '1.2rem' }}>
-            <li>Multiple sessions SELECT from non-existent sequences</li>
-            <li>ORA-02289 errors cause library cache lock contention</li>
-          </ul>
-          <div style={{ marginTop: '0.5rem', fontStyle: 'italic' }}>
-            Reproduces: library cache lock, hard parse storms
-          </div>
-        </div>
-
-        {/* Schema Selection */}
-        <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Schema:</label>
-          <select
-            value={selectedSchema}
-            onChange={(e) => setSelectedSchema(e.target.value)}
-            disabled={isRunning}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              marginTop: '0.25rem'
-            }}
-          >
-            {existingSchemas.map(s => (
-              <option key={s.prefix || 'default'} value={s.prefix || ''}>
-                {s.prefix || 'default'}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Number of Workers */}
-        <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Concurrent Sessions:</label>
-          <input
-            type="number"
-            min="1"
-            max="500"
-            value={config.threads}
-            onChange={(e) => setConfig(prev => ({ ...prev, threads: Math.max(1, parseInt(e.target.value) || 1) }))}
-            disabled={isRunning}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              marginTop: '0.25rem'
-            }}
-          />
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Number of parallel sessions
-          </div>
-        </div>
-
-        {/* Sequence Count */}
-        <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>SELECTs per Iteration:</label>
-          <input
-            type="number"
-            min="1"
-            max="10"
-            value={config.sequenceCount}
-            onChange={(e) => setConfig(prev => ({ ...prev, sequenceCount: Math.max(1, Math.min(10, parseInt(e.target.value) || 3)) }))}
-            disabled={isRunning}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              marginTop: '0.25rem'
-            }}
-          />
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Number of non-existent sequences to query (customer had 3)
-          </div>
-        </div>
-
-        {/* Loop Delay */}
-        <div className="form-group">
-          <label style={{ fontSize: '0.85rem', fontWeight: '500' }}>Loop Delay (ms):</label>
-          <input
-            type="number"
-            min="0"
-            max="5000"
-            step="100"
-            value={config.loopDelay}
-            onChange={(e) => setConfig(prev => ({ ...prev, loopDelay: Math.max(0, parseInt(e.target.value) || 0) }))}
-            disabled={isRunning}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              marginTop: '0.25rem'
-            }}
-          />
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Delay between iterations (0 = tight loop, max contention)
-          </div>
-        </div>
-
-        {/* Status */}
-        {statusMessage && (
+        <div style={cardStyle}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem' }}>Library Cache Lock</h2>
+          <p style={{ marginTop: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            Replays high-concurrency calls to <code>{config.procedureName}</code> and captures run-scoped deltas for mutex, latch, and GC waits.
+          </p>
           <div style={{
-            padding: '0.5rem',
-            background: 'var(--bg-primary)',
-            borderRadius: '4px',
-            fontSize: '0.8rem',
-            color: statusMessage.startsWith('Error') ? 'var(--accent-danger)' : 'var(--text-muted)'
+            marginTop: '0.85rem',
+            padding: '0.85rem',
+            borderRadius: '10px',
+            background: 'linear-gradient(135deg, rgba(239,68,68,0.14), rgba(59,130,246,0.10))',
+            border: '1px solid rgba(239,68,68,0.22)',
+            fontSize: '0.82rem',
+            color: 'var(--text-secondary)'
           }}>
-            {statusMessage}
+            Tracks the same family of symptoms you described: <code>library cache: mutex X</code>, <code>latch: ges resource hash list</code>, <code>gc current block congested</code>, <code>gc cr failure</code>, and <code>gc buffer busy acquire</code>.
           </div>
-        )}
+        </div>
 
-        {/* Buttons */}
-        <div style={{ display: 'flex', gap: '0.5rem', marginTop: 'auto' }}>
+        <div style={cardStyle}>
+          <div className="form-group">
+            <label>Procedure SQL</label>
+            <textarea
+              value={procedureSql}
+              onChange={(e) => setProcedureSql(e.target.value)}
+              disabled={isRunning || isInstalling}
+              style={{ minHeight: '280px' }}
+            />
+          </div>
+
           <button
-            onClick={handleReset}
-            disabled={isRunning}
-            style={{
-              flex: 1,
-              padding: '0.5rem',
-              background: 'var(--surface)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
-              color: 'var(--text-primary)',
-              cursor: isRunning ? 'not-allowed' : 'pointer',
-              opacity: isRunning ? 0.5 : 1
-            }}
+            className="btn btn-secondary"
+            type="button"
+            onClick={handleInstallProcedure}
+            disabled={isRunning || isInstalling}
+            style={{ width: '100%' }}
           >
-            Reset
+            {isInstalling ? 'Compiling...' : 'Compile Procedure'}
           </button>
-          {!isRunning ? (
-            <button
-              onClick={handleStart}
-              disabled={!hasSchemas}
-              className="btn btn-success"
-              style={{ flex: 2 }}
-            >
-              Start
+        </div>
+
+        <div style={cardStyle}>
+          <div className="form-group">
+            <label>Run Label</label>
+            <input
+              value={config.runLabel}
+              onChange={(e) => setConfig((prev) => ({ ...prev, runLabel: e.target.value }))}
+              disabled={isRunning}
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Procedure Owner (optional)</label>
+            <input
+              value={config.procedureOwner}
+              onChange={(e) => setConfig((prev) => ({ ...prev, procedureOwner: e.target.value.toUpperCase() }))}
+              disabled={isRunning}
+              placeholder="Current schema if blank"
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Procedure Name</label>
+            <input
+              value={config.procedureName}
+              onChange={(e) => setConfig((prev) => ({ ...prev, procedureName: e.target.value.toUpperCase() }))}
+              disabled={isRunning}
+            />
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label>Concurrent Sessions</label>
+              <input
+                type="number"
+                min="1"
+                max="500"
+                value={config.threads}
+                onChange={(e) => setConfig((prev) => ({ ...prev, threads: Math.max(1, Number.parseInt(e.target.value || '1', 10)) }))}
+                disabled={isRunning}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Loop Delay (ms)</label>
+              <input
+                type="number"
+                min="0"
+                max="5000"
+                value={config.loopDelay}
+                onChange={(e) => setConfig((prev) => ({ ...prev, loopDelay: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
+                disabled={isRunning}
+              />
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label>Module Prefix</label>
+              <input
+                value={config.modulePrefix}
+                onChange={(e) => setConfig((prev) => ({ ...prev, modulePrefix: e.target.value.toUpperCase() }))}
+                disabled={isRunning}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Module Length</label>
+              <input
+                type="number"
+                min="30"
+                max="96"
+                value={config.moduleLength}
+                onChange={(e) => setConfig((prev) => ({ ...prev, moduleLength: Math.max(30, Number.parseInt(e.target.value || '30', 10)) }))}
+                disabled={isRunning}
+              />
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+            <button className="btn btn-danger" type="button" onClick={handleStart} disabled={isRunning || isInstalling}>
+              Start Workload
             </button>
-          ) : (
-            <button
-              onClick={handleStop}
-              className="btn btn-danger"
-              style={{ flex: 2 }}
-            >
+            <button className="btn btn-secondary" type="button" onClick={handleStop} disabled={!isRunning}>
               Stop
             </button>
-          )}
-        </div>
+          </div>
 
-        {isRunning && (
-          <div style={{ textAlign: 'center', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-            Running: {formatUptime(uptime)}
-          </div>
-        )}
+          <button
+            className="btn btn-secondary"
+            type="button"
+            onClick={handleReset}
+            disabled={isRunning}
+            style={{ width: '100%', marginTop: '0.75rem' }}
+          >
+            Clear Current Charts
+          </button>
 
-        {/* Parse Stats */}
-        <div style={{
-          padding: '0.75rem',
-          background: 'var(--bg-primary)',
-          borderRadius: '4px'
-        }}>
-          <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Parse Statistics</h4>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-            <span>Hard Parses:</span>
-            <span style={{ fontWeight: '600', color: '#ef4444' }}>{hardParses.toLocaleString()}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-            <span>Total Parses:</span>
-            <span style={{ fontWeight: '600' }}>{parseCount.toLocaleString()}</span>
-          </div>
-          {parseCount > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-              <span>Hard Parse Ratio:</span>
-              <span style={{ fontWeight: '600', color: (hardParses / parseCount) > 0.1 ? '#ef4444' : '#10b981' }}>
-                {((hardParses / parseCount) * 100).toFixed(1)}%
-              </span>
+          <div style={{
+            marginTop: '0.9rem',
+            padding: '0.8rem',
+            borderRadius: '10px',
+            background: 'rgba(15,23,42,0.55)',
+            border: '1px solid var(--border)'
+          }}>
+            <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.08em' }}>
+              Status
             </div>
-          )}
+            <div style={{ marginTop: '0.35rem', color: isRunning ? '#fca5a5' : 'var(--text-secondary)' }}>
+              {statusMessage || 'Idle'}
+            </div>
+            <div style={{ marginTop: '0.45rem', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+              Duration: {formatNumber(metrics.durationSeconds, 0)} sec
+            </div>
+            {metrics.lastError && (
+              <div style={{ marginTop: '0.45rem', fontSize: '0.8rem', color: '#fca5a5' }}>
+                Last error: {metrics.lastError}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Right Panel - Charts and Metrics */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto' }}>
-        {/* Top Row - Charts */}
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          {/* TPS Chart */}
-          <div style={{
-            flex: 1,
-            background: 'var(--surface)',
-            borderRadius: '8px',
-            padding: '1rem',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#f59e0b' }}>
-              Iterations/sec
-            </h3>
-            <div style={{ flex: 1, minHeight: '150px' }}>
-              <Line data={tpsChartData} options={chartOptions} />
+      <div style={{ flex: 1, display: 'grid', gap: '1rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
+          <MetricCard title="Calls / Sec" value={formatNumber(metrics.callsPerSecond, 2)} hint="Application-side execution rate" />
+          <MetricCard title="Avg Latency" value={`${formatNumber(metrics.avgLatencyMs, 2)} ms`} hint="Average call time for recent executions" />
+          <MetricCard title="AAS" value={formatNumber(sample?.averageActiveSessions || latestSummary?.averageActiveSessions, 2)} hint="DB time / elapsed time for the sampled interval" />
+          <MetricCard title="DB CPU Share" value={`${formatNumber(sample?.dbCpuSharePct || latestSummary?.dbCpuSharePct, 2)}%`} hint="How much of DB time remained on CPU" />
+          <MetricCard title="Hard Parses / Sec" value={formatNumber(sample?.parseHardPerSecond || latestSummary?.parseHardPerSecond, 2)} hint="Useful to spot parse storms around the procedure" />
+          <MetricCard title="Commits / Sec" value={formatNumber(sample?.commitRatePerSecond || latestSummary?.commitRatePerSecond, 2)} hint="Environment transaction rate during the run" />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem' }}>
+          <div style={cardStyle}>
+            <div style={{ marginBottom: '0.75rem', fontWeight: 600 }}>Calls per Second</div>
+            <div style={{ height: '240px' }}>
+              <Line data={lineData('Calls/sec', callsHistory, '#f97316', 'rgba(249,115,22,0.18)')} options={chartOptions} />
             </div>
           </div>
 
-          {/* Response Time Chart */}
-          <div style={{
-            flex: 1,
-            background: 'var(--surface)',
-            borderRadius: '8px',
-            padding: '1rem',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#ef4444' }}>
-              Response Time (ms)
-            </h3>
-            <div style={{ flex: 1, minHeight: '150px' }}>
-              <Line data={responseTimeChartData} options={chartOptions} />
+          <div style={cardStyle}>
+            <div style={{ marginBottom: '0.75rem', fontWeight: 600 }}>Latency</div>
+            <div style={{ height: '240px' }}>
+              <Line data={lineData('Latency', latencyHistory, '#ef4444', 'rgba(239,68,68,0.18)')} options={chartOptions} />
             </div>
           </div>
 
-          {/* Library Cache Events Panel */}
-          <div style={{
-            width: '280px',
-            background: 'var(--surface)',
-            borderRadius: '8px',
-            padding: '1rem'
-          }}>
-            <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: '#ef4444' }}>
-              Library Cache Contention
-            </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-              {keyEvents.map(event => {
-                const eventData = libraryCacheEvents[event];
-                const timeSeconds = eventData?.timeSeconds || 0;
+          <div style={cardStyle}>
+            <div style={{ marginBottom: '0.75rem', fontWeight: 600 }}>Average Active Sessions</div>
+            <div style={{ height: '240px' }}>
+              <Line data={lineData('AAS', aasHistory, '#38bdf8', 'rgba(56,189,248,0.16)')} options={chartOptions} />
+            </div>
+          </div>
+
+          <div style={cardStyle}>
+            <div style={{ marginBottom: '0.75rem', fontWeight: 600 }}>DB CPU Share</div>
+            <div style={{ height: '240px' }}>
+              <Line data={lineData('DB CPU %', cpuShareHistory, '#22c55e', 'rgba(34,197,94,0.16)')} options={chartOptions} />
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 1.2fr) minmax(280px, 0.8fr)', gap: '1rem' }}>
+          <div style={cardStyle}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.75rem' }}>
+              <div style={{ fontWeight: 600 }}>Top Waits for This Run</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                Delta time waited, not cumulative instance totals
+              </div>
+            </div>
+            <div style={{ height: '320px' }}>
+              <Bar
+                data={{
+                  labels: currentTopWaits.map((wait) => wait.event.length > 38 ? `${wait.event.slice(0, 38)}...` : wait.event),
+                  datasets: [{
+                    label: 'Time waited (s)',
+                    data: currentTopWaits.map((wait) => wait.timeWaitedSeconds || 0),
+                    backgroundColor: 'rgba(239,68,68,0.72)',
+                    borderColor: '#ef4444',
+                    borderWidth: 1
+                  }]
+                }}
+                options={waitChartOptions}
+              />
+            </div>
+          </div>
+
+          <div style={cardStyle}>
+            <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Tracked Wait Events</div>
+            <div style={{ display: 'grid', gap: '0.6rem' }}>
+              {KEY_WAIT_ORDER.map((eventName) => {
+                const wait = currentWaits.find((item) => item.event === eventName) || {
+                  timeWaitedSeconds: 0,
+                  totalWaits: 0
+                };
                 return (
-                  <div key={event} style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    fontSize: '0.75rem',
-                    padding: '0.2rem 0',
-                    borderBottom: '1px solid var(--border)'
-                  }}>
-                    <span style={{ color: 'var(--text-muted)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {event}:
-                    </span>
-                    <span style={{
-                      fontWeight: '600',
-                      color: timeSeconds > 1 ? '#ef4444' : timeSeconds > 0.1 ? '#f59e0b' : '#10b981'
-                    }}>
-                      {timeSeconds.toFixed(2)}s
-                    </span>
+                  <div
+                    key={eventName}
+                    style={{
+                      padding: '0.75rem',
+                      borderRadius: '10px',
+                      border: '1px solid var(--border)',
+                      background: 'rgba(15,23,42,0.45)'
+                    }}
+                  >
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{eventName}</div>
+                    <div style={{ marginTop: '0.35rem', fontSize: '1.1rem', fontWeight: 700 }}>
+                      {formatNumber(wait.timeWaitedSeconds, 3)} s
+                    </div>
+                    <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      waits: {formatNumber(wait.totalWaits, 0)}
+                    </div>
                   </div>
                 );
               })}
@@ -696,61 +728,144 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas }) {
           </div>
         </div>
 
-        {/* Summary Stats */}
-        <div style={{
-          display: 'flex',
-          gap: '1rem',
-          background: 'var(--surface)',
-          borderRadius: '8px',
-          padding: '1rem'
-        }}>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>
-              {metrics.tps.toLocaleString()}
-            </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Iterations/sec</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 1fr) minmax(320px, 1fr)', gap: '1rem' }}>
+          <div style={cardStyle}>
+            <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Latest Run Summary</div>
+            {latestSummary ? (
+              <div style={{ display: 'grid', gap: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                <div><strong style={{ color: 'white' }}>{latestSummary.runLabel}</strong> on <code>{latestSummary.qualifiedProcedure}</code></div>
+                <div>Started: {formatDateTime(latestSummary.startedAt)}</div>
+                <div>Finished: {formatDateTime(latestSummary.completedAt)}</div>
+                <div>Total calls: {formatNumber(latestSummary.totalCalls, 0)}</div>
+                <div>Errors: {formatNumber(latestSummary.errors, 0)}</div>
+                <div>User calls/sec: {formatNumber(latestSummary.userCallsPerSecond, 2)}</div>
+                <div>Execute count/sec: {formatNumber(latestSummary.executeCountPerSecond, 2)}</div>
+                <div>DB time: {formatNumber(latestSummary.dbTimeSeconds, 3)} s</div>
+                <div>DB CPU: {formatNumber(latestSummary.dbCpuSeconds, 3)} s</div>
+              </div>
+            ) : (
+              <div style={{ color: 'var(--text-muted)' }}>Stop a run to capture a compareable summary snapshot.</div>
+            )}
           </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#ef4444' }}>
-              {metrics.avgResponseTime.toFixed(2)}
-            </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Avg Response (ms)</div>
-          </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--accent-primary)' }}>
-              {metrics.totalCalls.toLocaleString()}
-            </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total Iterations</div>
-          </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: '#a855f7' }}>
-              {metrics.totalSelects.toLocaleString()}
-            </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>SELECTs (ORA-02289)</div>
-          </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: '700', color: metrics.errors > 0 ? 'var(--accent-danger)' : 'var(--text-muted)' }}>
-              {metrics.errors}
-            </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Other Errors</div>
+
+          <div style={cardStyle}>
+            <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Matched SQL</div>
+            {currentMatchedSql.length > 0 ? (
+              <div style={{ display: 'grid', gap: '0.75rem' }}>
+                {currentMatchedSql.map((sql) => (
+                  <div key={sql.sqlId} style={{ padding: '0.75rem', borderRadius: '10px', background: 'rgba(15,23,42,0.45)', border: '1px solid var(--border)' }}>
+                    <div style={{ fontWeight: 600 }}>{sql.sqlId}</div>
+                    <div style={{ marginTop: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>{sql.sqlText}</div>
+                    <div style={{ marginTop: '0.45rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      execs {formatNumber(sql.executions, 0)} | elapsed {formatNumber(sql.elapsedSeconds, 3)} s | CPU {formatNumber(sql.cpuSeconds, 3)} s
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ color: 'var(--text-muted)' }}>Run the workload to capture SQL rows that include the procedure call text.</div>
+            )}
           </div>
         </div>
 
-        {/* TOP 10 Wait Events Chart */}
-        {top10WaitEvents.length > 0 && (
-          <div style={{
-            background: 'var(--surface)',
-            borderRadius: '8px',
-            padding: '1rem'
-          }}>
-            <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-              TOP 10 Wait Events (RAC-wide)
-            </h3>
-            <div style={{ height: '280px' }}>
-              <Bar data={top10WaitEventsChartData} options={top10WaitEventsChartOptions} />
+        <div style={cardStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center', marginBottom: '1rem' }}>
+            <div>
+              <div style={{ fontWeight: 600 }}>Baseline vs Candidate Comparison</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                Save one run as baseline, change the procedure, run again, and compare wait deltas directly here.
+              </div>
+            </div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+              Saved runs: {savedRuns.length}
             </div>
           </div>
-        )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label>Baseline Run</label>
+              <select value={compareRunA} onChange={(e) => setCompareRunA(e.target.value)}>
+                <option value="">Select run</option>
+                {savedRuns.map((run) => (
+                  <option key={run.runId} value={run.runId}>
+                    {run.runLabel} - {new Date(run.completedAt).toLocaleTimeString()}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label>Candidate Run</label>
+              <select value={compareRunB} onChange={(e) => setCompareRunB(e.target.value)}>
+                <option value="">Select run</option>
+                {savedRuns.map((run) => (
+                  <option key={run.runId} value={run.runId}>
+                    {run.runLabel} - {new Date(run.completedAt).toLocaleTimeString()}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {compareSummaryA && compareSummaryB ? (
+            <div style={{ display: 'grid', gap: '1rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
+                {compareMetrics.map(([title, valueA, valueB, digits]) => {
+                  const delta = Number(valueB || 0) - Number(valueA || 0);
+                  const improving = title === 'Calls/sec'
+                    ? delta >= 0
+                    : delta <= 0;
+                  return (
+                    <div key={title} style={{ padding: '0.85rem', borderRadius: '10px', border: '1px solid var(--border)', background: 'rgba(15,23,42,0.45)' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{title}</div>
+                      <div style={{ marginTop: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        {compareSummaryA.runLabel}: {formatNumber(valueA, digits)}
+                      </div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        {compareSummaryB.runLabel}: {formatNumber(valueB, digits)}
+                      </div>
+                      <div style={{ marginTop: '0.4rem', color: improving ? '#22c55e' : '#fca5a5', fontWeight: 600 }}>
+                        Δ {formatNumber(delta, digits)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ color: 'var(--text-muted)', textAlign: 'left', fontSize: '0.78rem', textTransform: 'uppercase' }}>
+                      <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Wait Event</th>
+                      <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>{compareSummaryA.runLabel}</th>
+                      <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>{compareSummaryB.runLabel}</th>
+                      <th style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid var(--border)' }}>Delta (sec)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {waitComparisonRows.map((row) => (
+                      <tr key={row.event}>
+                        <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>{row.event}</td>
+                        <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)', color: 'var(--text-secondary)' }}>
+                          {formatNumber(row.aTime, 3)}
+                        </td>
+                        <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)', color: 'var(--text-secondary)' }}>
+                          {formatNumber(row.bTime, 3)}
+                        </td>
+                        <td style={{ padding: '0.7rem 0.6rem', borderBottom: '1px solid rgba(255,255,255,0.06)', color: row.delta <= 0 ? '#22c55e' : '#fca5a5', fontWeight: 600 }}>
+                          {formatNumber(row.delta, 3)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: 'var(--text-muted)' }}>
+              Save at least two finished runs to compare them here.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

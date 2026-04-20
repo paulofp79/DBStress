@@ -46,6 +46,81 @@ const getStressStatus = () => {
   };
 };
 
+const stripSqlTerminator = (sqlText = '') => {
+  const lines = String(sqlText).replace(/\r\n/g, '\n').split('\n');
+  while (lines.length > 0) {
+    const lastLine = lines[lines.length - 1].trim();
+    if (!lastLine) {
+      lines.pop();
+      continue;
+    }
+    if (lastLine === '/') {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join('\n').trim();
+};
+
+const extractProcedureIdentifier = (sqlText = '') => {
+  const normalized = String(sqlText).replace(/\s+/g, ' ');
+  const match = normalized.match(/\bPROCEDURE\s+((?:"[^"]+"|\w+)(?:\s*\.\s*(?:"[^"]+"|\w+))?)/i);
+  if (!match) {
+    return { owner: null, name: null };
+  }
+
+  const identifier = match[1].replace(/\s+/g, '');
+  const parts = identifier.split('.');
+  if (parts.length === 2) {
+    return {
+      owner: parts[0].replace(/^"+|"+$/g, '').toUpperCase(),
+      name: parts[1].replace(/^"+|"+$/g, '').toUpperCase()
+    };
+  }
+
+  return {
+    owner: null,
+    name: parts[0].replace(/^"+|"+$/g, '').toUpperCase()
+  };
+};
+
+const fetchProcedureErrors = async (identifier) => {
+  if (!identifier?.name) {
+    return [];
+  }
+
+  const binds = identifier.owner
+    ? { owner: identifier.owner, name: identifier.name }
+    : { name: identifier.name };
+
+  const result = await oracleDb.execute(
+    identifier.owner
+      ? `
+        SELECT line, position, text
+        FROM all_errors
+        WHERE owner = :owner
+          AND name = :name
+          AND type = 'PROCEDURE'
+        ORDER BY sequence
+      `
+      : `
+        SELECT line, position, text
+        FROM user_errors
+        WHERE name = :name
+          AND type = 'PROCEDURE'
+        ORDER BY sequence
+      `,
+    binds
+  );
+
+  return (result.rows || []).map((row) => ({
+    line: row.LINE,
+    position: row.POSITION,
+    text: row.TEXT
+  }));
+};
+
 // API Routes
 
 // Health check
@@ -482,6 +557,53 @@ app.get('/api/index-contention/status', (req, res) => {
 // Library Cache Lock Demo API Routes
 // ============================================
 
+app.post('/api/library-cache-lock/install-procedure', async (req, res) => {
+  const sqlText = stripSqlTerminator(req.body?.sqlText || '');
+
+  if (!sqlText) {
+    return res.status(400).json({ success: false, error: 'Procedure SQL is required' });
+  }
+
+  const identifier = extractProcedureIdentifier(sqlText);
+
+  try {
+    await oracleDb.execute(sqlText, [], { autoCommit: true });
+
+    const compileErrors = await fetchProcedureErrors(identifier);
+
+    if (compileErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Procedure compiled with errors',
+        procedure: identifier,
+        compileErrors
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Procedure ${identifier.name || ''} compiled successfully`.trim(),
+      procedure: identifier
+    });
+  } catch (error) {
+    if (identifier.name && String(error.message || '').includes('ORA-24344')) {
+      const compileErrors = await fetchProcedureErrors(identifier);
+      return res.status(400).json({
+        success: false,
+        error: 'Procedure compiled with errors',
+        procedure: identifier,
+        compileErrors
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      procedure: identifier
+    });
+  }
+});
+
 // Start library cache lock demo
 app.post('/api/library-cache-lock/start', async (req, res) => {
   const config = req.body;
@@ -496,8 +618,8 @@ app.post('/api/library-cache-lock/start', async (req, res) => {
 // Stop library cache lock demo
 app.post('/api/library-cache-lock/stop', async (req, res) => {
   try {
-    const stats = await libraryCacheLockEngine.stop();
-    res.json({ success: true, message: 'Library Cache Lock demo stopped', stats });
+    const result = await libraryCacheLockEngine.stop();
+    res.json({ success: true, message: 'Library Cache Lock demo stopped', ...result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -508,7 +630,8 @@ app.get('/api/library-cache-lock/status', (req, res) => {
   res.json({
     isRunning: libraryCacheLockEngine.isRunning,
     config: libraryCacheLockEngine.config,
-    stats: libraryCacheLockEngine.stats
+    stats: libraryCacheLockEngine.stats,
+    lastRunSummary: libraryCacheLockEngine.lastRunSummary
   });
 });
 
