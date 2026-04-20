@@ -80,6 +80,40 @@
             '<div class="status-box status-' + type + '">' + escapeHtml(message) + '</div>';
     }
 
+    function getRunNotes(run) {
+        return (run && run.notes_parsed) || {};
+    }
+
+    function getRunType(run) {
+        var notes = getRunNotes(run);
+        return notes.run_type === 'LOGIN_SIM' ? 'Login Simulation' : 'GC Workload';
+    }
+
+    function getRunScenario(run) {
+        var notes = getRunNotes(run);
+        if (notes.run_type === 'LOGIN_SIM') {
+            var sessionCase = notes.session_case || 'SIMPLE_QUERY';
+            var stopMode = notes.stop_mode || 'N/A';
+            return sessionCase + ' · ' + stopMode;
+        }
+        var schema = run.schema_name || run.table_prefix || '-';
+        var partition = run.partition_type || 'NONE';
+        var compression = run.compression || 'NONE';
+        return schema + ' · ' + partition + ' · ' + compression;
+    }
+
+    function getRunActivity(run) {
+        var notes = getRunNotes(run);
+        if (notes.run_type === 'LOGIN_SIM') {
+            return 'Logons ' + Number(notes.logons || 0).toLocaleString() +
+                ' · Queries ' + Number(notes.queries || 0).toLocaleString() +
+                ' · Cycles ' + Number(notes.cycles || 0).toLocaleString();
+        }
+        return 'I ' + Number(run.inserts || 0).toLocaleString() +
+            ' · U ' + Number(run.updates || 0).toLocaleString() +
+            ' · D ' + Number(run.deletes || 0).toLocaleString();
+    }
+
     function getCurrentWorkloadSeedRows() {
         var field = $('wl-seed-rows');
         var value = parseInt(((field || {}).value || '500'), 10);
@@ -614,6 +648,7 @@
             if (data.mode) $('conn-mode').value = data.mode;
             loadWorkloadStatus();
             loadLoginWorkloadStatus();
+            loadLoginProcedureStatus();
         } catch (e) { /* ignore */ }
     }
 
@@ -626,6 +661,7 @@
             loadRecentConnections();
             loadWorkloadStatus();
             loadLoginWorkloadStatus();
+            loadLoginProcedureStatus();
         }
     }
 
@@ -1079,7 +1115,9 @@
 
     function getLoginWorkloadConfig() {
         var stopModeRadio = document.querySelector('input[name="login-stop-mode"]:checked');
+        var sessionCaseRadio = document.querySelector('input[name="login-session-case"]:checked');
         var stopMode = stopModeRadio ? stopModeRadio.value : 'CYCLES';
+        var sessionCase = sessionCaseRadio ? sessionCaseRadio.value : 'SIMPLE_QUERY';
         return {
             sql_text: (($('login-sql-text') || {}).value || 'select 1 from dual').trim(),
             thread_count: parseInt((($('login-thread-count-input') || {}).value || ($('login-thread-count') || {}).value || '20'), 10) || 20,
@@ -1091,6 +1129,8 @@
                 ? (parseInt((($('login-duration-seconds') || {}).value || '300'), 10) || 300)
                 : 0,
             think_time_ms: parseInt((($('login-think-time-ms') || {}).value || '0'), 10) || 0,
+            session_case: sessionCase,
+            module_name: (($('login-module-name') || {}).value || 'DBSTRESS_LOGIN_SESSION_00000000').trim(),
         };
     }
 
@@ -1101,6 +1141,79 @@
         var iterationsRow = $('login-iterations-row');
         if (durationRow) durationRow.style.display = mode === 'DURATION' ? '' : 'none';
         if (iterationsRow) iterationsRow.style.display = mode === 'CYCLES' ? '' : 'none';
+    }
+
+    function updateLoginSessionCaseUI() {
+        var sessionCaseRadio = document.querySelector('input[name="login-session-case"]:checked');
+        var sessionCase = sessionCaseRadio ? sessionCaseRadio.value : 'SIMPLE_QUERY';
+        var moduleRow = $('login-module-name-row');
+        if (moduleRow) moduleRow.style.display = sessionCase === 'MFES_ONLINE' ? '' : 'none';
+    }
+
+    function renderLoginProcedureStatus(data) {
+        var el = $('login-procedure-status');
+        if (!el) return;
+
+        var ok = !!(data && data.ok);
+        var exists = !!(data && data.exists);
+        var valid = !!(data && data.valid);
+        var errors = (data && data.errors) || [];
+        var message = (data && data.message) || 'Unable to determine procedure status.';
+
+        el.className = 'status-box ' + (
+            valid ? 'status-success' :
+            (exists ? 'status-warning' : (ok ? 'status-info' : 'status-error'))
+        );
+
+        var html = '<b>GRAV_SESSION_MFES_ONLINE</b> · ' + escapeHtml(message);
+        if (errors.length) {
+            html += '<br>' + escapeHtml(errors.slice(0, 3).join(' | '));
+        }
+        el.innerHTML = html;
+    }
+
+    async function loadLoginProcedureStatus() {
+        try {
+            var data = await api('GET', '/api/login-workload/procedure/status');
+            renderLoginProcedureStatus(data);
+            return data;
+        } catch (e) {
+            renderLoginProcedureStatus({
+                ok: false,
+                exists: false,
+                valid: false,
+                message: 'Failed to check procedure status.',
+            });
+            return null;
+        }
+    }
+
+    async function createLoginProcedure() {
+        renderLoginProcedureStatus({
+            ok: true,
+            exists: false,
+            valid: false,
+            message: 'Creating procedure...',
+        });
+        var result = await api('POST', '/api/login-workload/procedure/create');
+        renderLoginProcedureStatus(result);
+        appendLoginWorkloadNotice(result.message || 'Procedure action completed.', result.ok ? 'success' : 'error');
+        loadLoginWorkloadStatus();
+    }
+
+    function dropLoginProcedure() {
+        confirmDialog('Drop GRAV_SESSION_MFES_ONLINE from the current schema?', async function () {
+            renderLoginProcedureStatus({
+                ok: true,
+                exists: true,
+                valid: false,
+                message: 'Dropping procedure...',
+            });
+            var result = await api('POST', '/api/login-workload/procedure/drop');
+            renderLoginProcedureStatus(result);
+            appendLoginWorkloadNotice(result.message || 'Procedure action completed.', result.ok ? 'success' : 'error');
+            loadLoginWorkloadStatus();
+        });
     }
 
     function resetLoginWorkloadDashboard() {
@@ -1120,6 +1233,16 @@
     async function startLoginWorkload() {
         if (loginWorkloadRunning) return;
 
+        var cfg = getLoginWorkloadConfig();
+        if (cfg.session_case === 'MFES_ONLINE') {
+            var procStatus = await loadLoginProcedureStatus();
+            if (!procStatus || !procStatus.valid) {
+                $('login-workload-summary').innerHTML =
+                    '<div class="status-box status-error">MFES Online requires the precreated procedure <b>GRAV_SESSION_MFES_ONLINE</b>. Create it first, then start the test again.</div>';
+                return;
+            }
+        }
+
         $('login-live-dashboard').style.display = 'block';
         $('login-workload-summary').innerHTML = '';
 
@@ -1136,7 +1259,7 @@
 
         ensureWebSocket();
 
-        var result = await api('POST', '/api/login-workload/start', getLoginWorkloadConfig());
+        var result = await api('POST', '/api/login-workload/start', cfg);
         if (!result.ok) {
             $('login-live-dashboard').style.display = 'none';
             $('login-workload-summary').innerHTML =
@@ -1186,6 +1309,7 @@
         var requestedThreads = Number(data.requested_threads || data.thread_count || 0).toLocaleString();
         var physicalWorkers = Number(data.physical_workers || 0).toLocaleString();
         var stopMode = String(data.stop_mode || 'CYCLES').toUpperCase();
+        var sessionCase = String(data.session_case || 'SIMPLE_QUERY').toUpperCase();
         var iterations = Number(data.iterations_per_thread || 0).toLocaleString();
         var targetSeconds = Number(data.duration_seconds || data.target_seconds || 0).toLocaleString();
         var cycles = Number(data.cycles || 0).toLocaleString();
@@ -1201,6 +1325,7 @@
 
         el.innerHTML =
             '<b>RUNNING login workload</b> ' +
+            'Case <b>' + escapeHtml(sessionCase) + '</b> · ' +
             'Threads <b>' + escapeHtml(requestedThreads) + '</b> · ' +
             'Physical Workers <b>' + escapeHtml(physicalWorkers) + '</b> · ' +
             'Stop <b>' + escapeHtml(stopLabel) + '</b> · ' +
@@ -1273,6 +1398,7 @@
         $('login-live-dashboard').style.display = 'none';
         renderRunningLoginWorkloadBanner(null);
 
+        var currentRunId = String(msg.run_id || '');
         var s = msg.summary || {};
         var targetCycles = Number(s.target_cycles || 0);
         var targetSeconds = Number(s.target_seconds || 0);
@@ -1280,31 +1406,79 @@
         var phase = String(s.phase || '').toUpperCase();
         var isStopped = phase === 'STOPPED' || phase === 'STOPPING';
         var title = isStopped ? 'Login Workload Stopped' : 'Login Workload Complete';
+        var sessionCase = String(s.session_case || 'SIMPLE_QUERY').toUpperCase();
 
-        var html = '<div class="summary-card">';
-        html += '<div class="summary-card-header">';
-        html += '<h3>&#10003; ' + escapeHtml(title) + '</h3>';
-        html += '<span class="summary-stats">';
-        html += 'Logons&nbsp;<b>' + Number(s.logons || 0).toLocaleString() + '</b>&emsp;';
-        html += 'Queries&nbsp;<b>' + Number(s.queries || 0).toLocaleString() + '</b>&emsp;';
-        html += 'Logouts&nbsp;<b>' + Number(s.logouts || 0).toLocaleString() + '</b>&emsp;';
-        html += 'Cycles&nbsp;<b>' + cycles.toLocaleString() + '</b>&emsp;';
-        html += 'Errors&nbsp;<b>' + Number(s.errors || 0).toLocaleString() + '</b>&emsp;';
-        html += 'Avg Cycle&nbsp;<b>' + Number(s.avg_cycle_ms || 0).toFixed(1) + ' ms</b>&emsp;';
-        html += 'Elapsed&nbsp;<b>' + Number(s.elapsed || 0).toFixed(1) + ' s</b>';
-        html += '</span>';
-        html += '</div>';
-        html += '<div class="status-box status-info" style="margin-top:0">';
-        html += 'Target: <b>' + escapeHtml(
-            targetCycles > 0
-                ? (targetCycles.toLocaleString() + ' cycles')
-                : (targetSeconds > 0 ? (targetSeconds.toLocaleString() + ' sec') : 'until stop')
-        ) + '</b> · Completed cycles: <b>' + escapeHtml(cycles.toLocaleString()) + '</b>';
-        if (s.status_message) {
-            html += ' · Status: <b>' + escapeHtml(s.status_message) + '</b>';
-        }
-        html += '</div></div>';
-        $('login-workload-summary').innerHTML = html;
+        api('GET', '/api/results').then(function (data) {
+            var runs = (data.runs || []).filter(function (run) {
+                return getRunNotes(run).run_type === 'LOGIN_SIM';
+            }).sort(function (a, b) {
+                return a.run_id - b.run_id;
+            });
+
+            var html = '<div class="summary-card">';
+            html += '<div class="summary-card-header">';
+            html += '<h3>&#10003; ' + escapeHtml(title) + (currentRunId ? (' #' + escapeHtml(currentRunId)) : '') + '</h3>';
+            html += '<span class="summary-stats">';
+            html += 'Case&nbsp;<b>' + escapeHtml(sessionCase) + '</b>&emsp;';
+            html += 'Logons&nbsp;<b>' + Number(s.logons || 0).toLocaleString() + '</b>&emsp;';
+            html += 'Queries&nbsp;<b>' + Number(s.queries || 0).toLocaleString() + '</b>&emsp;';
+            html += 'Logouts&nbsp;<b>' + Number(s.logouts || 0).toLocaleString() + '</b>&emsp;';
+            html += 'Cycles&nbsp;<b>' + cycles.toLocaleString() + '</b>&emsp;';
+            html += 'Errors&nbsp;<b>' + Number(s.errors || 0).toLocaleString() + '</b>&emsp;';
+            html += 'Avg Cycle&nbsp;<b>' + Number(s.avg_cycle_ms || 0).toFixed(1) + ' ms</b>&emsp;';
+            html += 'Elapsed&nbsp;<b>' + Number(s.elapsed || 0).toFixed(1) + ' s</b>';
+            html += '</span>';
+            html += '</div>';
+            html += '<div class="status-box status-info" style="margin-top:0">';
+            html += 'Target: <b>' + escapeHtml(
+                targetCycles > 0
+                    ? (targetCycles.toLocaleString() + ' cycles')
+                    : (targetSeconds > 0 ? (targetSeconds.toLocaleString() + ' sec') : 'until stop')
+            ) + '</b> · Completed cycles: <b>' + escapeHtml(cycles.toLocaleString()) + '</b>';
+            if (s.status_message) {
+                html += ' · Status: <b>' + escapeHtml(s.status_message) + '</b>';
+            }
+            html += '</div>';
+
+            if (runs.length > 0) {
+                html += '<div class="table-wrap summary-table-wrap"><table class="data-table summary-compare-table">';
+                html += '<thead><tr>';
+                html += '<th>Run</th><th class="text-col">Case</th><th class="text-col">Stop</th><th>Threads</th><th>Dur</th><th class="text-col">Activity</th>';
+                html += '<th class="num col-primary">gc curr congested ★</th><th class="num">gc curr 3-way</th><th class="num">gc cr congested</th>';
+                html += '</tr></thead><tbody>';
+
+                runs.forEach(function (run) {
+                    var notes = getRunNotes(run);
+                    var parsed = run.gc_metrics_parsed || {};
+                    var agg = parsed.delta_aggregated || {};
+                    var isCurrent = String(run.run_id) === currentRunId;
+                    html += '<tr class="' + (isCurrent ? 'row-current' : '') + '">';
+                    html += '<td><b>#' + run.run_id + '</b>' + (isCurrent ? ' <span class="badge-new">NEW</span>' : '') + '</td>';
+                    html += '<td class="text-col">' + escapeHtml(notes.session_case || 'SIMPLE_QUERY') + '</td>';
+                    html += '<td class="text-col">' + escapeHtml(notes.stop_mode || '-') + '</td>';
+                    html += '<td>' + Number(run.thread_count || 0).toLocaleString() + '</td>';
+                    html += '<td>' + Number(run.duration_secs || 0).toFixed(1) + 's</td>';
+                    html += '<td class="text-col">' + escapeHtml(getRunActivity(run)) + '</td>';
+                    html += '<td class="num col-primary">' + Number(agg['gc current block congested'] || 0).toLocaleString() + '</td>';
+                    html += '<td class="num">' + Number(agg['gc current block 3-way'] || 0).toLocaleString() + '</td>';
+                    html += '<td class="num">' + Number(agg['gc cr grant congested'] || 0).toLocaleString() + '</td>';
+                    html += '</tr>';
+                });
+
+                html += '</tbody></table></div>';
+            }
+
+            html += '</div>';
+            $('login-workload-summary').innerHTML = html;
+            loadResults();
+        }).catch(function () {
+            var html = '<div class="summary-card">';
+            html += '<div class="summary-card-header">';
+            html += '<h3>&#10003; ' + escapeHtml(title) + '</h3>';
+            html += '<span class="summary-stats">Case&nbsp;<b>' + escapeHtml(sessionCase) + '</b></span>';
+            html += '</div></div>';
+            $('login-workload-summary').innerHTML = html;
+        });
     }
 
     async function loadLoginWorkloadStatus() {
@@ -1316,6 +1490,7 @@
                 $('btn-stop-login-workload').disabled = true;
                 $('login-live-dashboard').style.display = 'none';
                 renderRunningLoginWorkloadBanner(null);
+                loadLoginProcedureStatus();
                 return;
             }
 
@@ -1327,6 +1502,11 @@
             $('btn-start-login-workload').disabled = running || otherConnectionRunning;
             $('btn-stop-login-workload').disabled = !running;
             renderRunningLoginWorkloadBanner(data);
+            if (data.procedure_status) {
+                renderLoginProcedureStatus(data.procedure_status);
+            } else {
+                loadLoginProcedureStatus();
+            }
 
             if (running) {
                 $('login-live-dashboard').style.display = 'block';
@@ -1341,6 +1521,7 @@
             $('btn-stop-login-workload').disabled = true;
             $('login-live-dashboard').style.display = 'none';
             renderRunningLoginWorkloadBanner(null);
+            loadLoginProcedureStatus();
         }
     }
 
@@ -1837,9 +2018,9 @@
         }
 
         if (runs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="14"><div class="empty-state">' +
+            tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">' +
                 '<div class="empty-icon">&#128202;</div>' +
-                'No benchmark runs yet.<br>Complete a workload run to see results here.' +
+                'No benchmark runs yet.<br>Complete a workload or login-simulation run to see results here.' +
                 '</div></td></tr>';
             return;
         }
@@ -1874,12 +2055,11 @@
                 '<td>#' + r.run_id + '</td>' +
                 '<td class="text-col">' + escapeHtml(date) + '</td>' +
                 '<td class="text-col">' + startedFinished + '</td>' +
-                '<td class="text-col">' + escapeHtml(r.schema_name || '-') + '</td>' +
-                '<td>' + (r.table_count || '-') + '</td>' +
-                '<td class="text-col">' + escapeHtml(r.partition_type || '-') + '</td>' +
-                '<td class="text-col">' + escapeHtml(r.compression || '-') + '</td>' +
-                '<td>' + (r.thread_count || '-') + '</td>' +
-                '<td>' + (r.duration_secs || '-') + 's</td>' +
+                '<td class="text-col">' + escapeHtml(getRunType(r)) + '</td>' +
+                '<td class="text-col">' + escapeHtml(getRunScenario(r)) + '</td>' +
+                '<td class="text-col">' + escapeHtml(getRunActivity(r)) + '</td>' +
+                '<td>' + Number(r.thread_count || 0).toLocaleString() + '</td>' +
+                '<td>' + Number(r.duration_secs || 0).toFixed(1) + 's</td>' +
                 '<td class="num col-primary">' + (agg['gc current block congested'] || 0).toLocaleString() + '</td>' +
                 '<td class="num">' + (agg['gc current block 3-way'] || 0).toLocaleString() + '</td>' +
                 '<td class="num">' + (agg['gc cr grant congested'] || 0).toLocaleString() + '</td>' +
@@ -1901,8 +2081,8 @@
     /**
      * Build and render the comparison chart.
      * Always focused on "gc current block congested" — one horizontal bar per run,
-     * labeled with partition / compression / thread-count / duration so differences
-     * between schema configurations are immediately visible.
+     * labeled with scenario / layout / thread-count / duration so differences
+     * between runs are immediately visible.
      */
     function renderCompareChart(data) {
         if (!data || !data.labels || data.labels.length === 0) return;
@@ -1995,6 +2175,9 @@
                                 var d   = data.details && data.details[idx];
                                 if (!d) return [];
                                 return [
+                                    '  type               : ' + (d.run_type || '-'),
+                                    '  scenario           : ' + (d.scenario || '-'),
+                                    '  layout             : ' + (d.layout || '-'),
                                     '',
                                     '  gc curr congested : ' + (d.gc_congested || 0).toLocaleString(),
                                     '  gc curr 3-way     : ' + (d.gc_3way      || 0).toLocaleString(),
@@ -2243,6 +2426,10 @@
         document.querySelectorAll('input[name="login-stop-mode"]').forEach(function (radio) {
             radio.addEventListener('change', updateLoginStopModeUI);
         });
+        document.querySelectorAll('input[name="login-session-case"]').forEach(function (radio) {
+            radio.addEventListener('change', updateLoginSessionCaseUI);
+        });
+        updateLoginSessionCaseUI();
         updateLoginStopModeUI();
 
         // Schema select dropdown
@@ -2264,6 +2451,9 @@
         // Workload buttons
         $('btn-start-workload').addEventListener('click', startWorkload);
         $('btn-stop-workload').addEventListener('click', stopWorkload);
+        $('btn-create-login-procedure').addEventListener('click', createLoginProcedure);
+        $('btn-refresh-login-procedure').addEventListener('click', loadLoginProcedureStatus);
+        $('btn-drop-login-procedure').addEventListener('click', dropLoginProcedure);
         $('btn-start-login-workload').addEventListener('click', startLoginWorkload);
         $('btn-stop-login-workload').addEventListener('click', stopLoginWorkload);
 
