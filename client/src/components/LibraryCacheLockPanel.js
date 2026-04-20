@@ -434,6 +434,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
   const currentWaits = sample?.keyWaits || latestSummary?.keyWaits || [];
   const currentTopWaits = sample?.topWaitEvents || latestSummary?.topWaitEvents || [];
   const currentRoutes = metrics.routeMetrics.length > 0 ? metrics.routeMetrics : (latestSummary?.routes || []);
+  const latestProcedureSql = latestSummary?.matchedSql?.[0] || null;
 
   const compareSummaryA = useMemo(
     () => savedRuns.find((run) => run.runId === compareRunA) || null,
@@ -1196,6 +1197,13 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 <div>Connections opened: {formatNumber(latestSummary.totalLogons, 0)}</div>
                 <div>User calls/sec: {formatNumber(latestSummary.userCallsPerSecond, 2)}</div>
                 <div>Execute count/sec: {formatNumber(latestSummary.executeCountPerSecond, 2)}</div>
+                {latestProcedureSql && (
+                  <>
+                    <div>Procedure SQL_ID: {latestProcedureSql.sqlId}</div>
+                    <div>Procedure execs/sec: {formatNumber(latestProcedureSql.execsPerSecond, 2)}</div>
+                    <div>Procedure avg ms/exec: {formatNumber(latestProcedureSql.avgElapsedMs, 3)}</div>
+                  </>
+                )}
               </div>
             ) : (
               <div style={{ color: 'var(--text-muted)' }}>Stop a run to capture a saved summary.</div>
@@ -1203,7 +1211,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
           </div>
 
           <div style={cardStyle}>
-            <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Matched SQL</div>
+            <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Procedure SQL Stats (v$sqlstats)</div>
             {(latestSummary?.matchedSql || []).length > 0 ? (
               <div style={{ display: 'grid', gap: '0.7rem' }}>
                 {latestSummary.matchedSql.map((sql) => (
@@ -1211,13 +1219,19 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                     <div style={{ fontWeight: 600 }}>{sql.sqlId}</div>
                     <div style={{ marginTop: '0.35rem', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{sql.sqlText}</div>
                     <div style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                      execs {formatNumber(sql.executions, 0)} | elapsed {formatNumber(sql.elapsedSeconds, 3)} s | CPU {formatNumber(sql.cpuSeconds, 3)} s
+                      execs {formatNumber(sql.executions, 0)} | execs/sec {formatNumber(sql.execsPerSecond, 2)} | avg {formatNumber(sql.avgElapsedMs, 3)} ms | CPU avg {formatNumber(sql.avgCpuMs, 3)} ms
+                    </div>
+                    <div style={{ marginTop: '0.35rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      elapsed {formatNumber(sql.elapsedSeconds, 3)} s | CPU {formatNumber(sql.cpuSeconds, 3)} s | gets {formatNumber(sql.bufferGets, 0)} | reads {formatNumber(sql.diskReads, 0)} | rows {formatNumber(sql.rowsProcessed, 0)}
+                    </div>
+                    <div style={{ marginTop: '0.35rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      instances {formatNumber(sql.instanceCount, 0)} | last active {formatDateTime(sql.lastActiveTime)}
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div style={{ color: 'var(--text-muted)' }}>Procedure-call SQL will appear here after a run.</div>
+              <div style={{ color: 'var(--text-muted)' }}>Procedure-call SQL_ID stats from v$sqlstats will appear here after a run.</div>
             )}
           </div>
         </div>

@@ -1261,7 +1261,7 @@ class LibraryCacheLockEngine {
       executeCountPerSecond: Number((executeCount / durationSeconds).toFixed(2)),
       keyWaits,
       topWaitEvents,
-      matchedSql: this.computeSqlDelta(startSnapshot.targetSql, endSnapshot.targetSql)
+      matchedSql: this.computeSqlDelta(startSnapshot.targetSql, endSnapshot.targetSql, durationSeconds)
     };
   }
 
@@ -1275,35 +1275,59 @@ class LibraryCacheLockEngine {
     return total;
   }
 
-  computeSqlDelta(startMap, endMap) {
+  computeSqlDelta(startMap, endMap, durationSeconds = 0.001) {
     const sqlRows = [];
 
     for (const [sqlId, current] of endMap.entries()) {
       const previous = startMap.get(sqlId) || {
         executions: 0,
         elapsedTime: 0,
-        cpuTime: 0
+        cpuTime: 0,
+        bufferGets: 0,
+        diskReads: 0,
+        rowsProcessed: 0
       };
 
       const executions = Math.max(0, current.executions - previous.executions);
       const elapsedSeconds = Math.max(0, current.elapsedTime - previous.elapsedTime) / 1e6;
       const cpuSeconds = Math.max(0, current.cpuTime - previous.cpuTime) / 1e6;
+      const bufferGets = Math.max(0, current.bufferGets - previous.bufferGets);
+      const diskReads = Math.max(0, current.diskReads - previous.diskReads);
+      const rowsProcessed = Math.max(0, current.rowsProcessed - previous.rowsProcessed);
 
-      if (executions <= 0 && elapsedSeconds <= 0 && cpuSeconds <= 0) {
+      if (executions <= 0 && elapsedSeconds <= 0 && cpuSeconds <= 0 && bufferGets <= 0 && diskReads <= 0 && rowsProcessed <= 0) {
         continue;
       }
 
       sqlRows.push({
         sqlId,
         executions,
+        execsPerSecond: Number((executions / Math.max(durationSeconds, 0.001)).toFixed(2)),
         elapsedSeconds: Number(elapsedSeconds.toFixed(3)),
         cpuSeconds: Number(cpuSeconds.toFixed(3)),
+        avgElapsedMs: executions > 0
+          ? Number(((elapsedSeconds * 1000) / executions).toFixed(3))
+          : 0,
+        avgCpuMs: executions > 0
+          ? Number(((cpuSeconds * 1000) / executions).toFixed(3))
+          : 0,
+        bufferGets,
+        diskReads,
+        rowsProcessed,
+        instanceCount: current.instIds?.size || 0,
+        lastActiveTime: current.lastActiveTimeMs
+          ? new Date(current.lastActiveTimeMs).toISOString()
+          : null,
         sqlText: current.sqlText
       });
     }
 
     return sqlRows
-      .sort((a, b) => b.elapsedSeconds - a.elapsedSeconds)
+      .sort((a, b) => (
+        b.executions - a.executions ||
+        b.elapsedSeconds - a.elapsedSeconds ||
+        b.cpuSeconds - a.cpuSeconds
+      ))
       .slice(0, 10);
   }
 
@@ -1344,11 +1368,24 @@ class LibraryCacheLockEngine {
         executions: 0,
         elapsedTime: 0,
         cpuTime: 0,
+        bufferGets: 0,
+        diskReads: 0,
+        rowsProcessed: 0,
+        lastActiveTimeMs: 0,
+        instIds: new Set(),
         sqlText: row.SQL_TEXT
       };
       current.executions += Number(row.EXECUTIONS || 0);
       current.elapsedTime += Number(row.ELAPSED_TIME || 0);
       current.cpuTime += Number(row.CPU_TIME || 0);
+      current.bufferGets += Number(row.BUFFER_GETS || 0);
+      current.diskReads += Number(row.DISK_READS || 0);
+      current.rowsProcessed += Number(row.ROWS_PROCESSED || 0);
+      const lastActiveTimeMs = row.LAST_ACTIVE_TIME ? new Date(row.LAST_ACTIVE_TIME).getTime() : 0;
+      if (Number.isFinite(lastActiveTimeMs) && lastActiveTimeMs > current.lastActiveTimeMs) {
+        current.lastActiveTimeMs = lastActiveTimeMs;
+      }
+      current.instIds.add(Number(row.INST_ID || 1));
       current.sqlText = current.sqlText || row.SQL_TEXT;
       snapshot.targetSql.set(row.SQL_ID, current);
     }
@@ -1469,6 +1506,9 @@ class LibraryCacheLockEngine {
             executions,
             elapsed_time,
             cpu_time,
+            buffer_gets,
+            disk_reads,
+            rows_processed,
             SUBSTR(sql_text, 1, 200) AS sql_text,
             last_active_time
           FROM gv$sqlstats
@@ -1485,6 +1525,9 @@ class LibraryCacheLockEngine {
             executions,
             elapsed_time,
             cpu_time,
+            buffer_gets,
+            disk_reads,
+            rows_processed,
             SUBSTR(sql_text, 1, 200) AS sql_text,
             last_active_time
           FROM v$sqlstats
