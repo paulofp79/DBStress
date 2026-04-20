@@ -163,6 +163,28 @@ const buildWaitMap = (summary) => {
   return map;
 };
 
+const extractProcedureIdentifier = (sqlText) => {
+  const normalized = String(sqlText || '').replace(/\s+/g, ' ');
+  const match = normalized.match(/\bPROCEDURE\s+((?:"[^"]+"|\w+)(?:\s*\.\s*(?:"[^"]+"|\w+))?)/i);
+  if (!match) {
+    return null;
+  }
+
+  return match[1].replace(/\s+/g, '');
+};
+
+const replaceProcedureIdentifier = (sqlText, nextIdentifier) => {
+  const currentIdentifier = extractProcedureIdentifier(sqlText);
+  if (!currentIdentifier) {
+    throw new Error('Could not find the procedure name in the SQL text');
+  }
+
+  return String(sqlText).replace(
+    new RegExp(`(\\bPROCEDURE\\s+)${currentIdentifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i'),
+    `$1${nextIdentifier}`
+  );
+};
+
 function MetricCard({ title, value, hint }) {
   return (
     <div style={{
@@ -424,6 +446,52 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
       setStatusMessage(data.message || 'Procedure compiled');
     } catch (err) {
       setStatusMessage(`Compile error: ${err.message}`);
+    } finally {
+      setIsInstalling(false);
+    }
+  };
+
+  const handleCompileSplitProcedures = async () => {
+    try {
+      setIsInstalling(true);
+      setStatusMessage('Compiling split procedures...');
+
+      const baseIdentifier = extractProcedureIdentifier(procedureSql);
+      if (!baseIdentifier) {
+        throw new Error('The SQL text must contain a CREATE OR REPLACE PROCEDURE statement');
+      }
+
+      const compileTargets = config.services.map((service, index) => {
+        const procedureName = (service.procedureName || `GRAV_SESSION_MFES_ONLINE_${index + 1}`).trim().toUpperCase();
+        const procedureOwner = (service.procedureOwner || '').trim().toUpperCase();
+        const fullIdentifier = procedureOwner ? `${procedureOwner}.${procedureName}` : procedureName;
+        return {
+          index,
+          label: service.name || `Service ${index + 1}`,
+          fullIdentifier,
+          sqlText: replaceProcedureIdentifier(procedureSql, fullIdentifier)
+        };
+      });
+
+      for (const target of compileTargets) {
+        const response = await fetch(`${API_BASE}/library-cache-lock/install-procedure`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sqlText: target.sqlText })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          const compileErrors = (data.compileErrors || [])
+            .map((err) => `line ${err.line}:${err.position} ${err.text}`)
+            .join(' | ');
+          throw new Error(`${target.fullIdentifier}: ${compileErrors || data.error || 'Compilation failed'}`);
+        }
+      }
+
+      setStatusMessage(`Compiled ${compileTargets.length} split procedures from ${baseIdentifier}`);
+    } catch (err) {
+      setStatusMessage(`Split compile error: ${err.message}`);
     } finally {
       setIsInstalling(false);
     }
@@ -816,6 +884,23 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
           >
             {isInstalling ? 'Compiling...' : 'Compile Current Procedure'}
           </button>
+
+          {config.scenario === 'split-services' && (
+            <>
+              <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                Split option: this will clone the base procedure SQL into the 4 configured names like <code>GRAV_SESSION_MFES_ONLINE_1</code> to <code>GRAV_SESSION_MFES_ONLINE_4</code>.
+              </div>
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={handleCompileSplitProcedures}
+                disabled={isRunning || isInstalling}
+                style={{ width: '100%', marginTop: '0.75rem' }}
+              >
+                {isInstalling ? 'Compiling...' : 'Create 4 Split Procedures'}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
