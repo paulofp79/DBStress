@@ -207,6 +207,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
     loginMode: 'dedicated',
     runLabel: 'Scenario 1 Baseline',
     threads: 1000,
+    durationMinutes: 0,
     loopDelay: 0,
     schemaPrefix: '',
     modulePrefix: 'MFES',
@@ -650,6 +651,18 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             </div>
 
             <div className="form-group">
+              <label>Run Time (min)</label>
+              <input
+                type="number"
+                min="0"
+                max="1440"
+                value={config.durationMinutes}
+                onChange={(e) => setConfig((prev) => ({ ...prev, durationMinutes: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
+                disabled={isRunning}
+              />
+            </div>
+
+            <div className="form-group">
               <label>Loop Delay (ms)</label>
               <input
                 type="number"
@@ -1047,6 +1060,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 <div><strong style={{ color: 'white' }}>{latestSummary.runLabel}</strong></div>
                 <div>Scenario: {latestSummary.scenario}</div>
                 <div>Login mode: {latestSummary.loginMode}</div>
+                <div>Configured run time: {latestSummary.durationMinutes > 0 ? `${latestSummary.durationMinutes} min` : 'manual stop'}</div>
                 <div>Started: {formatDateTime(latestSummary.startedAt)}</div>
                 <div>Finished: {formatDateTime(latestSummary.completedAt)}</div>
                 <div>Total transactions: {formatNumber(latestSummary.totalTransactions, 0)}</div>

@@ -37,6 +37,26 @@ const average = (values = []) => (
   values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
 );
 
+const AUTH_ERROR_CODES = [
+  'ORA-01017',
+  'ORA-28000',
+  'ORA-28001',
+  'ORA-28002',
+  'ORA-28003',
+  'ORA-28040'
+];
+
+const REQUIRED_WORKLOAD_TABLES = [
+  'ORDERS',
+  'CUSTOMERS',
+  'PRODUCTS',
+  'INVENTORY',
+  'PRODUCT_REVIEWS',
+  'ORDER_HISTORY',
+  'ORDER_ITEMS',
+  'WAREHOUSES'
+];
+
 class LibraryCacheLockEngine {
   constructor() {
     this.isRunning = false;
@@ -52,11 +72,13 @@ class LibraryCacheLockEngine {
 
     this.statsInterval = null;
     this.waitEventsInterval = null;
+    this.autoStopTimer = null;
     this.runStartSnapshot = null;
     this.lastSampleSnapshot = null;
     this.latestSample = null;
     this.lastRunSummary = null;
     this.runId = null;
+    this.stopPromise = null;
   }
 
   createEmptyStats() {
@@ -156,6 +178,7 @@ class LibraryCacheLockEngine {
       modulePrefix,
       schemaPrefix,
       waitSampleSeconds: clampInt(config.waitSampleSeconds, 2, 30, 5),
+      durationMinutes: clampInt(config.durationMinutes, 0, 1440, 0),
       selectsPerTxn: clampInt(config.selectsPerTxn, 1, 10, 2),
       insertsPerTxn: clampInt(config.insertsPerTxn, 0, 10, 1),
       updatesPerTxn: clampInt(config.updatesPerTxn, 0, 10, 1),
@@ -181,6 +204,62 @@ class LibraryCacheLockEngine {
 
   getTablePrefix() {
     return this.config.schemaPrefix ? `${this.config.schemaPrefix}_` : '';
+  }
+
+  isAuthError(err) {
+    const message = String(err?.message || '');
+    return AUTH_ERROR_CODES.some((code) => message.includes(code));
+  }
+
+  buildRequiredTableNames() {
+    const prefix = this.getTablePrefix();
+    return REQUIRED_WORKLOAD_TABLES.map((tableName) => `${prefix}${tableName}`);
+  }
+
+  async validateWorkloadTables(connection, route) {
+    const requiredTableNames = this.buildRequiredTableNames();
+    const binds = {};
+    const placeholders = requiredTableNames.map((tableName, index) => {
+      const bindName = `tableName${index}`;
+      binds[bindName] = tableName;
+      return `:${bindName}`;
+    });
+
+    const result = await connection.execute(
+      `
+        SELECT table_name
+        FROM user_tables
+        WHERE table_name IN (${placeholders.join(', ')})
+      `,
+      binds,
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    const existing = new Set((result.rows || []).map((row) => row.TABLE_NAME));
+    const missing = requiredTableNames.filter((tableName) => !existing.has(tableName));
+
+    if (missing.length > 0) {
+      throw new Error(
+        `Route ${route.name} is missing workload tables: ${missing.join(', ')}. ` +
+        `Check the service/PDB and schema prefix before starting the run.`
+      );
+    }
+  }
+
+  async stopForReason(reason, options = {}) {
+    const { fatal = false } = options;
+    if (this.stopPromise) {
+      return this.stopPromise;
+    }
+
+    this.stats.lastError = reason;
+    this.emitStatus(`${fatal ? 'Fatal error' : 'Stopping'}: ${reason}`);
+    this.stopPromise = this.stop();
+    try {
+      await this.stopPromise;
+    } finally {
+      this.stopPromise = null;
+    }
   }
 
   async start(db, incomingConfig, io) {
@@ -228,6 +307,14 @@ class LibraryCacheLockEngine {
       this.config.waitSampleSeconds * 1000
     );
 
+    if (this.config.durationMinutes > 0) {
+      this.autoStopTimer = setTimeout(() => {
+        this.stopForReason(`Configured runtime of ${this.config.durationMinutes} minute(s) reached`).catch((err) => {
+          console.log('Auto-stop error:', err.message);
+        });
+      }, this.config.durationMinutes * 60 * 1000);
+    }
+
     this.emitStatus(`Running ${this.config.threads.toLocaleString()} sessions across ${this.routes.length} route(s)`, {
       config: this.config,
       routes: this.describeRoutes()
@@ -272,6 +359,8 @@ class LibraryCacheLockEngine {
           throw new Error(`Procedure ${this.qualifyProcedure(route)} not found on ${route.connectionString}`);
         }
 
+        await this.validateWorkloadTables(connection, route);
+
         try {
           const instanceResult = await connection.execute(
             `SELECT instance_name FROM v$instance`,
@@ -308,8 +397,15 @@ class LibraryCacheLockEngine {
   async createRoutePools() {
     for (const route of this.routes) {
       const poolSize = Math.max(2, route.stats.assignedWorkers + 2);
-      const pool = await this.db.createStressPool(poolSize, { connectionString: route.connectionString });
-      this.routePools.set(route.id, pool);
+      try {
+        const pool = await this.db.createStressPool(poolSize, { connectionString: route.connectionString });
+        this.routePools.set(route.id, pool);
+      } catch (err) {
+        if (this.isAuthError(err)) {
+          throw new Error(`Authentication failed for ${route.name}: ${err.message}`);
+        }
+        throw err;
+      }
     }
   }
 
@@ -385,6 +481,10 @@ class LibraryCacheLockEngine {
         route.stats.totalErrors += 1;
         this.stats.totalErrors += 1;
         this.stats.lastError = err.message;
+        if (this.isAuthError(err)) {
+          await this.stopForReason(`Authentication/account error on ${route.name}: ${err.message}`, { fatal: true });
+          return;
+        }
         if (!String(err.message).includes('pool is terminating')) {
           console.log(`Library Cache Lock connection error on ${route.name}:`, err.message);
         }
@@ -402,10 +502,24 @@ class LibraryCacheLockEngine {
       if (!pool) {
         throw new Error(`No pool available for ${route.name}`);
       }
-      return await pool.getConnection();
+      try {
+        return await pool.getConnection();
+      } catch (err) {
+        if (this.isAuthError(err)) {
+          throw new Error(`Authentication failed on pooled route ${route.name}: ${err.message}`);
+        }
+        throw err;
+      }
     }
 
-    return await this.db.createDirectConnection({ connectionString: route.connectionString });
+    try {
+      return await this.db.createDirectConnection({ connectionString: route.connectionString });
+    } catch (err) {
+      if (this.isAuthError(err)) {
+        throw new Error(`Authentication failed on route ${route.name}: ${err.message}`);
+      }
+      throw err;
+    }
   }
 
   async executeBusinessTransaction(connection, route, workerId, iteration) {
@@ -735,6 +849,11 @@ class LibraryCacheLockEngine {
       this.waitEventsInterval = null;
     }
 
+    if (this.autoStopTimer) {
+      clearTimeout(this.autoStopTimer);
+      this.autoStopTimer = null;
+    }
+
     await this.sleep(250);
 
     let finalSnapshot = null;
@@ -812,6 +931,7 @@ class LibraryCacheLockEngine {
       scenario: this.config?.scenario || 'single-service',
       loginMode: this.config?.loginMode || 'dedicated',
       schemaPrefix: this.config?.schemaPrefix || '',
+      durationMinutes: this.config?.durationMinutes || 0,
       startedAt: this.stats.startTime ? new Date(this.stats.startTime).toISOString() : null,
       completedAt: new Date().toISOString(),
       durationSeconds: Number(durationSeconds.toFixed(2)),
@@ -844,6 +964,7 @@ class LibraryCacheLockEngine {
       scenario: this.config.scenario,
       loginMode: this.config.loginMode,
       schemaPrefix: this.config.schemaPrefix,
+      durationMinutes: this.config.durationMinutes,
       startedAt: new Date(this.stats.startTime).toISOString(),
       completedAt: new Date().toISOString(),
       totalTransactions: this.stats.totalTransactions,
