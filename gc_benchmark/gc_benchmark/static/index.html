@@ -921,6 +921,44 @@
 
                     <div id="running-login-workload-banner" class="status-box status-warning" style="display:none; margin-top:12px"></div>
 
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">Session Case</span>
+                            <span class="field-desc">Choose whether each login only runs the validation query, or first applies the MFES online session settings before the query.</span>
+                        </div>
+                        <div class="field-right">
+                            <div class="segment-control">
+                                <label><input type="radio" name="login-session-case" value="SIMPLE_QUERY" checked><span class="seg-label">Simple Query</span></label>
+                                <label><input type="radio" name="login-session-case" value="MFES_ONLINE"><span class="seg-label">MFES Online</span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field-inline" id="login-module-name-row" style="display:none">
+                        <div class="field-left">
+                            <span class="field-name">MFES Module Name</span>
+                            <span class="field-desc">Base module name passed into the precreated `GRAV_SESSION_MFES_ONLINE` procedure. The runner adds a worker/cycle suffix automatically for uniqueness.</span>
+                        </div>
+                        <div class="field-right">
+                            <input type="text" id="login-module-name" value="DBSTRESS_LOGIN_SESSION_00000000" style="width:320px;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="field-inline">
+                        <div class="field-left">
+                            <span class="field-name">MFES Procedure</span>
+                            <span class="field-desc">Create the stored procedure once before MFES Online tests, or drop it to rerun the simple-login case without it.</span>
+                        </div>
+                        <div class="field-right" style="display:flex; flex-direction:column; align-items:flex-end; gap:10px; min-width:340px">
+                            <div class="btn-group">
+                                <button class="btn btn-secondary" id="btn-create-login-procedure">Create Procedure</button>
+                                <button class="btn btn-ghost" id="btn-refresh-login-procedure">Refresh Status</button>
+                                <button class="btn btn-danger" id="btn-drop-login-procedure">Drop Procedure</button>
+                            </div>
+                            <div id="login-procedure-status" class="status-box status-info" style="margin:0; width:100%">Checking procedure status...</div>
+                        </div>
+                    </div>
+
                     <div class="field-inline field-inline-top">
                         <div class="field-left">
                             <span class="field-name">Simple Query</span>
@@ -1078,10 +1116,9 @@
                                     <th>Run</th>
                                     <th>Date</th>
                                     <th class="text-col">Started / Finished</th>
-                                    <th class="text-col">Schema</th>
-                                    <th>Tables</th>
-                                    <th class="text-col">Partition</th>
-                                    <th class="text-col">Compress</th>
+                                    <th class="text-col">Type</th>
+                                    <th class="text-col">Scenario</th>
+                                    <th class="text-col">Activity</th>
                                     <th>Threads</th>
                                     <th>Dur</th>
                                     <th class="num col-primary" title="gc current block congested — primary comparison metric">gc curr congested ★</th>
@@ -1091,10 +1128,10 @@
                                 </tr>
                             </thead>
                             <tbody id="results-body">
-                                <tr><td colspan="14">
+                                <tr><td colspan="13">
                                     <div class="empty-state">
                                         <div class="empty-icon">&#128202;</div>
-                                        No benchmark runs yet.<br>Complete a workload run to see results here.
+                                        No benchmark runs yet.<br>Complete a workload or login-simulation run to see results here.
                                     </div>
                                 </td></tr>
                             </tbody>
@@ -1105,7 +1142,7 @@
                 <div class="chart-wrap" id="compare-chart-container" style="display:none">
                     <div class="chart-title">
                         gc current block congested — Waits Comparison
-                        <span class="chart-subtitle">One bar per run · labelled by Partition / Compression / Threads / Duration · 🟢 low &nbsp; 🟡 mid &nbsp; 🔴 high</span>
+                        <span class="chart-subtitle">One bar per run · labelled by scenario / layout / threads / duration · 🟢 low &nbsp; 🟡 mid &nbsp; 🔴 high</span>
                     </div>
                     <div class="chart-area" id="compare-chart-area">
                         <canvas id="compare-chart"></canvas>

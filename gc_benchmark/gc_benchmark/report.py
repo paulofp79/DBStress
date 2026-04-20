@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS gc_snapshots (
 """
 
 
+def _parse_json_field(value: Any) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 async def init_db(db_path: str) -> None:
     """Create tables if they do not already exist."""
     async with aiosqlite.connect(db_path) as db:
@@ -63,6 +73,8 @@ async def init_db(db_path: str) -> None:
             await db.execute("ALTER TABLE benchmark_runs ADD COLUMN schema_name TEXT")
         if "table_prefix" not in col_names:
             await db.execute("ALTER TABLE benchmark_runs ADD COLUMN table_prefix TEXT")
+        if "notes" not in col_names:
+            await db.execute("ALTER TABLE benchmark_runs ADD COLUMN notes TEXT")
         await db.execute("PRAGMA journal_mode=WAL")
         await db.commit()
 
@@ -93,6 +105,7 @@ async def save_run(
     gc_delta_aggregated: dict[str, int],
     before_snapshot: dict[str, dict[str, int]],
     after_snapshot: dict[str, dict[str, int]],
+    notes: str = "",
 ) -> int:
     """Persist a completed run and its GC snapshots.  Returns the run_id."""
     gc_metrics_json = json.dumps({
@@ -107,14 +120,14 @@ async def save_run(
                 (started_at, finished_at, duration_secs, schema_name, table_prefix, table_count,
                  partition_type, partition_detail, compression,
                  thread_count, hot_row_pct, inserts, updates, deletes,
-                 errors, gc_metrics)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 errors, gc_metrics, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 started_at, finished_at, duration_secs, schema_name, table_prefix, table_count,
                 partition_type, partition_detail, compression,
                 thread_count, hot_row_pct, inserts, updates, deletes,
-                errors, gc_metrics_json,
+                errors, gc_metrics_json, notes,
             ),
         )
         run_id = cursor.lastrowid
@@ -160,12 +173,8 @@ async def list_runs(db_path: str) -> list[dict]:
         results = []
         for row in rows:
             d = dict(row)
-            # Parse gc_metrics JSON for convenience
-            if d.get("gc_metrics"):
-                try:
-                    d["gc_metrics_parsed"] = json.loads(d["gc_metrics"])
-                except (json.JSONDecodeError, TypeError):
-                    d["gc_metrics_parsed"] = {}
+            d["gc_metrics_parsed"] = _parse_json_field(d.get("gc_metrics"))
+            d["notes_parsed"] = _parse_json_field(d.get("notes"))
             results.append(d)
         return results
 
@@ -182,11 +191,8 @@ async def get_run(db_path: str, run_id: int) -> Optional[dict]:
         if not row:
             return None
         d = dict(row)
-        if d.get("gc_metrics"):
-            try:
-                d["gc_metrics_parsed"] = json.loads(d["gc_metrics"])
-            except (json.JSONDecodeError, TypeError):
-                d["gc_metrics_parsed"] = {}
+        d["gc_metrics_parsed"] = _parse_json_field(d.get("gc_metrics"))
+        d["notes_parsed"] = _parse_json_field(d.get("notes"))
         return d
 
 
@@ -233,37 +239,40 @@ async def compare_runs(db_path: str, run_ids: list[int]) -> dict:
                 continue
 
             r = dict(row)
-            gc_parsed: dict = {}
-            if r.get("gc_metrics"):
-                try:
-                    gc_parsed = json.loads(r["gc_metrics"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            gc_parsed = _parse_json_field(r.get("gc_metrics"))
+            notes = _parse_json_field(r.get("notes"))
 
             delta_agg = gc_parsed.get("delta_aggregated", {})
-            part     = r.get("partition_type") or "NONE"
-            comp     = r.get("compression")    or "NONE"
-            threads  = r.get("thread_count")   or "?"
-            dur      = int(r.get("duration_secs") or 0)
-            schema   = r.get("schema_name")    or "?"
+            threads = r.get("thread_count") or "?"
+            dur = int(r.get("duration_secs") or 0)
+            run_type = str(notes.get("run_type") or "GC_WORKLOAD")
+            if run_type == "LOGIN_SIM":
+                schema = "Login Simulation"
+                scenario = str(notes.get("session_case") or "SIMPLE_QUERY")
+                layout = str(notes.get("stop_mode") or "N/A")
+            else:
+                schema = r.get("schema_name") or "?"
+                scenario = r.get("partition_type") or "NONE"
+                layout = r.get("compression") or "NONE"
 
             # Short label shown on the chart axis
-            label = f"#{rid} | {schema} | {part} / {comp} / {threads}t / {dur}s"
+            label = f"#{rid} | {schema} | {scenario} / {layout} / {threads}t / {dur}s"
             labels.append(label)
 
             congested = delta_agg.get(TARGET_EVENT, 0)
             values.append(congested)
 
             details.append({
-                "run_id":       rid,
-                "schema_name":  schema,
-                "partition":    part,
-                "compression":  comp,
-                "threads":      threads,
-                "duration":     dur,
+                "run_id": rid,
+                "run_type": run_type,
+                "schema_name": schema,
+                "scenario": scenario,
+                "layout": layout,
+                "threads": threads,
+                "duration": dur,
                 "gc_congested": congested,
-                "gc_3way":      delta_agg.get("gc current block 3-way", 0),
-                "gc_cr":        delta_agg.get("gc cr grant congested", 0),
+                "gc_3way": delta_agg.get("gc current block 3-way", 0),
+                "gc_cr": delta_agg.get("gc cr grant congested", 0),
             })
 
     return {
@@ -289,8 +298,9 @@ async def export_csv(db_path: str) -> str:
     # Header
     header = [
         "run_id", "started_at", "finished_at", "duration_secs", "schema_name",
-        "table_count", "partition_type", "partition_detail", "compression",
+        "run_type", "scenario", "table_count", "partition_type", "partition_detail", "compression",
         "thread_count", "hot_row_pct", "inserts", "updates", "deletes", "errors",
+        "logons", "queries", "logouts", "cycles", "avg_cycle_ms",
         "gc_curr_congested", "gc_curr_3way", "gc_cr_congested",
     ]
     writer.writerow(header)
@@ -300,6 +310,13 @@ async def export_csv(db_path: str) -> str:
         parsed = r.get("gc_metrics_parsed", {})
         if parsed:
             delta_agg = parsed.get("delta_aggregated", {})
+        notes = r.get("notes_parsed", {})
+        run_type = notes.get("run_type", "GC_WORKLOAD")
+        scenario = (
+            notes.get("session_case", "")
+            if run_type == "LOGIN_SIM"
+            else (r.get("partition_type") or "")
+        )
 
         writer.writerow([
             r.get("run_id"),
@@ -307,6 +324,8 @@ async def export_csv(db_path: str) -> str:
             r.get("finished_at"),
             r.get("duration_secs"),
             r.get("schema_name"),
+            run_type,
+            scenario,
             r.get("table_count"),
             r.get("partition_type"),
             r.get("partition_detail"),
@@ -317,6 +336,11 @@ async def export_csv(db_path: str) -> str:
             r.get("updates"),
             r.get("deletes"),
             r.get("errors"),
+            notes.get("logons", 0),
+            notes.get("queries", 0),
+            notes.get("logouts", 0),
+            notes.get("cycles", 0),
+            notes.get("avg_cycle_ms", 0),
             delta_agg.get("gc current block congested", 0),
             delta_agg.get("gc current block 3-way", 0),
             delta_agg.get("gc cr grant congested", 0),

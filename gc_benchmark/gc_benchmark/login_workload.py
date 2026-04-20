@@ -25,6 +25,39 @@ from oracle_session import (
 )
 
 _MAX_LOGIN_WORKERS = MAX_WORKERS_PER_PROCESS
+_DEFAULT_LOGIN_SESSION_CASE = "SIMPLE_QUERY"
+_MFES_SESSION_CASE = "MFES_ONLINE"
+_DEFAULT_LOGIN_MODULE_NAME = "DBSTRESS_LOGIN_SESSION_00000000"
+_MFES_PROCEDURE_NAME = "GRAV_SESSION_MFES_ONLINE"
+
+
+def _normalize_session_case(value: str) -> str:
+    session_case = str(value or _DEFAULT_LOGIN_SESSION_CASE).strip().upper()
+    if session_case not in {_DEFAULT_LOGIN_SESSION_CASE, _MFES_SESSION_CASE}:
+        return _DEFAULT_LOGIN_SESSION_CASE
+    return session_case
+
+
+def _build_session_module_name(base_name: str, worker_idx: int, iteration: int) -> str:
+    base = (base_name or _DEFAULT_LOGIN_MODULE_NAME).strip() or _DEFAULT_LOGIN_MODULE_NAME
+    suffix = f"W{worker_idx:04d}C{iteration:08d}"
+    prefix_len = max(0, 48 - len(suffix) - 1)
+    trimmed = base[:prefix_len].rstrip("_-")
+    if not trimmed:
+        trimmed = "DBSTRESS"
+    return f"{trimmed}_{suffix}"[:48]
+
+
+def call_mfes_online_session_procedure(cur: oracledb.Cursor, module_name: str) -> None:
+    """Invoke the precreated MFES session procedure."""
+    cur.execute(
+        """
+        BEGIN
+            GRAV_SESSION_MFES_ONLINE(:module_name);
+        END;
+        """,
+        module_name=module_name,
+    )
 
 
 @dataclass
@@ -42,6 +75,8 @@ class LoginWorkloadConfig:
     duration_seconds: int = 0
     think_time_ms: int = 0
     call_timeout_ms: int = DEFAULT_CALL_TIMEOUT_MS
+    session_case: str = _DEFAULT_LOGIN_SESSION_CASE
+    module_name: str = _DEFAULT_LOGIN_MODULE_NAME
 
 
 @dataclass
@@ -248,6 +283,7 @@ class LoginWorkloadRunner:
         """Repeatedly connect, execute one query, and disconnect."""
         assert self._config is not None
         cfg = self._config
+        session_case = _normalize_session_case(cfg.session_case)
         iteration = 0
 
         try:
@@ -275,13 +311,18 @@ class LoginWorkloadRunner:
                     self.status.add_active(1)
                     self.status.record_logon()
 
-                    try:
-                        conn.module = "LOGIN_WORKLOAD_SIM"
-                        conn.action = f"worker-{worker_idx}"
-                    except Exception:
-                        pass
-
                     cur = conn.cursor()
+                    if session_case == _MFES_SESSION_CASE:
+                        call_mfes_online_session_procedure(
+                            cur,
+                            _build_session_module_name(cfg.module_name, worker_idx, iteration),
+                        )
+                    else:
+                        try:
+                            conn.module = "LOGIN_WORKLOAD_SIM"
+                            conn.action = f"worker-{worker_idx}"
+                        except Exception:
+                            pass
                     cur.arraysize = 1
                     cur.execute(cfg.sql_text)
                     cur.fetchmany(1)

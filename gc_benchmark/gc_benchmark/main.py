@@ -50,7 +50,11 @@ from metrics import (
     GC_SYSTEM_EVENTS,
     PRIMARY_GC_EVENTS,
 )
-from login_workload import LoginWorkloadConfig
+from login_workload import (
+    LoginWorkloadConfig,
+    _MFES_PROCEDURE_NAME,
+    call_mfes_online_session_procedure,
+)
 from oracle_session import (
     MAX_TOTAL_GC_WORKERS,
     MAX_TOTAL_LOGIN_WORKERS,
@@ -194,12 +198,170 @@ def _normalize_login_sql(sql_text: str) -> str:
     return sql
 
 
-def _validate_login_query(sql_text: str, state: Optional[dict] = None) -> None:
-    """Run the login-simulation query once before starting many workers."""
+def _normalize_login_session_case(value: str) -> str:
+    session_case = str(value or "SIMPLE_QUERY").strip().upper()
+    if session_case not in {"SIMPLE_QUERY", "MFES_ONLINE"}:
+        return "SIMPLE_QUERY"
+    return session_case
+
+
+def _normalize_login_module_name(value: str) -> str:
+    module_name = str(value or "DBSTRESS_LOGIN_SESSION_00000000").strip()
+    return module_name[:48] or "DBSTRESS_LOGIN_SESSION_00000000"
+
+
+def _login_workload_procedure_ddl() -> str:
+    return f"""
+CREATE OR REPLACE PROCEDURE {_MFES_PROCEDURE_NAME} (pModuleName VARCHAR2)
+IS
+    pActionName      VARCHAR2(14);
+    pModuleName_mod  VARCHAR2(48);
+BEGIN
+    pActionName := 'MFES_ONLINE';
+
+    pModuleName_mod := substr(pModuleName, 1, 22)
+                       || '0000000'
+                       || substr(pModuleName, 22 + 8);
+
+    DBMS_APPLICATION_INFO.SET_MODULE(pModuleName_mod, pActionName);
+    DBMS_SESSION.SET_IDENTIFIER(pModuleName);
+
+    EXECUTE IMMEDIATE 'ALTER SESSION SET OPTIMIZER_MODE = first_rows_1';
+    EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_use_feedback" = false';
+    EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_adaptive_cursor_sharing" = false';
+    EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_extended_cursor_sharing_rel" = none';
+END;
+"""
+
+
+def _get_login_procedure_status(state: Optional[dict] = None) -> dict:
+    if not (state or _conn_state).get("password"):
+        return {
+            "ok": False,
+            "exists": False,
+            "valid": False,
+            "name": _MFES_PROCEDURE_NAME,
+            "message": "No password is set for this session.",
+        }
+
     conn = connect_from_state(state or _conn_state)
     try:
         cur = conn.cursor()
         try:
+            cur.execute(
+                """
+                SELECT status
+                FROM user_objects
+                WHERE object_type = 'PROCEDURE'
+                  AND object_name = :name
+                """,
+                name=_MFES_PROCEDURE_NAME,
+            )
+            row = cur.fetchone()
+            exists = bool(row)
+            valid = bool(row and str(row[0]).upper() == "VALID")
+            errors: list[str] = []
+            if exists and not valid:
+                cur.execute(
+                    """
+                    SELECT line, position, text
+                    FROM user_errors
+                    WHERE type = 'PROCEDURE'
+                      AND name = :name
+                    ORDER BY sequence
+                    """,
+                    name=_MFES_PROCEDURE_NAME,
+                )
+                errors = [
+                    f"line {line}:{position} {text}"
+                    for line, position, text in cur.fetchall()
+                ]
+
+            message = (
+                f"Procedure {_MFES_PROCEDURE_NAME} is ready."
+                if valid else
+                (f"Procedure {_MFES_PROCEDURE_NAME} exists but is INVALID."
+                 if exists else
+                 f"Procedure {_MFES_PROCEDURE_NAME} is not created.")
+            )
+            return {
+                "ok": True,
+                "exists": exists,
+                "valid": valid,
+                "name": _MFES_PROCEDURE_NAME,
+                "errors": errors,
+                "message": message,
+            }
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def _create_login_procedure(state: Optional[dict] = None) -> dict:
+    conn = connect_from_state(state or _conn_state)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(_login_workload_procedure_ddl())
+        finally:
+            cur.close()
+        conn.commit()
+    finally:
+        conn.close()
+    return _get_login_procedure_status(state)
+
+
+def _drop_login_procedure(state: Optional[dict] = None) -> dict:
+    conn = connect_from_state(state or _conn_state)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                BEGIN
+                    EXECUTE IMMEDIATE 'DROP PROCEDURE {_MFES_PROCEDURE_NAME}';
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        IF SQLCODE != -4043 THEN
+                            RAISE;
+                        END IF;
+                END;
+                """
+            )
+        finally:
+            cur.close()
+        conn.commit()
+    finally:
+        conn.close()
+    status = _get_login_procedure_status(state)
+    status["message"] = f"Procedure {_MFES_PROCEDURE_NAME} dropped."
+    return status
+
+
+def _validate_login_workload(
+    sql_text: str,
+    *,
+    session_case: str = "SIMPLE_QUERY",
+    module_name: str = "DBSTRESS_LOGIN_SESSION_00000000",
+    state: Optional[dict] = None,
+) -> None:
+    """Run the login-simulation path once before starting many workers."""
+    conn = connect_from_state(state or _conn_state)
+    try:
+        cur = conn.cursor()
+        try:
+            if _normalize_login_session_case(session_case) == "MFES_ONLINE":
+                call_mfes_online_session_procedure(
+                    cur,
+                    _normalize_login_module_name(module_name),
+                )
+            else:
+                try:
+                    conn.module = "LOGIN_WORKLOAD_SIM"
+                    conn.action = "preflight"
+                except Exception:
+                    pass
             cur.arraysize = 1
             cur.execute(sql_text)
             cur.fetchmany(1)
@@ -2979,7 +3141,21 @@ async def login_workload_start(body: dict):
     connection_state = build_connection_state(_conn_state)
     try:
         sql_text = _normalize_login_sql(body.get("sql_text", "select 1 from dual"))
-        _validate_login_query(sql_text, state=connection_state)
+        session_case = _normalize_login_session_case(body.get("session_case", "SIMPLE_QUERY"))
+        module_name = _normalize_login_module_name(body.get("module_name", "DBSTRESS_LOGIN_SESSION_00000000"))
+        if session_case == "MFES_ONLINE":
+            proc_status = _get_login_procedure_status(connection_state)
+            if not proc_status.get("valid"):
+                raise ValueError(
+                    f"Procedure {_MFES_PROCEDURE_NAME} is not ready. "
+                    "Create it from the Login Simulation tab before starting MFES Online tests."
+                )
+        _validate_login_workload(
+            sql_text,
+            session_case=session_case,
+            module_name=module_name,
+            state=connection_state,
+        )
     except Exception as exc:
         return {"ok": False, "message": f"Preflight query failed: {exc}"}
 
@@ -2998,10 +3174,14 @@ async def login_workload_start(body: dict):
         iterations_per_thread=max(0, int(body.get("iterations_per_thread", 1000))),
         duration_seconds=max(0, int(body.get("duration_seconds", 0))),
         think_time_ms=max(0, min(60000, int(body.get("think_time_ms", 0)))),
+        session_case=session_case,
+        module_name=module_name,
     )
 
     loop = asyncio.get_event_loop()
     login_connection_key = _connection_key_from_state(connection_state)
+    started_at = datetime.now(timezone.utc).isoformat()
+    before_snapshot: dict = {}
 
     def on_progress(status_dict: dict):
         asyncio.run_coroutine_threadsafe(
@@ -3030,18 +3210,73 @@ async def login_workload_start(body: dict):
         )
 
     def on_complete(final_status: dict):
-        asyncio.run_coroutine_threadsafe(
-            _broadcast(
+        after_snapshot: dict = {}
+        try:
+            conn = connect_from_state(connection_state)
+            after_snapshot = snapshot_system_events(conn)
+            conn.close()
+        except Exception:
+            pass
+
+        delta = compute_delta(before_snapshot, after_snapshot)
+        delta_agg = compute_aggregated_delta(before_snapshot, after_snapshot)
+        finished_at = datetime.now(timezone.utc).isoformat()
+
+        login_notes = json.dumps({
+            "run_type": "LOGIN_SIM",
+            "session_case": cfg.session_case,
+            "module_name": cfg.module_name,
+            "sql_text": cfg.sql_text,
+            "stop_mode": cfg.stop_mode,
+            "think_time_ms": cfg.think_time_ms,
+            "logons": int(final_status.get("logons", 0) or 0),
+            "queries": int(final_status.get("queries", 0) or 0),
+            "logouts": int(final_status.get("logouts", 0) or 0),
+            "cycles": int(final_status.get("cycles", 0) or 0),
+            "avg_cycle_ms": float(final_status.get("avg_cycle_ms", 0) or 0),
+        })
+
+        async def _save():
+            run_id = await report.save_run(
+                DB_PATH,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_secs=float(final_status.get("elapsed", 0) or 0),
+                schema_name="Login Simulation",
+                table_prefix="LOGIN",
+                table_count=0,
+                partition_type=cfg.session_case,
+                partition_detail=cfg.stop_mode,
+                compression="N/A",
+                thread_count=cfg.thread_count,
+                hot_row_pct=0,
+                inserts=0,
+                updates=0,
+                deletes=0,
+                errors=int(final_status.get("errors", 0) or 0),
+                gc_delta=delta,
+                gc_delta_aggregated=delta_agg,
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                notes=login_notes,
+            )
+            await _broadcast(
                 _workload_message(
                     {
                         "type": "login_complete",
-                        "summary": final_status,
+                        "run_id": run_id,
+                        "summary": {
+                            **final_status,
+                            "gc_delta": delta_agg,
+                            "session_case": cfg.session_case,
+                            "module_name": cfg.module_name,
+                        },
                     },
                     login_connection_key,
                 )
-            ),
-            loop,
-        )
+            )
+
+        asyncio.run_coroutine_threadsafe(_save(), loop)
 
     _login_runner = ShardedSubprocessController(
         job_type="login",
@@ -3075,6 +3310,13 @@ async def login_workload_start(body: dict):
     controller = _login_runner
 
     try:
+        conn = connect_from_state(connection_state)
+        before_snapshot.update(snapshot_system_events(conn))
+        conn.close()
+    except Exception:
+        before_snapshot = {}
+
+    try:
         controller.start()
     except Exception as exc:
         _login_runner = None
@@ -3083,8 +3325,8 @@ async def login_workload_start(body: dict):
     return {
         "ok": True,
         "message": (
-            f"Login workload simulation started using {controller._worker_count} physical workers "
-            f"across {controller._process_count} child processes."
+            f"Login workload simulation started in {cfg.session_case} mode using "
+            f"{controller._worker_count} physical workers across {controller._process_count} child processes."
         ),
     }
 
@@ -3097,6 +3339,77 @@ async def login_workload_stop():
         return {"ok": False, "message": "No login workload simulation is running."}
     result = _login_runner.stop()
     return {"ok": True, "status": result}
+
+
+@app.get("/api/login-workload/procedure/status")
+async def login_workload_procedure_status():
+    """Return the status of the optional MFES login procedure."""
+    try:
+        status = _get_login_procedure_status()
+        return status
+    except Exception as exc:
+        return {
+            "ok": False,
+            "exists": False,
+            "valid": False,
+            "name": _MFES_PROCEDURE_NAME,
+            "message": f"Failed to check procedure status: {exc}",
+        }
+
+
+@app.post("/api/login-workload/procedure/create")
+async def login_workload_procedure_create():
+    """Create or replace the MFES login procedure in the current schema."""
+    if not _conn_state.get("password"):
+        return {
+            "ok": False,
+            "message": (
+                "No password is set for this session. "
+                "Go to the Connection tab, enter your password, and click 'Test Connection' first."
+            ),
+        }
+    try:
+        status = _create_login_procedure()
+        status["ok"] = bool(status.get("valid"))
+        status["message"] = (
+            f"Procedure {_MFES_PROCEDURE_NAME} created successfully."
+            if status.get("valid")
+            else status.get("message", f"Procedure {_MFES_PROCEDURE_NAME} created.")
+        )
+        return status
+    except Exception as exc:
+        return {
+            "ok": False,
+            "exists": False,
+            "valid": False,
+            "name": _MFES_PROCEDURE_NAME,
+            "message": f"Failed to create procedure: {exc}",
+        }
+
+
+@app.post("/api/login-workload/procedure/drop")
+async def login_workload_procedure_drop():
+    """Drop the MFES login procedure from the current schema."""
+    if not _conn_state.get("password"):
+        return {
+            "ok": False,
+            "message": (
+                "No password is set for this session. "
+                "Go to the Connection tab, enter your password, and click 'Test Connection' first."
+            ),
+        }
+    try:
+        status = _drop_login_procedure()
+        status["ok"] = True
+        return status
+    except Exception as exc:
+        return {
+            "ok": False,
+            "exists": True,
+            "valid": False,
+            "name": _MFES_PROCEDURE_NAME,
+            "message": f"Failed to drop procedure: {exc}",
+        }
 
 
 @app.get("/api/login-workload/status")
@@ -3153,8 +3466,21 @@ async def login_workload_status(
             "duration_seconds": getattr(cfg, "duration_seconds", 0),
             "think_time_ms": getattr(cfg, "think_time_ms", 0),
             "sql_text": getattr(cfg, "sql_text", ""),
+            "session_case": getattr(cfg, "session_case", "SIMPLE_QUERY"),
+            "module_name": getattr(cfg, "module_name", ""),
             "execution_model": "dedicated child-process workers",
         })
+    try:
+        payload["procedure_status"] = _get_login_procedure_status(
+            getattr(_login_runner, "_connection_state", None) or _conn_state
+        )
+    except Exception:
+        payload["procedure_status"] = {
+            "ok": False,
+            "exists": False,
+            "valid": False,
+            "name": _MFES_PROCEDURE_NAME,
+        }
     return payload
 
 
