@@ -767,7 +767,7 @@ class LibraryCacheLockEngine {
     const productReviewsTable = this.getQualifiedTableName('product_reviews');
 
     if (type === 0) {
-      const orderId = await this.getRandomId(connection, ordersTable, 'order_id');
+      const orderId = await this.getWorkerScopedId(connection, ordersTable, 'order_id', workerId, insertIndex);
       if (!orderId) return;
 
       await connection.execute(
@@ -794,8 +794,8 @@ class LibraryCacheLockEngine {
       return;
     }
 
-    const productId = await this.getRandomId(connection, productsTable, 'product_id');
-    const customerId = await this.getRandomId(connection, customersTable, 'customer_id');
+    const productId = await this.getWorkerScopedId(connection, productsTable, 'product_id', workerId, insertIndex);
+    const customerId = await this.getWorkerScopedId(connection, customersTable, 'customer_id', workerId, insertIndex + 17);
     if (!productId || !customerId) return;
 
     await connection.execute(
@@ -832,7 +832,7 @@ class LibraryCacheLockEngine {
     const inventoryTable = this.getQualifiedTableName('inventory');
 
     if (type === 0) {
-      const orderId = await this.getRandomId(connection, ordersTable, 'order_id');
+      const orderId = await this.getWorkerScopedId(connection, ordersTable, 'order_id', workerId, updateIndex);
       if (!orderId) return;
 
       const statuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
@@ -849,7 +849,7 @@ class LibraryCacheLockEngine {
     }
 
     if (type === 1) {
-      const customerId = await this.getRandomId(connection, customersTable, 'customer_id');
+      const customerId = await this.getWorkerScopedId(connection, customersTable, 'customer_id', workerId, updateIndex + 31);
       if (!customerId) return;
 
       await connection.execute(
@@ -866,7 +866,7 @@ class LibraryCacheLockEngine {
       return;
     }
 
-    const inventoryId = await this.getRandomId(connection, inventoryTable, 'inventory_id');
+    const inventoryId = await this.getWorkerScopedId(connection, inventoryTable, 'inventory_id', workerId, updateIndex + 53);
     if (!inventoryId) return;
 
     await connection.execute(
@@ -888,7 +888,7 @@ class LibraryCacheLockEngine {
     const orderHistoryTable = this.getQualifiedTableName('order_history');
 
     if (type === 0) {
-      const reviewId = await this.getRandomId(connection, productReviewsTable, 'review_id');
+      const reviewId = await this.getWorkerScopedId(connection, productReviewsTable, 'review_id', workerId, deleteIndex);
       if (!reviewId) return;
 
       await connection.execute(
@@ -899,7 +899,7 @@ class LibraryCacheLockEngine {
       return;
     }
 
-    const historyId = await this.getRandomId(connection, orderHistoryTable, 'history_id');
+    const historyId = await this.getWorkerScopedId(connection, orderHistoryTable, 'history_id', workerId, deleteIndex + 19);
     if (!historyId) return;
 
     await connection.execute(
@@ -930,6 +930,32 @@ class LibraryCacheLockEngine {
     } catch (err) {
       return null;
     }
+  }
+
+  async getWorkerScopedId(connection, tableName, idColumn, workerId = 0, salt = 0) {
+    const shardCounts = [1024, 256, 64, 16, 4];
+
+    for (const shardCount of shardCounts) {
+      const bucket = Math.abs(workerId + salt) % shardCount;
+      try {
+        const scopedResult = await connection.execute(
+          `SELECT MIN(${idColumn}) AS id_value
+           FROM ${tableName}
+           WHERE MOD(${idColumn}, :shardCount) = :bucket`,
+          { shardCount, bucket },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+        );
+
+        const scopedId = scopedResult.rows?.[0]?.ID_VALUE;
+        if (scopedId !== undefined && scopedId !== null) {
+          return scopedId;
+        }
+      } catch (err) {
+        // Fall back to a broader selection if the modulo path is not suitable.
+      }
+    }
+
+    return this.getRandomId(connection, tableName, idColumn);
   }
 
   reportStats() {
