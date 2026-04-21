@@ -1192,6 +1192,10 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 <div>Peak sessions: {formatNumber(latestSummary.peakSessions, 0)}</div>
                 <div>Started: {formatDateTime(latestSummary.startedAt)}</div>
                 <div>Finished: {formatDateTime(latestSummary.completedAt)}</div>
+                <div>AWR begin snap_id: {latestSummary.awrBeginSnapId ?? '-'}</div>
+                <div>AWR end snap_id: {latestSummary.awrEndSnapId ?? '-'}</div>
+                <div>AWR DBID: {latestSummary.awrDbid ?? '-'}</div>
+                <div>AWR instances: {Array.isArray(latestSummary.awrInstanceNumbers) && latestSummary.awrInstanceNumbers.length > 0 ? latestSummary.awrInstanceNumbers.join(', ') : '-'}</div>
                 <div>Total transactions: {formatNumber(latestSummary.totalTransactions, 0)}</div>
                 <div>Average ms/txn: {formatNumber(latestSummary.avgTransactionMs, 2)}</div>
                 <div>Connections opened: {formatNumber(latestSummary.totalLogons, 0)}</div>
@@ -1203,6 +1207,11 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                     <div>Procedure execs/sec: {formatNumber(latestProcedureSql.execsPerSecond, 2)}</div>
                     <div>Procedure avg ms/exec: {formatNumber(latestProcedureSql.avgElapsedMs, 3)}</div>
                   </>
+                )}
+                {Array.isArray(latestSummary.awrWarnings) && latestSummary.awrWarnings.length > 0 && (
+                  <div style={{ marginTop: '0.3rem', color: '#fca5a5' }}>
+                    AWR note: {latestSummary.awrWarnings.join(' | ')}
+                  </div>
                 )}
               </div>
             ) : (

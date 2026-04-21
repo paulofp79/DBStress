@@ -87,6 +87,7 @@ class LibraryCacheLockEngine {
     this.stopPromise = null;
     this.nextWorkerId = 0;
     this.workerStates = new Map();
+    this.awrState = this.createEmptyAwrState();
   }
 
   createEmptyStats() {
@@ -120,6 +121,16 @@ class LibraryCacheLockEngine {
     };
   }
 
+  createEmptyAwrState() {
+    return {
+      begin: null,
+      end: null,
+      warnings: [],
+      routeName: null,
+      connectionString: null
+    };
+  }
+
   emitStatus(message, extra = {}) {
     this.io?.emit('library-cache-lock-status', {
       running: this.isRunning,
@@ -127,6 +138,35 @@ class LibraryCacheLockEngine {
       runId: this.runId,
       ...extra
     });
+  }
+
+  getAwrConnectionTarget() {
+    const route = this.routes?.[0] || null;
+    return {
+      routeName: route?.name || 'Primary Service',
+      connectionString: route?.connectionString || this.db.getCredentials().connectionString
+    };
+  }
+
+  buildAwrSummaryFields() {
+    const begin = this.awrState?.begin || null;
+    const end = this.awrState?.end || null;
+    const instanceNumbers = end?.instanceNumbers?.length
+      ? end.instanceNumbers
+      : begin?.instanceNumbers?.length
+        ? begin.instanceNumbers
+        : [];
+
+    return {
+      awrBeginSnapId: begin?.snapId ?? null,
+      awrEndSnapId: end?.snapId ?? null,
+      awrDbid: begin?.dbid ?? end?.dbid ?? null,
+      awrInstanceNumbers: instanceNumbers,
+      awrBeginCapturedAt: begin?.capturedAt ?? null,
+      awrEndCapturedAt: end?.capturedAt ?? null,
+      awrRouteName: this.awrState?.routeName || null,
+      awrWarnings: Array.isArray(this.awrState?.warnings) ? [...this.awrState.warnings] : []
+    };
   }
 
   normalizeRoute(route = {}, index, defaultConnectionString, defaultProcedureName, defaultOwner) {
@@ -338,8 +378,13 @@ class LibraryCacheLockEngine {
     this.latestSample = null;
     this.nextWorkerId = 0;
     this.workerStates = new Map();
+    this.awrState = this.createEmptyAwrState();
 
     await this.validateRoutes();
+
+    const awrTarget = this.getAwrConnectionTarget();
+    this.awrState.routeName = awrTarget.routeName;
+    this.awrState.connectionString = awrTarget.connectionString;
 
     this.planRouteSessionTargets();
 
@@ -349,6 +394,19 @@ class LibraryCacheLockEngine {
       totalTransactions: 0,
       lastTick: Date.now()
     };
+
+    try {
+      this.awrState.begin = await this.captureAwrSnapshot();
+      this.emitStatus(
+        `Captured AWR begin snapshot ${this.awrState.begin.snapId} on ${this.awrState.routeName}`,
+        { awr: this.buildAwrSummaryFields() }
+      );
+    } catch (err) {
+      const warning = `AWR begin snapshot failed: ${err.message}`;
+      this.awrState.warnings.push(warning);
+      console.log(warning);
+      this.emitStatus(`${warning}. Continuing workload start.`);
+    }
 
     this.emitStatus('Capturing baseline snapshot...');
     this.runStartSnapshot = await this.captureSystemSnapshot();
@@ -380,7 +438,8 @@ class LibraryCacheLockEngine {
       `Running ${this.config.initialSessions.toLocaleString()} initial session(s), auto-expanding up to ${this.config.maxSessions.toLocaleString()} across ${this.routes.length} route(s)`,
       {
       config: this.config,
-      routes: this.describeRoutes()
+      routes: this.describeRoutes(),
+      awr: this.buildAwrSummaryFields()
       }
     );
   }
@@ -1069,6 +1128,14 @@ class LibraryCacheLockEngine {
       console.log('Unable to capture final Library Cache Lock snapshot:', err.message);
     }
 
+    try {
+      this.awrState.end = await this.captureAwrSnapshot();
+    } catch (err) {
+      const warning = `AWR end snapshot failed: ${err.message}`;
+      this.awrState.warnings.push(warning);
+      console.log(warning);
+    }
+
     for (const pool of this.routePools.values()) {
       try {
         await pool.close(2);
@@ -1092,7 +1159,8 @@ class LibraryCacheLockEngine {
         totalErrors: this.stats.totalErrors,
         totalLogons: this.stats.totalLogons,
         totalLogoffs: this.stats.totalLogoffs,
-        lastError: this.stats.lastError
+        lastError: this.stats.lastError,
+        awr: this.buildAwrSummaryFields()
       }
     };
 
@@ -1168,7 +1236,8 @@ class LibraryCacheLockEngine {
       keyWaits: [],
       topWaitEvents: [],
       matchedSql: [],
-      routes: this.buildRouteSummaries(durationSeconds)
+      routes: this.buildRouteSummaries(durationSeconds),
+      ...this.buildAwrSummaryFields()
     };
   }
 
@@ -1196,6 +1265,7 @@ class LibraryCacheLockEngine {
       totalLogons: this.stats.totalLogons,
       totalLogoffs: this.stats.totalLogoffs,
       routes: this.buildRouteSummaries(summary.durationSeconds),
+      ...this.buildAwrSummaryFields(),
       ...summary
     };
   }
@@ -1329,6 +1399,94 @@ class LibraryCacheLockEngine {
         b.cpuSeconds - a.cpuSeconds
       ))
       .slice(0, 10);
+  }
+
+  async captureAwrSnapshot() {
+    const target = this.getAwrConnectionTarget();
+    let connection;
+
+    try {
+      connection = await this.db.createDirectConnection({ connectionString: target.connectionString });
+
+      const dbidResult = await connection.execute(
+        `SELECT dbid FROM v$database`,
+        [],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const dbid = Number(dbidResult.rows?.[0]?.DBID || 0);
+
+      const beforeResult = await connection.execute(
+        `
+          SELECT MAX(snap_id) AS snap_id
+          FROM dba_hist_snapshot
+          WHERE dbid = :dbid
+        `,
+        { dbid },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const previousSnapId = Number(beforeResult.rows?.[0]?.SNAP_ID || 0);
+
+      await connection.execute(`BEGIN DBMS_WORKLOAD_REPOSITORY.CREATE_SNAPSHOT(); END;`);
+
+      let rows = [];
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const snapshotRows = await connection.execute(
+          `
+            SELECT
+              snap_id,
+              dbid,
+              instance_number,
+              begin_interval_time,
+              end_interval_time
+            FROM dba_hist_snapshot
+            WHERE dbid = :dbid
+              AND snap_id = (
+                SELECT MAX(snap_id)
+                FROM dba_hist_snapshot
+                WHERE dbid = :dbid
+                  AND snap_id > :previousSnapId
+              )
+            ORDER BY instance_number
+          `,
+          { dbid, previousSnapId },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+
+        rows = snapshotRows.rows || [];
+        if (rows.length > 0) {
+          break;
+        }
+        await this.sleep(500);
+      }
+
+      if (rows.length === 0) {
+        throw new Error('Snapshot created, but snap_id could not be resolved from DBA_HIST_SNAPSHOT');
+      }
+
+      return {
+        snapId: Number(rows[0].SNAP_ID || 0),
+        dbid: Number(rows[0].DBID || dbid || 0),
+        instanceNumbers: rows
+          .map((row) => Number(row.INSTANCE_NUMBER || 0))
+          .filter((value) => Number.isFinite(value) && value > 0),
+        beginIntervalTime: rows[0].BEGIN_INTERVAL_TIME
+          ? new Date(rows[0].BEGIN_INTERVAL_TIME).toISOString()
+          : null,
+        endIntervalTime: rows[0].END_INTERVAL_TIME
+          ? new Date(rows[0].END_INTERVAL_TIME).toISOString()
+          : null,
+        capturedAt: new Date().toISOString(),
+        routeName: target.routeName
+      };
+    } finally {
+      if (connection) {
+        try {
+          await connection.close();
+        } catch (closeErr) {
+          // Ignore AWR helper connection close failures.
+        }
+      }
+    }
   }
 
   async captureSystemSnapshot() {
