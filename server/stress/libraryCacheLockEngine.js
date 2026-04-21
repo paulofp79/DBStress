@@ -162,6 +162,8 @@ class LibraryCacheLockEngine {
       awrEndSnapId: end?.snapId ?? null,
       awrDbid: begin?.dbid ?? end?.dbid ?? null,
       awrInstanceNumbers: instanceNumbers,
+      awrContainerName: begin?.containerName ?? end?.containerName ?? null,
+      awrContainerId: begin?.containerId ?? end?.containerId ?? null,
       awrBeginCapturedAt: begin?.capturedAt ?? null,
       awrEndCapturedAt: end?.capturedAt ?? null,
       awrRouteName: this.awrState?.routeName || null,
@@ -1408,25 +1410,41 @@ class LibraryCacheLockEngine {
     try {
       connection = await this.db.createDirectConnection({ connectionString: target.connectionString });
 
-      const dbidResult = await connection.execute(
-        `SELECT dbid FROM v$database`,
+      const contextResult = await connection.execute(
+        `
+          SELECT
+            SYS_CONTEXT('USERENV', 'CON_NAME') AS con_name,
+            TO_NUMBER(SYS_CONTEXT('USERENV', 'CON_ID')) AS con_id,
+            DBMS_WORKLOAD_REPOSITORY.LOCAL_AWR_DBID() AS local_awr_dbid
+          FROM dual
+        `,
         [],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
-      const dbid = Number(dbidResult.rows?.[0]?.DBID || 0);
+      const containerName = contextResult.rows?.[0]?.CON_NAME || null;
+      const containerId = Number(contextResult.rows?.[0]?.CON_ID || 0) || null;
+      let dbid = Number(contextResult.rows?.[0]?.LOCAL_AWR_DBID || 0);
 
-      const beforeResult = await connection.execute(
-        `
-          SELECT MAX(snap_id) AS snap_id
-          FROM dba_hist_snapshot
-          WHERE dbid = :dbid
-        `,
-        { dbid },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      if (!dbid) {
+        const dbidFallback = await connection.execute(
+          `SELECT dbid FROM v$database`,
+          [],
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        dbid = Number(dbidFallback.rows?.[0]?.DBID || 0);
+      }
+
+      const createResult = await connection.execute(
+        `BEGIN :snapId := DBMS_WORKLOAD_REPOSITORY.CREATE_SNAPSHOT(flush_level => 'BESTFIT'); END;`,
+        {
+          snapId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER }
+        },
+        { autoCommit: true }
       );
-      const previousSnapId = Number(beforeResult.rows?.[0]?.SNAP_ID || 0);
-
-      await connection.execute(`BEGIN DBMS_WORKLOAD_REPOSITORY.CREATE_SNAPSHOT(); END;`);
+      const snapId = Number(createResult.outBinds?.snapId || 0);
+      if (!snapId) {
+        throw new Error('CREATE_SNAPSHOT did not return a snap_id');
+      }
 
       let rows = [];
       for (let attempt = 0; attempt < 5; attempt++) {
@@ -1439,16 +1457,11 @@ class LibraryCacheLockEngine {
               begin_interval_time,
               end_interval_time
             FROM dba_hist_snapshot
-            WHERE dbid = :dbid
-              AND snap_id = (
-                SELECT MAX(snap_id)
-                FROM dba_hist_snapshot
-                WHERE dbid = :dbid
-                  AND snap_id > :previousSnapId
-              )
+            WHERE snap_id = :snapId
+              ${dbid ? 'AND dbid = :dbid' : ''}
             ORDER BY instance_number
           `,
-          { dbid, previousSnapId },
+          dbid ? { snapId, dbid } : { snapId },
           { outFormat: oracledb.OUT_FORMAT_OBJECT }
         );
 
@@ -1460,15 +1473,17 @@ class LibraryCacheLockEngine {
       }
 
       if (rows.length === 0) {
-        throw new Error('Snapshot created, but snap_id could not be resolved from DBA_HIST_SNAPSHOT');
+        throw new Error(`Snapshot ${snapId} was created, but could not be resolved from DBA_HIST_SNAPSHOT in ${containerName || 'the current container'}`);
       }
 
       return {
-        snapId: Number(rows[0].SNAP_ID || 0),
+        snapId,
         dbid: Number(rows[0].DBID || dbid || 0),
         instanceNumbers: rows
           .map((row) => Number(row.INSTANCE_NUMBER || 0))
           .filter((value) => Number.isFinite(value) && value > 0),
+        containerName,
+        containerId,
         beginIntervalTime: rows[0].BEGIN_INTERVAL_TIME
           ? new Date(rows[0].BEGIN_INTERVAL_TIME).toISOString()
           : null,

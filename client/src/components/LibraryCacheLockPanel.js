@@ -1195,6 +1195,8 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 <div>AWR begin snap_id: {latestSummary.awrBeginSnapId ?? '-'}</div>
                 <div>AWR end snap_id: {latestSummary.awrEndSnapId ?? '-'}</div>
                 <div>AWR DBID: {latestSummary.awrDbid ?? '-'}</div>
+                <div>AWR container: {latestSummary.awrContainerName || '-'}</div>
+                <div>AWR con_id: {latestSummary.awrContainerId ?? '-'}</div>
                 <div>AWR instances: {Array.isArray(latestSummary.awrInstanceNumbers) && latestSummary.awrInstanceNumbers.length > 0 ? latestSummary.awrInstanceNumbers.join(', ') : '-'}</div>
                 <div>Total transactions: {formatNumber(latestSummary.totalTransactions, 0)}</div>
                 <div>Average ms/txn: {formatNumber(latestSummary.avgTransactionMs, 2)}</div>
