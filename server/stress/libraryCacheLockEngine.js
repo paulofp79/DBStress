@@ -140,8 +140,8 @@ class LibraryCacheLockEngine {
     });
   }
 
-  getAwrConnectionTarget() {
-    const route = this.routes?.[0] || null;
+  getAwrConnectionTarget(routes = this.routes) {
+    const route = routes?.[0] || null;
     return {
       routeName: route?.name || 'Primary Service',
       connectionString: route?.connectionString || this.db.getCredentials().connectionString
@@ -1404,7 +1404,10 @@ class LibraryCacheLockEngine {
   }
 
   async captureAwrSnapshot() {
-    const target = this.getAwrConnectionTarget();
+    return this.captureAwrSnapshotForTarget(this.getAwrConnectionTarget());
+  }
+
+  async captureAwrSnapshotForTarget(target) {
     let connection;
 
     try {
@@ -1501,6 +1504,31 @@ class LibraryCacheLockEngine {
           // Ignore AWR helper connection close failures.
         }
       }
+    }
+  }
+
+  async testAwrSnapshot(db, incomingConfig = {}) {
+    if (this.isRunning) {
+      throw new Error('Stop the current Library Cache Lock workload before testing AWR snapshot creation');
+    }
+
+    const previousDb = this.db;
+
+    try {
+      this.db = db;
+      const config = this.normalizeConfig(incomingConfig);
+      const routes = config.routes.map((route) => ({ ...route }));
+      const target = this.getAwrConnectionTarget(routes);
+      const snapshot = await this.captureAwrSnapshotForTarget(target);
+
+      return {
+        success: true,
+        routeName: target.routeName,
+        connectionString: target.connectionString,
+        snapshot
+      };
+    } finally {
+      this.db = previousDb;
     }
   }
 

@@ -615,6 +615,20 @@ app.post('/api/library-cache-lock/start', async (req, res) => {
   }
 });
 
+app.post('/api/library-cache-lock/test-awr-snapshot', async (req, res) => {
+  const config = req.body;
+  try {
+    const result = await libraryCacheLockEngine.testAwrSnapshot(oracleDb, config);
+    res.json({
+      success: true,
+      message: `AWR snapshot ${result.snapshot.snapId} created on ${result.snapshot.containerName || 'current container'} via ${result.routeName}`,
+      ...result
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Stop library cache lock demo
 app.post('/api/library-cache-lock/stop', async (req, res) => {
   try {

@@ -279,11 +279,13 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
   });
   const [procedureSql, setProcedureSql] = useState(DEFAULT_PROCEDURE_SQL);
   const [isInstalling, setIsInstalling] = useState(false);
+  const [isTestingAwr, setIsTestingAwr] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [metrics, setMetrics] = useState(emptyMetrics);
   const [sample, setSample] = useState(null);
   const [latestSummary, setLatestSummary] = useState(null);
+  const [awrTestResult, setAwrTestResult] = useState(null);
   const [savedRuns, setSavedRuns] = useState([]);
   const [compareRunA, setCompareRunA] = useState('');
   const [compareRunB, setCompareRunB] = useState('');
@@ -610,6 +612,32 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
     } catch (err) {
       setIsRunning(false);
       setStatusMessage(`Start error: ${err.message}`);
+    }
+  };
+
+  const handleTestAwrSnapshot = async () => {
+    try {
+      setIsTestingAwr(true);
+      setAwrTestResult(null);
+      setStatusMessage('Testing AWR snapshot creation...');
+
+      const response = await fetch(`${API_BASE}/library-cache-lock/test-awr-snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to create AWR snapshot');
+      }
+
+      setAwrTestResult(data);
+      setStatusMessage(data.message || 'AWR snapshot created');
+    } catch (err) {
+      setStatusMessage(`AWR test error: ${err.message}`);
+    } finally {
+      setIsTestingAwr(false);
     }
   };
 
@@ -965,12 +993,15 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             </div>
           )}
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '1rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem', marginTop: '1rem' }}>
             <button className="btn btn-danger" type="button" onClick={handleStart} disabled={isRunning || isInstalling}>
               Start Workload
             </button>
             <button className="btn btn-secondary" type="button" onClick={handleStop} disabled={!isRunning}>
               Stop
+            </button>
+            <button className="btn btn-primary" type="button" onClick={handleTestAwrSnapshot} disabled={isRunning || isInstalling || isTestingAwr}>
+              {isTestingAwr ? 'Testing AWR...' : 'Test AWR Snapshot'}
             </button>
           </div>
 
@@ -990,6 +1021,14 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             {metrics.lastError && (
               <div style={{ marginTop: '0.45rem', fontSize: '0.8rem', color: '#fca5a5' }}>
                 Last error: {metrics.lastError}
+              </div>
+            )}
+            {awrTestResult?.snapshot && (
+              <div style={{ marginTop: '0.6rem', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'grid', gap: '0.2rem' }}>
+                <div>AWR test route: {awrTestResult.routeName || '-'}</div>
+                <div>AWR test snap_id: {awrTestResult.snapshot.snapId ?? '-'}</div>
+                <div>AWR test container: {awrTestResult.snapshot.containerName || '-'}</div>
+                <div>AWR test DBID: {awrTestResult.snapshot.dbid ?? '-'}</div>
               </div>
             )}
           </div>
