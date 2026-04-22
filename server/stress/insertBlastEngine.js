@@ -1,3 +1,5 @@
+const { v4: uuidv4 } = require('uuid');
+
 class InsertBlastEngine {
   constructor() {
     this.isRunning = false;
@@ -13,6 +15,7 @@ class InsertBlastEngine {
     this.stopTimer = null;
     this.stats = this.initStats();
     this.previousStats = this.initStats();
+    this.runId = null;
   }
 
   initStats() {
@@ -86,6 +89,91 @@ class InsertBlastEngine {
     return binds;
   }
 
+  async tagSession(connection, workerId) {
+    const moduleName = 'DBSTRESS_INSERT_BLAST';
+    const actionName = this.runId || 'INSERT_BLAST';
+    const clientId = `IBLAST:${actionName}:W${workerId}`;
+
+    try {
+      connection.module = moduleName;
+      connection.action = actionName;
+      connection.clientId = clientId;
+    } catch (error) {
+      try {
+        await connection.execute(
+          `
+            BEGIN
+              DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, :actionName);
+              DBMS_SESSION.SET_IDENTIFIER(:clientId);
+            END;
+          `,
+          { moduleName, actionName, clientId },
+          { autoCommit: false }
+        );
+      } catch (innerError) {
+        // Best effort only.
+      }
+    }
+  }
+
+  async killTrackedSessions() {
+    if (!this.db || !this.runId) {
+      return { killed: 0, attempted: 0, failures: [] };
+    }
+
+    const actionName = this.runId;
+    const failures = [];
+    let rows = [];
+
+    try {
+      const result = await this.db.execute(
+        `
+          SELECT inst_id, sid, serial#
+          FROM gv$session
+          WHERE module = 'DBSTRESS_INSERT_BLAST'
+            AND action = :actionName
+        `,
+        { actionName }
+      );
+      rows = result.rows || [];
+    } catch (error) {
+      try {
+        const fallback = await this.db.execute(
+          `
+            SELECT 1 AS inst_id, sid, serial#
+            FROM v$session
+            WHERE module = 'DBSTRESS_INSERT_BLAST'
+              AND action = :actionName
+          `,
+          { actionName }
+        );
+        rows = fallback.rows || [];
+      } catch (fallbackError) {
+        failures.push(`Session lookup failed: ${fallbackError.message}`);
+        return { killed: 0, attempted: 0, failures };
+      }
+    }
+
+    let killed = 0;
+    for (const row of rows) {
+      const sid = row.SID;
+      const serial = row['SERIAL#'];
+      const instId = row.INST_ID || 1;
+      const killSql = instId
+        ? `ALTER SYSTEM KILL SESSION '${sid},${serial},@${instId}' IMMEDIATE`
+        : `ALTER SYSTEM KILL SESSION '${sid},${serial}' IMMEDIATE`;
+
+      try {
+        await this.db.execute(killSql);
+        killed += 1;
+      } catch (error) {
+        failures.push(`sid=${sid}, serial#=${serial}, inst_id=${instId}: ${error.message}`);
+      }
+    }
+
+    return { killed, attempted: rows.length, failures };
+  }
+
   async runWorker(workerId) {
     this.activeWorkers += 1;
     let sequence = 0;
@@ -96,12 +184,14 @@ class InsertBlastEngine {
     try {
       if (reuseSession) {
         connection = await this.pool.getConnection();
+        await this.tagSession(connection, workerId);
       }
 
       while (this.isRunning) {
         try {
           if (!reuseSession) {
             connection = await this.db.createDirectConnection();
+            await this.tagSession(connection, workerId);
             pending = 0;
           }
 
@@ -231,6 +321,7 @@ class InsertBlastEngine {
     this.config = this.normalizeConfig(config);
     this.io = io;
     this.db = oracleDb;
+    this.runId = uuidv4();
     this.isRunning = true;
     this.startedAt = Date.now();
     this.stats = this.initStats();
@@ -274,6 +365,12 @@ class InsertBlastEngine {
       clearInterval(this.statsInterval);
       this.statsInterval = null;
     }
+
+    await Promise.race([
+      Promise.allSettled(this.workers || []),
+      new Promise((resolve) => setTimeout(resolve, 3000))
+    ]);
+
     if (this.pool) {
       try {
         await this.pool.close(10);
@@ -282,7 +379,20 @@ class InsertBlastEngine {
       }
       this.pool = null;
     }
+
+    const killSummary = await this.killTrackedSessions();
+    if (this.io && (killSummary.killed > 0 || killSummary.failures.length > 0)) {
+      this.io.emit('insert-blast-progress', {
+        step: killSummary.failures.length > 0
+          ? `Stopped workload. Killed ${killSummary.killed}/${killSummary.attempted} remaining sessions.`
+          : `Stopped workload. Killed ${killSummary.killed} remaining sessions.`,
+        progress: 100
+      });
+    }
+
     this.db = null;
+    this.workers = [];
+    this.runId = null;
 
     this.emitMetrics();
     return this.getStatus();

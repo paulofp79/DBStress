@@ -82,37 +82,42 @@ class InsertBlastManager {
   async dropTables(oracleDb, config = {}, progressCallback = () => {}) {
     const normalized = this.normalizeConfig(config);
     const tableNames = this.getTableNames(normalized);
-    const connection = await oracleDb.getConnection();
+    let completed = 0;
 
-    try {
-      for (let index = 0; index < tableNames.length; index += 1) {
-        const tableName = tableNames[index];
-        progressCallback({
-          step: `Dropping ${tableName}...`,
-          progress: Math.round((index / tableNames.length) * 100)
-        });
-        try {
-          await connection.execute(`DROP TABLE ${tableName} PURGE`, [], { autoCommit: false });
-        } catch (error) {
-          if (error.errorNum !== 942) {
-            throw error;
-          }
+    progressCallback({
+      step: `Dropping ${tableNames.length} tables in parallel (${tableNames.length} sessions)...`,
+      progress: 0
+    });
+
+    await Promise.all(tableNames.map(async (tableName) => {
+      const connection = await oracleDb.createDirectConnection();
+
+      try {
+        await connection.execute(`DROP TABLE ${tableName} PURGE`);
+      } catch (error) {
+        if (error.errorNum !== 942) {
+          throw error;
         }
+      } finally {
+        await connection.close();
       }
 
-      await connection.commit();
+      completed += 1;
       progressCallback({
-        step: `Dropped insert-blast tables for prefix ${normalized.tablePrefix}.`,
-        progress: 100
+        step: `Dropped ${completed}/${tableNames.length} tables...`,
+        progress: Math.round((completed / tableNames.length) * 100)
       });
+    }));
 
-      return {
-        config: normalized,
-        tableNames
-      };
-    } finally {
-      await connection.close();
-    }
+    progressCallback({
+      step: `Dropped insert-blast tables for prefix ${normalized.tablePrefix}.`,
+      progress: 100
+    });
+
+    return {
+      config: normalized,
+      tableNames
+    };
   }
 
   async getStatus(oracleDb, config = {}) {
