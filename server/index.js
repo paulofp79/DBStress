@@ -8,8 +8,10 @@ require('dotenv').config();
 const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
 const swingbenchSOEManager = require('./db/swingbenchSOEManager');
+const insertBlastManager = require('./db/insertBlastManager');
 const stressEngine = require('./stress/engine');
 const swingbenchSOEEngine = require('./stress/swingbenchSOEEngine');
+const insertBlastEngine = require('./stress/insertBlastEngine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const statsComparisonEngine = require('./stress/statsComparisonEngine');
@@ -478,6 +480,87 @@ app.post('/api/swingbench/soe/workload/stop', async (req, res) => {
     res.json({
       success: true,
       message: 'Swingbench SOE workload stopped',
+      ...status
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/api/insert-blast/status', async (req, res) => {
+  try {
+    const schemaStatus = await insertBlastManager.getStatus(oracleDb, req.query || {});
+    res.json({
+      success: true,
+      workload: insertBlastEngine.getStatus(),
+      schema: schemaStatus
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/insert-blast/create', async (req, res) => {
+  try {
+    const result = await insertBlastManager.createTables(oracleDb, req.body || {}, (progress) => {
+      io.emit('insert-blast-progress', progress);
+    });
+    res.json({
+      success: true,
+      message: `Created ${result.tableNames.length} insert-blast tables`,
+      ...result
+    });
+  } catch (error) {
+    io.emit('insert-blast-progress', { step: `Error: ${error.message}`, progress: -1 });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/insert-blast/drop', async (req, res) => {
+  try {
+    const result = await insertBlastManager.dropTables(oracleDb, req.body || {}, (progress) => {
+      io.emit('insert-blast-progress', progress);
+    });
+    res.json({
+      success: true,
+      message: `Dropped ${result.tableNames.length} insert-blast tables`,
+      ...result
+    });
+  } catch (error) {
+    io.emit('insert-blast-progress', { step: `Error: ${error.message}`, progress: -1 });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/insert-blast/start', async (req, res) => {
+  try {
+    const schemaStatus = await insertBlastManager.getStatus(oracleDb, req.body || {});
+    if (!schemaStatus.ready) {
+      return res.status(400).json({
+        success: false,
+        message: 'Create the insert-blast tables first before starting the workload.'
+      });
+    }
+    const status = await insertBlastEngine.start(oracleDb, req.body || {}, io);
+    metricsCollector.start(oracleDb, io);
+    await metricsCollector.resetGCBaseline();
+    res.json({
+      success: true,
+      message: 'Insert blast workload started',
+      ...status
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/insert-blast/stop', async (req, res) => {
+  try {
+    const status = await insertBlastEngine.stop();
+    metricsCollector.stop();
+    res.json({
+      success: true,
+      message: 'Insert blast workload stopped',
       ...status
     });
   } catch (error) {

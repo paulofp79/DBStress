@@ -111,7 +111,9 @@ class SwingbenchSOEEngine {
     return {
       profileName: profile.name,
       profileComment: profile.comment,
-      ...profile.defaults
+      ...profile.defaults,
+      profileConnectString: profile.defaults.connectString,
+      connectString: ''
     };
   }
 
@@ -143,6 +145,7 @@ class SwingbenchSOEEngine {
       ...config,
       username: String(config.username || defaults.username).trim(),
       password: String(config.password || defaults.password).trim(),
+      connectString: String(config.connectString || '').trim(),
       users,
       minDelay,
       maxDelay,
@@ -519,6 +522,9 @@ class SwingbenchSOEEngine {
     }
 
     this.config = this.normalizeConfig(config);
+    const currentConnectionString = db.getCredentials().connectionString;
+    const effectiveConnectString = this.config.connectString || currentConnectionString;
+    this.config.connectString = effectiveConnectString;
     this.io = io;
     this.stats = this.initStats();
     this.previousStats = { ...this.stats, byTransaction: {} };
@@ -527,7 +533,7 @@ class SwingbenchSOEEngine {
     const bootstrapConnection = await db.createDirectConnection({
       user: this.config.username,
       password: this.config.password,
-      connectionString: this.config.connectString || undefined
+      connectionString: effectiveConnectString
     });
 
     try {
@@ -540,7 +546,7 @@ class SwingbenchSOEEngine {
     this.pool = await db.createStressPool(this.config.users, {
       user: this.config.username,
       password: this.config.password,
-      connectionString: this.config.connectString || undefined
+      connectionString: effectiveConnectString
     });
 
     this.workers = Array.from({ length: this.config.users }, (_, index) => this.runWorker(index));

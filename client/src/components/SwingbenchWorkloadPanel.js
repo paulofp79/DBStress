@@ -308,7 +308,15 @@ function SwingbenchWorkloadPanel({ dbStatus, socket, onSuccess, onError }) {
           </div>
           <div style={{ display: 'grid', gap: '0.65rem' }}>
             {config.transactions.map((txn) => (
-              <div key={txn.shortName} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: '0.75rem', alignItems: 'center' }}>
+              <div
+                key={txn.shortName}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(220px, 2fr) 96px minmax(160px, 1fr)',
+                  gap: '0.75rem',
+                  alignItems: 'center'
+                }}
+              >
                 <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <input
                     type="checkbox"
@@ -324,6 +332,11 @@ function SwingbenchWorkloadPanel({ dbStatus, socket, onSuccess, onError }) {
                   value={txn.weight}
                   onChange={(e) => updateTransaction(txn.shortName, 'weight', e.target.value)}
                   disabled={status.isRunning || loading}
+                  style={{
+                    width: '96px',
+                    minWidth: '96px',
+                    justifySelf: 'start'
+                  }}
                 />
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{txn.className?.split('.').pop()}</span>
               </div>
