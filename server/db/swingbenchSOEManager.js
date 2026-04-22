@@ -291,9 +291,14 @@ class SwingbenchSOEManager {
     const flush = () => {
       const statement = buffer.join('\n').trim();
       buffer = [];
+      const isPlsqlBlock = slashDelimited;
       slashDelimited = false;
       if (statement) {
-        statements.push(statement.replace(/;\s*$/g, '').trim());
+        statements.push(
+          isPlsqlBlock
+            ? statement
+            : statement.replace(/;\s*$/g, '').trim()
+        );
       }
     };
 
