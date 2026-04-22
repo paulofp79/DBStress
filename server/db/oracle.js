@@ -163,15 +163,28 @@ class OracleDatabase {
   // Create a new pool with specified size for stress testing
   async createStressPool(sessionCount, overrides = {}) {
     const credentials = this.getCredentials(overrides);
+    const poolMin = Math.max(1, Math.min(
+      sessionCount,
+      Number.isFinite(Number(overrides.poolMin)) ? Number(overrides.poolMin) : Math.min(sessionCount, 10)
+    ));
+    const poolIncrement = Math.max(1, Math.min(
+      sessionCount,
+      Number.isFinite(Number(overrides.poolIncrement)) ? Number(overrides.poolIncrement) : 5
+    ));
+    const queueTimeout = Math.max(
+      1000,
+      Number.isFinite(Number(overrides.queueTimeout)) ? Number(overrides.queueTimeout) : 120000
+    );
+
     return await oracledb.createPool({
       user: credentials.user,
       password: credentials.password,
       connectionString: credentials.connectionString,
-      poolMin: Math.min(sessionCount, 10),
+      poolMin,
       poolMax: sessionCount,
-      poolIncrement: 5,
+      poolIncrement,
       poolTimeout: 60,
-      queueTimeout: 120000,
+      queueTimeout,
       poolAlias: `stress_pool_${Date.now()}`
     });
   }

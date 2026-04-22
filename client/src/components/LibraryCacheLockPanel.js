@@ -72,6 +72,14 @@ BEGIN
 END;
 /`;
 
+const DEFAULT_SIMPLE_QUERY_SQL = `SELECT
+  order_id,
+  order_ref,
+  status,
+  amount
+FROM pp.NOCOMP10T100M_ORDER_01
+WHERE ROWNUM = 1`;
+
 const WAIT_EVENT_ORDER = [
   'library cache: mutex X',
   'latch: ges resource hash list',
@@ -258,6 +266,7 @@ function MetricCard({ title, value, hint }) {
 function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
   const [config, setConfig] = useState({
     scenario: 'single-service',
+    workloadMode: 'mixed-workload',
     runLabel: 'Scenario 1 Baseline',
     initialSessions: 50,
     maxSessions: 1000,
@@ -267,6 +276,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
     tableOwner: '',
     modulePrefix: 'MFES',
     moduleLength: 42,
+    simpleQuerySql: DEFAULT_SIMPLE_QUERY_SQL,
     selectsPerTxn: 2,
     insertsPerTxn: 1,
     updatesPerTxn: 1,
@@ -699,6 +709,9 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
           <p style={{ marginTop: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
             Reused application-session workload: each session stays open, calls the procedure on every transaction, runs mixed SELECT/INSERT/UPDATE/DELETE, commits, and continues processing more work.
           </p>
+          <p style={{ marginTop: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            For a very small comparison test, switch <code>Workload Shape</code> to <code>Simple procedure + query</code> and run with <code>Initial Sessions = 1</code>, <code>Max Sessions = 1</code>.
+          </p>
           <div style={{
             marginTop: '0.85rem',
             padding: '0.85rem',
@@ -737,6 +750,18 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
               onChange={(e) => setConfig((prev) => ({ ...prev, runLabel: e.target.value }))}
               disabled={isRunning}
             />
+          </div>
+
+          <div className="form-group">
+            <label>Workload Shape</label>
+            <select
+              value={config.workloadMode}
+              onChange={(e) => setConfig((prev) => ({ ...prev, workloadMode: e.target.value }))}
+              disabled={isRunning}
+            >
+              <option value="mixed-workload">Standard mixed workload</option>
+              <option value="simple-procedure-query">Simple procedure + one query</option>
+            </select>
           </div>
 
           <div className="form-row">
@@ -859,52 +884,70 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             Set <code>Table Owner</code> when the workload tables belong to another schema. The tool will validate through that owner and qualify the SQL as <code>OWNER.TABLE</code>.
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
+          {config.workloadMode === 'mixed-workload' ? (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Selects</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={config.selectsPerTxn}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, selectsPerTxn: Math.max(1, Number.parseInt(e.target.value || '1', 10)) }))}
+                  disabled={isRunning}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Inserts</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="10"
+                  value={config.insertsPerTxn}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, insertsPerTxn: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
+                  disabled={isRunning}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Updates</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="10"
+                  value={config.updatesPerTxn}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, updatesPerTxn: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
+                  disabled={isRunning}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Deletes</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="10"
+                  value={config.deletesPerTxn}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, deletesPerTxn: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
+                  disabled={isRunning}
+                />
+              </div>
+            </div>
+          ) : (
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Selects</label>
-              <input
-                type="number"
-                min="1"
-                max="10"
-                value={config.selectsPerTxn}
-                onChange={(e) => setConfig((prev) => ({ ...prev, selectsPerTxn: Math.max(1, Number.parseInt(e.target.value || '1', 10)) }))}
+              <label>Simple Query SQL</label>
+              <textarea
+                value={config.simpleQuerySql}
+                onChange={(e) => setConfig((prev) => ({ ...prev, simpleQuerySql: e.target.value }))}
                 disabled={isRunning}
+                style={{ minHeight: '140px' }}
               />
             </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Inserts</label>
-              <input
-                type="number"
-                min="0"
-                max="10"
-                value={config.insertsPerTxn}
-                onChange={(e) => setConfig((prev) => ({ ...prev, insertsPerTxn: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
-                disabled={isRunning}
-              />
+          )}
+
+          {config.workloadMode === 'simple-procedure-query' && (
+            <div style={{ marginTop: '0.55rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              Each transaction will reuse the same session, call the configured procedure once, run this query once, then commit. This is meant for an easy before/after comparison of procedure changes.
             </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Updates</label>
-              <input
-                type="number"
-                min="0"
-                max="10"
-                value={config.updatesPerTxn}
-                onChange={(e) => setConfig((prev) => ({ ...prev, updatesPerTxn: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
-                disabled={isRunning}
-              />
-            </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Deletes</label>
-              <input
-                type="number"
-                min="0"
-                max="10"
-                value={config.deletesPerTxn}
-                onChange={(e) => setConfig((prev) => ({ ...prev, deletesPerTxn: Math.max(0, Number.parseInt(e.target.value || '0', 10)) }))}
-                disabled={isRunning}
-              />
-            </div>
-          </div>
+          )}
         </div>
 
         <div style={cardStyle}>
@@ -1224,6 +1267,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
               <div style={{ display: 'grid', gap: '0.45rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
                 <div><strong style={{ color: 'white' }}>{latestSummary.runLabel}</strong></div>
                 <div>Scenario: {getScenarioLabel(latestSummary.scenario)}</div>
+                <div>Workload shape: {latestSummary.workloadMode === 'simple-procedure-query' ? 'simple procedure + one query' : 'standard mixed workload'}</div>
                 <div>Session model: reused persistent sessions</div>
                 <div>Configured run time: {latestSummary.durationMinutes > 0 ? `${latestSummary.durationMinutes} min` : 'manual stop'}</div>
                 <div>Initial sessions: {formatNumber(latestSummary.initialSessions, 0)}</div>

@@ -33,6 +33,11 @@ const normalizeUpper = (value, fallback = '') =>
 const normalizeFreeText = (value, fallback = '') =>
   String(value || fallback).trim() || fallback;
 
+const normalizeSqlText = (value, fallback = '') =>
+  String(value || fallback)
+    .trim()
+    .replace(/;+\s*$/g, '');
+
 const average = (values = []) => (
   values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
 );
@@ -61,6 +66,16 @@ const REQUIRED_WORKLOAD_TABLES = [
   'ORDER_ITEMS',
   'WAREHOUSES'
 ];
+
+const DEFAULT_SIMPLE_QUERY_SQL = `
+SELECT
+  order_id,
+  order_ref,
+  status,
+  amount
+FROM pp.NOCOMP10T100M_ORDER_01
+WHERE ROWNUM = 1
+`;
 
 class LibraryCacheLockEngine {
   constructor() {
@@ -239,9 +254,13 @@ class LibraryCacheLockEngine {
     const schemaPrefix = normalizeUpper(config.schemaPrefix, '');
     const tableOwner = normalizeUpper(config.tableOwner, '');
     const modulePrefix = normalizeFreeText(config.modulePrefix, 'MFES').replace(/\s+/g, '_').slice(0, 18) || 'MFES';
+    const workloadMode = config.workloadMode === 'simple-procedure-query'
+      ? 'simple-procedure-query'
+      : 'mixed-workload';
 
     return {
       scenario,
+      workloadMode,
       loginMode: 'persistent',
       initialSessions,
       maxSessions,
@@ -252,6 +271,7 @@ class LibraryCacheLockEngine {
       tableOwner,
       waitSampleSeconds: clampInt(config.waitSampleSeconds, 2, 30, 5),
       durationMinutes: clampInt(config.durationMinutes, 0, 1440, 0),
+      simpleQuerySql: normalizeSqlText(config.simpleQuerySql, DEFAULT_SIMPLE_QUERY_SQL),
       selectsPerTxn: clampInt(config.selectsPerTxn, 1, 10, 2),
       insertsPerTxn: clampInt(config.insertsPerTxn, 0, 10, 1),
       updatesPerTxn: clampInt(config.updatesPerTxn, 0, 10, 1),
@@ -345,6 +365,26 @@ class LibraryCacheLockEngine {
         `Route ${route.name} is missing workload tables: ${missing.join(', ')}. ` +
         `Check the service/PDB, schema prefix${this.config.tableOwner ? `, and table owner ${this.config.tableOwner}` : ''} before starting the run.`
       );
+    }
+  }
+
+  async validateSimpleQuery(connection, route) {
+    if (!this.config.simpleQuerySql) {
+      throw new Error(`Route ${route.name} is missing the simple query SQL text`);
+    }
+
+    try {
+      await connection.execute(
+        this.config.simpleQuerySql,
+        {},
+        {
+          outFormat: oracledb.OUT_FORMAT_OBJECT,
+          autoCommit: false,
+          maxRows: 5
+        }
+      );
+    } catch (err) {
+      throw new Error(`Route ${route.name} simple query failed validation: ${err.message}`);
     }
   }
 
@@ -484,7 +524,11 @@ class LibraryCacheLockEngine {
           throw new Error(`Procedure ${this.qualifyProcedure(route)} not found on ${route.connectionString}`);
         }
 
-        await this.validateWorkloadTables(connection, route);
+        if (this.config.workloadMode === 'simple-procedure-query') {
+          await this.validateSimpleQuery(connection, route);
+        } else {
+          await this.validateWorkloadTables(connection, route);
+        }
 
         try {
           const instanceResult = await connection.execute(
@@ -525,8 +569,15 @@ class LibraryCacheLockEngine {
   async createRoutePools() {
     for (const route of this.routes) {
       const poolSize = Math.max(2, route.stats.maxSessions + 2);
+      const initialPoolSize = Math.max(2, Math.min(poolSize, route.stats.initialSessions + 2));
+      const poolIncrement = Math.max(5, Math.min(100, Math.ceil(route.stats.maxSessions * 0.05)));
       try {
-        const pool = await this.db.createStressPool(poolSize, { connectionString: route.connectionString });
+        const pool = await this.db.createStressPool(poolSize, {
+          connectionString: route.connectionString,
+          poolMin: initialPoolSize,
+          poolIncrement,
+          queueTimeout: 180000
+        });
         this.routePools.set(route.id, pool);
       } catch (err) {
         if (this.isAuthError(err)) {
@@ -736,6 +787,11 @@ class LibraryCacheLockEngine {
   }
 
   async executeBusinessTransaction(connection, route, workerId, iteration) {
+    if (this.config.workloadMode === 'simple-procedure-query') {
+      await this.executeSimpleProcedureQueryTransaction(connection, route, workerId, iteration);
+      return;
+    }
+
     await connection.execute(
       this.buildAnonymousBlock(route),
       { moduleName: this.buildModuleName(route, workerId, iteration) },
@@ -754,6 +810,24 @@ class LibraryCacheLockEngine {
     for (let i = 0; i < this.config.deletesPerTxn; i++) {
       await this.performDelete(connection, workerId, i);
     }
+  }
+
+  async executeSimpleProcedureQueryTransaction(connection, route, workerId, iteration) {
+    await connection.execute(
+      this.buildAnonymousBlock(route),
+      { moduleName: this.buildModuleName(route, workerId, iteration) },
+      { autoCommit: false }
+    );
+
+    await connection.execute(
+      this.config.simpleQuerySql,
+      {},
+      {
+        outFormat: oracledb.OUT_FORMAT_OBJECT,
+        autoCommit: false,
+        maxRows: 25
+      }
+    );
   }
 
   async performSelect(connection, workerId = 0, selectIndex = 0) {
@@ -1211,6 +1285,7 @@ class LibraryCacheLockEngine {
       runId: this.runId,
       runLabel: this.config?.runLabel || 'Library Cache Lock',
       scenario: this.config?.scenario || 'single-service',
+      workloadMode: this.config?.workloadMode || 'mixed-workload',
       loginMode: this.config?.loginMode || 'persistent',
       schemaPrefix: this.config?.schemaPrefix || '',
       tableOwner: this.config?.tableOwner || '',
@@ -1249,6 +1324,7 @@ class LibraryCacheLockEngine {
       runId: this.runId,
       runLabel: this.config.runLabel,
       scenario: this.config.scenario,
+      workloadMode: this.config.workloadMode,
       loginMode: this.config.loginMode,
       schemaPrefix: this.config.schemaPrefix,
       tableOwner: this.config.tableOwner,
