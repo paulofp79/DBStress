@@ -257,11 +257,14 @@ class LibraryCacheLockEngine {
     const workloadMode = config.workloadMode === 'simple-procedure-query'
       ? 'simple-procedure-query'
       : 'mixed-workload';
+    const loginMode = config.loginMode === 'per-transaction'
+      ? 'per-transaction'
+      : 'persistent';
 
     return {
       scenario,
       workloadMode,
-      loginMode: 'persistent',
+      loginMode,
       initialSessions,
       maxSessions,
       loopDelay: clampInt(config.loopDelay, 0, 5000, 0),
@@ -669,6 +672,22 @@ class LibraryCacheLockEngine {
     let iteration = 0;
 
     while (this.isRunning) {
+      if (this.config.loginMode === 'per-transaction') {
+        const shouldContinue = await this.runSingleTransactionConnectionCycle(route, workerId, workerState, () => {
+          iteration += 1;
+          return iteration;
+        });
+
+        if (!shouldContinue) {
+          break;
+        }
+
+        if (this.isRunning) {
+          await this.sleep(this.config.loopDelay > 0 ? this.config.loopDelay : 100);
+        }
+        continue;
+      }
+
       let connection;
       try {
         connection = await this.acquireConnection(route);
@@ -769,6 +788,86 @@ class LibraryCacheLockEngine {
     route.stats.currentSessions = Math.max(0, route.stats.currentSessions - 1);
     this.stats.currentSessions = Math.max(0, this.stats.currentSessions - 1);
     this.workerStates.delete(workerId);
+  }
+
+  async runSingleTransactionConnectionCycle(route, workerId, workerState, nextIteration) {
+    let connection;
+    try {
+      connection = await this.acquireConnection(route);
+      route.stats.totalLogons += 1;
+      this.stats.totalLogons += 1;
+
+      const iteration = nextIteration();
+      const start = process.hrtime.bigint();
+
+      try {
+        await this.executeBusinessTransaction(connection, route, workerId, iteration);
+        await connection.commit();
+
+        const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+        route.stats.totalTransactions += 1;
+        route.stats.responseTimes.push(elapsedMs);
+        if (route.stats.responseTimes.length > 2000) {
+          route.stats.responseTimes.shift();
+        }
+
+        this.stats.totalTransactions += 1;
+        this.stats.responseTimes.push(elapsedMs);
+        if (this.stats.responseTimes.length > 4000) {
+          this.stats.responseTimes.shift();
+        }
+        if (workerState) {
+          workerState.completedTransactions += 1;
+        }
+      } catch (err) {
+        route.stats.totalErrors += 1;
+        this.stats.totalErrors += 1;
+        this.stats.lastError = err.message;
+
+        try {
+          await connection.rollback();
+        } catch (rollbackErr) {
+          // Ignore rollback failures during error handling.
+        }
+
+        if (this.isAuthError(err)) {
+          await this.stopForReason(`Authentication/account error on ${route.name}: ${err.message}`, { fatal: true });
+          return false;
+        }
+
+        if (this.isSchemaError(err)) {
+          await this.stopForReason(`Missing object on ${route.name}: ${err.message}`, { fatal: true });
+          return false;
+        }
+
+        if (this.stats.totalErrors <= 5 || this.stats.totalErrors % 100 === 0) {
+          console.log(`Library Cache Lock route ${route.name} worker ${workerId} error:`, err.message);
+        }
+      }
+    } catch (err) {
+      route.stats.totalErrors += 1;
+      this.stats.totalErrors += 1;
+      this.stats.lastError = err.message;
+      if (this.isAuthError(err)) {
+        await this.stopForReason(`Authentication/account error on ${route.name}: ${err.message}`, { fatal: true });
+        return false;
+      }
+      if (!String(err.message).includes('pool is terminating')) {
+        console.log(`Library Cache Lock connection error on ${route.name}:`, err.message);
+      }
+    } finally {
+      if (connection) {
+        try {
+          await connection.close();
+          route.stats.totalLogoffs += 1;
+          this.stats.totalLogoffs += 1;
+        } catch (closeErr) {
+          this.stats.lastError = closeErr.message;
+        }
+      }
+    }
+
+    return this.isRunning;
   }
 
   async acquireConnection(route) {

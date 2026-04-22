@@ -267,6 +267,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
   const [config, setConfig] = useState({
     scenario: 'single-service',
     workloadMode: 'mixed-workload',
+    loginMode: 'persistent',
     runLabel: 'Scenario 1 Baseline',
     initialSessions: 50,
     maxSessions: 1000,
@@ -712,6 +713,9 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
           <p style={{ marginTop: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
             For a very small comparison test, switch <code>Workload Shape</code> to <code>Simple procedure + query</code> and run with <code>Initial Sessions = 1</code>, <code>Max Sessions = 1</code>.
           </p>
+          <p style={{ marginTop: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            You can now also choose whether the test reuses the session or does <code>login - call procedure - query - logoff</code> on every loop.
+          </p>
           <div style={{
             marginTop: '0.85rem',
             padding: '0.85rem',
@@ -761,6 +765,18 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
             >
               <option value="mixed-workload">Standard mixed workload</option>
               <option value="simple-procedure-query">Simple procedure + one query</option>
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label>Login Pattern</label>
+            <select
+              value={config.loginMode}
+              onChange={(e) => setConfig((prev) => ({ ...prev, loginMode: e.target.value }))}
+              disabled={isRunning}
+            >
+              <option value="persistent">Reuse session</option>
+              <option value="per-transaction">Login and logoff every loop</option>
             </select>
           </div>
 
@@ -945,7 +961,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
 
           {config.workloadMode === 'simple-procedure-query' && (
             <div style={{ marginTop: '0.55rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              Each transaction will reuse the same session, call the configured procedure once, run this query once, then commit. This is meant for an easy before/after comparison of procedure changes.
+              Each transaction will call the configured procedure once, run this query once, then commit. The selected <code>Login Pattern</code> decides whether the same session is reused or a fresh login/logoff happens every loop.
             </div>
           )}
         </div>
@@ -1268,7 +1284,7 @@ function LibraryCacheLockPanel({ dbStatus, socket, schemas = [] }) {
                 <div><strong style={{ color: 'white' }}>{latestSummary.runLabel}</strong></div>
                 <div>Scenario: {getScenarioLabel(latestSummary.scenario)}</div>
                 <div>Workload shape: {latestSummary.workloadMode === 'simple-procedure-query' ? 'simple procedure + one query' : 'standard mixed workload'}</div>
-                <div>Session model: reused persistent sessions</div>
+                <div>Session model: {latestSummary.loginMode === 'per-transaction' ? 'login and logoff every loop' : 'reused persistent sessions'}</div>
                 <div>Configured run time: {latestSummary.durationMinutes > 0 ? `${latestSummary.durationMinutes} min` : 'manual stop'}</div>
                 <div>Initial sessions: {formatNumber(latestSummary.initialSessions, 0)}</div>
                 <div>Max sessions: {formatNumber(latestSummary.maxSessions, 0)}</div>
