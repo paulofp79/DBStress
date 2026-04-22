@@ -7,6 +7,7 @@ require('dotenv').config();
 
 const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
+const swingbenchSOEManager = require('./db/swingbenchSOEManager');
 const stressEngine = require('./stress/engine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
@@ -351,6 +352,82 @@ app.get('/api/schemas/list', async (req, res) => {
     const schemas = await schemaManager.listSchemas(oracleDb);
     res.json({ success: true, schemas });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Swingbench SOE schema management
+app.get('/api/swingbench/soe/defaults', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      ...swingbenchSOEManager.getDefaults()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/api/swingbench/soe/status', async (req, res) => {
+  try {
+    const status = await swingbenchSOEManager.getStatus(oracleDb, req.query || {});
+    res.json({ success: true, ...status });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/swingbench/soe/preview', (req, res) => {
+  try {
+    const preview = swingbenchSOEManager.buildInstallScript(req.body || {});
+    res.json({ success: true, ...preview });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/swingbench/soe/create', async (req, res) => {
+  const schemaId = String(req.body?.username || 'SOE').trim().toUpperCase() || 'SOE';
+
+  try {
+    const result = await swingbenchSOEManager.createSchema(oracleDb, req.body || {}, (progress) => {
+      io.emit('swingbench-soe-progress', { schemaId, ...progress });
+    });
+
+    res.json({
+      success: true,
+      message: `Swingbench SOE schema ${result.config.username} installed`,
+      ...result
+    });
+  } catch (error) {
+    io.emit('swingbench-soe-progress', {
+      schemaId,
+      step: `Error: ${error.message}`,
+      progress: -1
+    });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/swingbench/soe/drop', async (req, res) => {
+  const schemaId = String(req.body?.username || 'SOE').trim().toUpperCase() || 'SOE';
+
+  try {
+    const result = await swingbenchSOEManager.dropSchema(oracleDb, req.body || {}, (progress) => {
+      io.emit('swingbench-soe-progress', { schemaId, ...progress });
+    });
+
+    res.json({
+      success: true,
+      message: `Swingbench SOE schema ${schemaId} dropped`,
+      ...result
+    });
+  } catch (error) {
+    io.emit('swingbench-soe-progress', {
+      schemaId,
+      step: `Error: ${error.message}`,
+      progress: -1
+    });
     res.status(500).json({ success: false, message: error.message });
   }
 });

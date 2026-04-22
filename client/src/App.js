@@ -20,6 +20,7 @@ import GCCongestionPanel from './components/GCCongestionPanel';
 import GCBenchmarkPanel from './components/GCBenchmarkPanel';
 import HomePanel from './components/HomePanel';
 import MonitorPanel from './components/MonitorPanel';
+import SwingbenchPanel from './components/SwingbenchPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -503,6 +504,24 @@ function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab('swingbench-soe')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'swingbench-soe' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'swingbench-soe' ? '2px solid #f97316' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'swingbench-soe' ? '#f97316' : 'var(--text-muted)',
+              fontWeight: activeTab === 'swingbench-soe' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            Swingbench SOE
+          </button>
+
+          <button
             onClick={() => setActiveTab('tde-comparison')}
             style={{
               padding: '0.75rem 1.5rem',
@@ -668,6 +687,22 @@ function App() {
         {/* Metric Explorer Tab */}
         {activeTab === 'metric-explorer' && (
           <MetricExplorerPanel />
+        )}
+
+        {activeTab === 'swingbench-soe' && (
+          <div className="grid-2">
+            <ConnectionPanel
+              dbStatus={dbStatus}
+              onConnect={handleConnect}
+              onDisconnect={handleDisconnect}
+            />
+            <SwingbenchPanel
+              dbStatus={dbStatus}
+              socket={socket}
+              onSuccess={showSuccess}
+              onError={showError}
+            />
+          </div>
         )}
 
         {/* TDE Comparison Tab */}
