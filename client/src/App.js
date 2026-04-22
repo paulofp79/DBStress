@@ -21,6 +21,7 @@ import GCBenchmarkPanel from './components/GCBenchmarkPanel';
 import HomePanel from './components/HomePanel';
 import MonitorPanel from './components/MonitorPanel';
 import SwingbenchPanel from './components/SwingbenchPanel';
+import SwingbenchWorkloadPanel from './components/SwingbenchWorkloadPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -690,19 +691,29 @@ function App() {
         )}
 
         {activeTab === 'swingbench-soe' && (
-          <div className="grid-2">
-            <ConnectionPanel
-              dbStatus={dbStatus}
-              onConnect={handleConnect}
-              onDisconnect={handleDisconnect}
-            />
-            <SwingbenchPanel
-              dbStatus={dbStatus}
-              socket={socket}
-              onSuccess={showSuccess}
-              onError={showError}
-            />
-          </div>
+          <>
+            <div className="grid-2">
+              <ConnectionPanel
+                dbStatus={dbStatus}
+                onConnect={handleConnect}
+                onDisconnect={handleDisconnect}
+              />
+              <SwingbenchPanel
+                dbStatus={dbStatus}
+                socket={socket}
+                onSuccess={showSuccess}
+                onError={showError}
+              />
+            </div>
+            <div style={{ marginTop: '1.5rem' }}>
+              <SwingbenchWorkloadPanel
+                dbStatus={dbStatus}
+                socket={socket}
+                onSuccess={showSuccess}
+                onError={showError}
+              />
+            </div>
+          </>
         )}
 
         {/* TDE Comparison Tab */}

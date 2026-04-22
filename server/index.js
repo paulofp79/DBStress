@@ -9,6 +9,7 @@ const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
 const swingbenchSOEManager = require('./db/swingbenchSOEManager');
 const stressEngine = require('./stress/engine');
+const swingbenchSOEEngine = require('./stress/swingbenchSOEEngine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const statsComparisonEngine = require('./stress/statsComparisonEngine');
@@ -428,6 +429,58 @@ app.post('/api/swingbench/soe/drop', async (req, res) => {
       step: `Error: ${error.message}`,
       progress: -1
     });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/api/swingbench/soe/workload/defaults', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      ...swingbenchSOEEngine.buildDefaultConfig()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/api/swingbench/soe/workload/status', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      ...swingbenchSOEEngine.getStatus()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/swingbench/soe/workload/start', async (req, res) => {
+  try {
+    const status = await swingbenchSOEEngine.start(oracleDb, req.body || {}, io);
+    metricsCollector.start(oracleDb, io);
+    await metricsCollector.resetGCBaseline();
+
+    res.json({
+      success: true,
+      message: 'Swingbench SOE workload started',
+      ...status
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/swingbench/soe/workload/stop', async (req, res) => {
+  try {
+    const status = await swingbenchSOEEngine.stop();
+    metricsCollector.stop();
+    res.json({
+      success: true,
+      message: 'Swingbench SOE workload stopped',
+      ...status
+    });
+  } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });

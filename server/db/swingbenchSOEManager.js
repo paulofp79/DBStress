@@ -104,6 +104,19 @@ const IGNORABLE_ORA_CODES = new Set([
   4043   // object does not exist
 ]);
 
+const OPTIONAL_PRIVILEGE_PATTERNS = [
+  /GRANT\s+EXECUTE\s+ON\s+dbms_lock/i,
+  /GRANT\s+ANALYZE\s+ANY\s+DICTIONARY/i,
+  /GRANT\s+ANALYZE\s+ANY/i,
+  /GRANT\s+EXECUTE\s+ON\s+DBMS_MONITOR/i,
+  /grant\s+select\s+on\s+SYS\.V_\$PARAMETER/i,
+  /DBMS_RESOURCE_MANAGER_PRIVS\.GRANT_SYSTEM_PRIVILEGE/i,
+  /GRANT\s+MANAGE\s+SCHEDULER/i,
+  /GRANT\s+MANAGE\s+ANY\s+QUEUE/i,
+  /GRANT\s+CREATE\s+JOB/i,
+  /GRANT\s+ALTER\s+SYSTEM/i
+];
+
 class SwingbenchSOEManager {
   getDefaults() {
     return {
@@ -311,10 +324,19 @@ class SwingbenchSOEManager {
     return statements;
   }
 
+  isOptionalPrivilegeStatement(scriptName, statement) {
+    if (scriptName !== INSTALL_SCRIPT_LABELS.admin.createUser) {
+      return false;
+    }
+
+    return OPTIONAL_PRIVILEGE_PATTERNS.some((pattern) => pattern.test(statement));
+  }
+
   async executeScript(connection, scriptName, variables, options = {}) {
     const sqlText = this.substituteVariables(this.readScript(scriptName), variables);
     const statements = this.splitSqlStatements(sqlText);
     const errors = [];
+    const warnings = [];
 
     for (const statement of statements) {
       try {
@@ -328,6 +350,15 @@ class SwingbenchSOEManager {
           errors.push({ statement, ignored: true, error: error.message });
           continue;
         }
+        const optionalPrivilegeFailure = error.errorNum === 1031 && this.isOptionalPrivilegeStatement(scriptName, statement);
+        if (optionalPrivilegeFailure) {
+          warnings.push({
+            scriptName,
+            statement,
+            warning: `Skipped optional privilege grant due to ORA-01031: ${error.message}`
+          });
+          continue;
+        }
         error.scriptName = scriptName;
         error.statement = statement;
         throw error;
@@ -335,7 +366,7 @@ class SwingbenchSOEManager {
     }
 
     await connection.commit();
-    return { statements: statements.length, ignoredErrors: errors };
+    return { statements: statements.length, ignoredErrors: errors, warnings };
   }
 
   buildInstallScript(options = {}) {
@@ -392,13 +423,15 @@ class SwingbenchSOEManager {
 
     const adminConnection = await oracleDb.getConnection();
     let ownerConnection;
+    const warnings = [];
 
     try {
       for (const scriptName of plan.adminScripts) {
         emit(`Running admin script ${scriptName}...`);
-        await this.executeScript(adminConnection, scriptName, variables, {
+        const result = await this.executeScript(adminConnection, scriptName, variables, {
           ignoreErrors: plan.config.replaceExisting && /drop/i.test(scriptName)
         });
+        warnings.push(...(result.warnings || []));
       }
 
       emit(`Connecting as ${plan.config.username}...`);
@@ -409,12 +442,15 @@ class SwingbenchSOEManager {
 
       for (const scriptName of plan.ownerScripts) {
         emit(`Running owner script ${scriptName}...`);
-        await this.executeScript(ownerConnection, scriptName, variables);
+        const result = await this.executeScript(ownerConnection, scriptName, variables);
+        warnings.push(...(result.warnings || []));
       }
 
       progressCallback({
         schemaId: plan.config.username,
-        step: `SOE schema ${plan.config.username} installed. Swingbench object load complete; XML data load not executed.`,
+        step: warnings.length > 0
+          ? `SOE schema ${plan.config.username} installed with optional privilege warnings.`
+          : `SOE schema ${plan.config.username} installed. Swingbench object load complete; XML data load not executed.`,
         progress: 100
       });
 
@@ -423,7 +459,8 @@ class SwingbenchSOEManager {
         config: plan.config,
         adminScripts: plan.adminScripts,
         ownerScripts: plan.ownerScripts,
-        limitations: this.getLimitations()
+        limitations: this.getLimitations(),
+        warnings
       };
     } catch (error) {
       progressCallback({
