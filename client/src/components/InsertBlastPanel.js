@@ -17,7 +17,8 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     columnsPerTable: 24,
     sessions: 8,
     durationSeconds: 60,
-    commitEvery: 50
+    commitEvery: 50,
+    sessionMode: 'reuse'
   });
   const [schemaStatus, setSchemaStatus] = useState(null);
   const [workloadStatus, setWorkloadStatus] = useState({ isRunning: false });
@@ -282,17 +283,38 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
 
         <div style={{ marginTop: '1.25rem', display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.85rem' }}>
           <div className="form-group">
+            <label htmlFor="ib-session-mode">Session Mode</label>
+            <select
+              id="ib-session-mode"
+              value={config.sessionMode}
+              onChange={(e) => handleChange('sessionMode', e.target.value)}
+              disabled={busy || workloadStatus.isRunning}
+            >
+              <option value="reuse">Logon once, reuse session, logoff at end</option>
+              <option value="reconnect">Logon, insert, logout each cycle</option>
+            </select>
+          </div>
+          <div className="form-group">
             <label htmlFor="ib-sessions">Sessions</label>
             <input
               id="ib-sessions"
               type="number"
               min="1"
-              max="256"
+              max="1000"
               value={config.sessions}
               onChange={(e) => handleChange('sessions', e.target.value)}
               disabled={busy || workloadStatus.isRunning}
             />
           </div>
+        </div>
+
+        <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+          {config.sessionMode === 'reconnect'
+            ? `Each of the ${config.sessions} workers will repeatedly log on, insert, commit, and log off until the run ends.`
+            : `Each of the ${config.sessions} workers will log on once, keep the same session for the whole run, and log off at the end.`}
+        </div>
+
+        <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.85rem' }}>
           <div className="form-group">
             <label htmlFor="ib-duration">Run Time (seconds)</label>
             <input

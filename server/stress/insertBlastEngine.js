@@ -4,6 +4,7 @@ class InsertBlastEngine {
     this.config = null;
     this.io = null;
     this.pool = null;
+    this.db = null;
     this.tableNames = [];
     this.workers = [];
     this.activeWorkers = 0;
@@ -29,9 +30,10 @@ class InsertBlastEngine {
       tablePrefix: String(config.tablePrefix || 'IBLAST').trim().toUpperCase().replace(/[^A-Z0-9_$#]/g, ''),
       tableCount: Math.max(1, Math.min(200, Number.parseInt(config.tableCount, 10) || 8)),
       columnsPerTable: Math.max(4, Math.min(200, Number.parseInt(config.columnsPerTable, 10) || 24)),
-      sessions: Math.max(1, Math.min(256, Number.parseInt(config.sessions, 10) || 8)),
+      sessions: Math.max(1, Math.min(1000, Number.parseInt(config.sessions, 10) || 8)),
       durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(config.durationSeconds, 10) || 60)),
-      commitEvery: Math.max(1, Math.min(1000, Number.parseInt(config.commitEvery, 10) || 50))
+      commitEvery: Math.max(1, Math.min(1000, Number.parseInt(config.commitEvery, 10) || 50)),
+      sessionMode: String(config.sessionMode || 'reuse').trim().toLowerCase() === 'reconnect' ? 'reconnect' : 'reuse'
     };
   }
 
@@ -87,13 +89,21 @@ class InsertBlastEngine {
   async runWorker(workerId) {
     this.activeWorkers += 1;
     let sequence = 0;
+    const reuseSession = this.config.sessionMode === 'reuse';
+    let connection = null;
+    let pending = 0;
 
     try {
+      if (reuseSession) {
+        connection = await this.pool.getConnection();
+      }
+
       while (this.isRunning) {
-        let connection;
         try {
-          connection = await this.pool.getConnection();
-          let pending = 0;
+          if (!reuseSession) {
+            connection = await this.db.createDirectConnection();
+            pending = 0;
+          }
 
           while (this.isRunning) {
             const tableName = this.tableNames[Math.floor(Math.random() * this.tableNames.length)];
@@ -110,6 +120,15 @@ class InsertBlastEngine {
               pending = 0;
             }
 
+            if (!reuseSession) {
+              if (pending > 0) {
+                await connection.commit();
+                this.stats.commits += 1;
+                pending = 0;
+              }
+              break;
+            }
+
             if ((Date.now() - this.startedAt) / 1000 >= this.config.durationSeconds) {
               this.isRunning = false;
               break;
@@ -119,6 +138,11 @@ class InsertBlastEngine {
           if (pending > 0) {
             await connection.commit();
             this.stats.commits += 1;
+            pending = 0;
+          }
+
+          if (reuseSession) {
+            break;
           }
         } catch (error) {
           this.stats.errors += 1;
@@ -133,16 +157,28 @@ class InsertBlastEngine {
             console.log(`Insert blast worker ${workerId} error: ${error.message}`);
           }
         } finally {
-          if (connection) {
+          if (!reuseSession && connection) {
             try {
               await connection.close();
             } catch (closeError) {
               // ignore
             }
+            connection = null;
           }
         }
       }
     } finally {
+      if (reuseSession && connection) {
+        try {
+          if (pending > 0) {
+            await connection.commit();
+            this.stats.commits += 1;
+          }
+          await connection.close();
+        } catch (closeError) {
+          // ignore
+        }
+      }
       this.activeWorkers -= 1;
     }
   }
@@ -194,12 +230,15 @@ class InsertBlastEngine {
 
     this.config = this.normalizeConfig(config);
     this.io = io;
+    this.db = oracleDb;
     this.isRunning = true;
     this.startedAt = Date.now();
     this.stats = this.initStats();
     this.previousStats = this.initStats();
     this.tableNames = this.getTableNames();
-    this.pool = await oracleDb.createStressPool(this.config.sessions);
+    this.pool = this.config.sessionMode === 'reuse'
+      ? await oracleDb.createStressPool(this.config.sessions)
+      : null;
 
     this.workers = Array.from({ length: this.config.sessions }, (_, index) => this.runWorker(index + 1));
     this.statsInterval = setInterval(() => this.emitMetrics(), 1000);
@@ -243,6 +282,7 @@ class InsertBlastEngine {
       }
       this.pool = null;
     }
+    this.db = null;
 
     this.emitMetrics();
     return this.getStatus();
