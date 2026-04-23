@@ -500,6 +500,18 @@ app.get('/api/insert-blast/status', async (req, res) => {
   }
 });
 
+app.get('/api/insert-blast/monitor', async (req, res) => {
+  try {
+    const snapshot = await insertBlastManager.getMonitorSnapshot(oracleDb);
+    res.json({
+      success: true,
+      ...snapshot
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.post('/api/insert-blast/create', async (req, res) => {
   try {
     const result = await insertBlastManager.createTables(oracleDb, req.body || {}, (progress) => {

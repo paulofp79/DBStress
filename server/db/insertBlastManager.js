@@ -154,6 +154,140 @@ class InsertBlastManager {
       missingTables: tableNames.filter((name) => !existing.some((row) => row.tableName === name))
     };
   }
+
+  async getUserSessionsByInstance(oracleDb) {
+    const connectedUser = String(oracleDb.getStatus()?.config?.user || '').trim().toUpperCase();
+
+    if (!connectedUser) {
+      return {
+        username: '',
+        source: null,
+        sessions: []
+      };
+    }
+
+    const buildRows = (rows = [], source) => ({
+      username: connectedUser,
+      source,
+      sessions: rows.map((row) => ({
+        instId: Number(row.INST_ID || 1),
+        totalSessions: Number(row.TOTAL_SESSIONS || 0),
+        activeSessions: Number(row.ACTIVE_SESSIONS || 0),
+        inactiveSessions: Number(row.INACTIVE_SESSIONS || 0)
+      }))
+    });
+
+    try {
+      const result = await oracleDb.execute(
+        `
+          SELECT
+            inst_id,
+            COUNT(*) AS total_sessions,
+            SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_sessions,
+            SUM(CASE WHEN status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive_sessions
+          FROM gv$session
+          WHERE type = 'USER'
+            AND username = :connectedUser
+          GROUP BY inst_id
+          ORDER BY inst_id
+        `,
+        { connectedUser }
+      );
+
+      return buildRows(result.rows, 'gv$session');
+    } catch (error) {
+      const fallback = await oracleDb.execute(
+        `
+          SELECT
+            1 AS inst_id,
+            COUNT(*) AS total_sessions,
+            SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_sessions,
+            SUM(CASE WHEN status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive_sessions
+          FROM v$session
+          WHERE type = 'USER'
+            AND username = :connectedUser
+        `,
+        { connectedUser }
+      );
+
+      return buildRows(fallback.rows, 'v$session');
+    }
+  }
+
+  async getLmsProcessMemory(oracleDb) {
+    const buildRows = (rows = [], source) => ({
+      source,
+      rows: rows.map((row) => ({
+        instId: Number(row.INST_ID || 1),
+        pid: Number(row.PID || 0),
+        osPid: row.OS_PID,
+        processName: row.PROCESS_NAME,
+        pgaUsedMb: Number(row.PGA_USED_MB || 0),
+        pgaAllocMb: Number(row.PGA_ALLOC_MB || 0),
+        category: row.CATEGORY,
+        allocMb: Number(row.ALLOC_MB || 0),
+        usedMb: Number(row.USED_MB || 0)
+      }))
+    });
+
+    try {
+      const result = await oracleDb.execute(`
+        SELECT
+          p.inst_id,
+          p.pid,
+          p.spid AS os_pid,
+          p.pname AS process_name,
+          ROUND(p.pga_used_mem / 1024 / 1024, 2) AS pga_used_mb,
+          ROUND(p.pga_alloc_mem / 1024 / 1024, 2) AS pga_alloc_mb,
+          m.category,
+          ROUND(m.allocated / 1024 / 1024, 3) AS alloc_mb,
+          ROUND(m.used / 1024 / 1024, 3) AS used_mb
+        FROM gv$process p
+        JOIN gv$process_memory m
+          ON m.inst_id = p.inst_id
+         AND m.pid = p.pid
+        WHERE p.pname LIKE 'LMS%'
+        ORDER BY p.pga_used_mem DESC, m.allocated DESC
+        FETCH FIRST 40 ROWS ONLY
+      `);
+
+      return buildRows(result.rows, 'gv$process/gv$process_memory');
+    } catch (error) {
+      const fallback = await oracleDb.execute(`
+        SELECT
+          1 AS inst_id,
+          p.pid,
+          p.spid AS os_pid,
+          p.pname AS process_name,
+          ROUND(p.pga_used_mem / 1024 / 1024, 2) AS pga_used_mb,
+          ROUND(p.pga_alloc_mem / 1024 / 1024, 2) AS pga_alloc_mb,
+          m.category,
+          ROUND(m.allocated / 1024 / 1024, 3) AS alloc_mb,
+          ROUND(m.used / 1024 / 1024, 3) AS used_mb
+        FROM v$process p
+        JOIN v$process_memory m
+          ON m.pid = p.pid
+        WHERE p.pname LIKE 'LMS%'
+        ORDER BY p.pga_used_mem DESC, m.allocated DESC
+        FETCH FIRST 40 ROWS ONLY
+      `);
+
+      return buildRows(fallback.rows, 'v$process/v$process_memory');
+    }
+  }
+
+  async getMonitorSnapshot(oracleDb) {
+    const [userSessions, lmsProcessMemory] = await Promise.all([
+      this.getUserSessionsByInstance(oracleDb),
+      this.getLmsProcessMemory(oracleDb)
+    ]);
+
+    return {
+      timestamp: Date.now(),
+      userSessions,
+      lmsProcessMemory
+    };
+  }
 }
 
 module.exports = new InsertBlastManager();

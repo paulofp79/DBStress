@@ -5,10 +5,11 @@ class InsertBlastEngine {
     this.isRunning = false;
     this.config = null;
     this.io = null;
-    this.pool = null;
     this.db = null;
     this.tableNames = [];
+    this.insertSqlCache = {};
     this.workers = [];
+    this.runtimeWorkloads = [];
     this.activeWorkers = 0;
     this.startedAt = 0;
     this.statsInterval = null;
@@ -18,25 +19,76 @@ class InsertBlastEngine {
     this.runId = null;
   }
 
-  initStats() {
+  initStats(config = null) {
+    const workloads = {};
+    (config?.workloads || []).forEach((workload) => {
+      workloads[workload.id] = {
+        id: workload.id,
+        name: workload.name,
+        sessions: workload.sessions,
+        durationSeconds: workload.durationSeconds,
+        commitEvery: workload.commitEvery,
+        sessionMode: workload.sessionMode,
+        inserts: 0,
+        commits: 0,
+        errors: 0,
+        activeWorkers: 0
+      };
+    });
+
     return {
       inserts: 0,
       commits: 0,
       errors: 0,
       byTable: {},
+      workloads,
       startedAt: Date.now()
     };
   }
 
+  normalizeWorkloads(config = {}) {
+    const rawWorkloads = Array.isArray(config.workloads) && config.workloads.length > 0
+      ? config.workloads
+      : [{
+        name: config.workloadName || 'Workload 1',
+        sessions: config.sessions,
+        durationSeconds: config.durationSeconds,
+        commitEvery: config.commitEvery,
+        sessionMode: config.sessionMode
+      }];
+
+    return rawWorkloads.slice(0, 20).map((workload, index) => {
+      const id = String(workload.id || `workload_${index + 1}`)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, '_') || `workload_${index + 1}`;
+
+      return {
+        id,
+        name: String(workload.name || `Workload ${index + 1}`).trim() || `Workload ${index + 1}`,
+        sessions: Math.max(1, Math.min(1000, Number.parseInt(workload.sessions, 10) || 8)),
+        durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(workload.durationSeconds, 10) || 60)),
+        commitEvery: Math.max(1, Math.min(1000, Number.parseInt(workload.commitEvery, 10) || 50)),
+        sessionMode: String(workload.sessionMode || 'reuse').trim().toLowerCase() === 'reconnect' ? 'reconnect' : 'reuse'
+      };
+    });
+  }
+
   normalizeConfig(config = {}) {
+    const workloads = this.normalizeWorkloads(config);
+    const maxDurationSeconds = workloads.reduce(
+      (maxDuration, workload) => Math.max(maxDuration, workload.durationSeconds),
+      0
+    );
+    const totalSessions = workloads.reduce((sum, workload) => sum + workload.sessions, 0);
+
     return {
       tablePrefix: String(config.tablePrefix || 'IBLAST').trim().toUpperCase().replace(/[^A-Z0-9_$#]/g, ''),
       tableCount: Math.max(1, Math.min(5000, Number.parseInt(config.tableCount, 10) || 8)),
       columnsPerTable: Math.max(4, Math.min(200, Number.parseInt(config.columnsPerTable, 10) || 24)),
-      sessions: Math.max(1, Math.min(1000, Number.parseInt(config.sessions, 10) || 8)),
-      durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(config.durationSeconds, 10) || 60)),
-      commitEvery: Math.max(1, Math.min(1000, Number.parseInt(config.commitEvery, 10) || 50)),
-      sessionMode: String(config.sessionMode || 'reuse').trim().toLowerCase() === 'reconnect' ? 'reconnect' : 'reuse'
+      workloads,
+      totalSessions,
+      maxDurationSeconds
     };
   }
 
@@ -49,7 +101,6 @@ class InsertBlastEngine {
   buildInsertSql(tableName) {
     const columns = [];
     const values = [];
-    const binds = {};
 
     for (let index = 1; index <= this.config.columnsPerTable; index += 1) {
       const suffix = String(index).padStart(3, '0');
@@ -57,20 +108,19 @@ class InsertBlastEngine {
 
       if (index % 3 === 1) {
         columns.push(`vc_${suffix}`);
-        values.push(`:${bindName}`);
       } else if (index % 3 === 2) {
         columns.push(`num_${suffix}`);
-        values.push(`:${bindName}`);
       } else {
         columns.push(`dt_${suffix}`);
-        values.push(`:${bindName}`);
       }
+
+      values.push(`:${bindName}`);
     }
 
     return `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${values.join(', ')})`;
   }
 
-  buildBindValues(workerId, sequence) {
+  buildBindValues(workloadId, workerId, sequence) {
     const binds = {};
 
     for (let index = 1; index <= this.config.columnsPerTable; index += 1) {
@@ -78,7 +128,7 @@ class InsertBlastEngine {
       const bindName = `b${suffix}`;
 
       if (index % 3 === 1) {
-        binds[bindName] = `W${workerId}_R${sequence}_C${suffix}`;
+        binds[bindName] = `${workloadId}_W${workerId}_R${sequence}_C${suffix}`;
       } else if (index % 3 === 2) {
         binds[bindName] = (workerId * 1000000) + sequence + index;
       } else {
@@ -89,10 +139,18 @@ class InsertBlastEngine {
     return binds;
   }
 
-  async tagSession(connection, workerId) {
+  isWorkloadActive(workload) {
+    if (!this.isRunning || !workload?.startedAt) {
+      return false;
+    }
+
+    return ((Date.now() - workload.startedAt) / 1000) < workload.durationSeconds;
+  }
+
+  async tagSession(connection, workload, workerId) {
     const moduleName = 'DBSTRESS_INSERT_BLAST';
     const actionName = this.runId || 'INSERT_BLAST';
-    const clientId = `IBLAST:${actionName}:W${workerId}`;
+    const clientId = `IBLAST:${actionName}:${workload.id}:W${workerId}`;
 
     try {
       connection.module = moduleName;
@@ -174,68 +232,68 @@ class InsertBlastEngine {
     return { killed, attempted: rows.length, failures };
   }
 
-  async runWorker(workerId) {
+  async runWorker(workload, workerId) {
     this.activeWorkers += 1;
+    this.stats.workloads[workload.id].activeWorkers += 1;
+
     let sequence = 0;
-    const reuseSession = this.config.sessionMode === 'reuse';
-    let connection = null;
     let pending = 0;
+    let connection = null;
+    const reuseSession = workload.sessionMode === 'reuse';
 
     try {
       if (reuseSession) {
-        connection = await this.pool.getConnection();
-        await this.tagSession(connection, workerId);
+        connection = await workload.pool.getConnection();
+        await this.tagSession(connection, workload, workerId);
       }
 
-      while (this.isRunning) {
+      while (this.isWorkloadActive(workload)) {
         try {
           if (!reuseSession) {
             connection = await this.db.createDirectConnection();
-            await this.tagSession(connection, workerId);
+            await this.tagSession(connection, workload, workerId);
             pending = 0;
           }
 
-          while (this.isRunning) {
+          while (this.isWorkloadActive(workload)) {
             const tableName = this.tableNames[Math.floor(Math.random() * this.tableNames.length)];
-            const sql = this.buildInsertSql(tableName);
+            const sql = this.insertSqlCache[tableName] || this.buildInsertSql(tableName);
             sequence += 1;
-            await connection.execute(sql, this.buildBindValues(workerId, sequence), { autoCommit: false });
+
+            await connection.execute(sql, this.buildBindValues(workload.id, workerId, sequence), { autoCommit: false });
             pending += 1;
             this.stats.inserts += 1;
             this.stats.byTable[tableName] = (this.stats.byTable[tableName] || 0) + 1;
+            this.stats.workloads[workload.id].inserts += 1;
 
-            if (pending >= this.config.commitEvery) {
+            if (pending >= workload.commitEvery) {
               await connection.commit();
-              this.stats.commits += 1;
               pending = 0;
+              this.stats.commits += 1;
+              this.stats.workloads[workload.id].commits += 1;
             }
 
             if (!reuseSession) {
               if (pending > 0) {
                 await connection.commit();
-                this.stats.commits += 1;
                 pending = 0;
+                this.stats.commits += 1;
+                this.stats.workloads[workload.id].commits += 1;
               }
-              break;
-            }
-
-            if ((Date.now() - this.startedAt) / 1000 >= this.config.durationSeconds) {
-              this.isRunning = false;
               break;
             }
           }
 
           if (pending > 0) {
             await connection.commit();
-            this.stats.commits += 1;
             pending = 0;
-          }
-
-          if (reuseSession) {
-            break;
+            this.stats.commits += 1;
+            this.stats.workloads[workload.id].commits += 1;
           }
         } catch (error) {
           this.stats.errors += 1;
+          this.stats.workloads[workload.id].errors += 1;
+
           if (connection) {
             try {
               await connection.rollback();
@@ -243,8 +301,9 @@ class InsertBlastEngine {
               // ignore
             }
           }
+
           if (!String(error.message || '').includes('pool is closing')) {
-            console.log(`Insert blast worker ${workerId} error: ${error.message}`);
+            console.log(`Insert blast worker ${workload.name}/${workerId} error: ${error.message}`);
           }
         } finally {
           if (!reuseSession && connection) {
@@ -263,13 +322,19 @@ class InsertBlastEngine {
           if (pending > 0) {
             await connection.commit();
             this.stats.commits += 1;
+            this.stats.workloads[workload.id].commits += 1;
           }
           await connection.close();
         } catch (closeError) {
           // ignore
         }
       }
+
       this.activeWorkers -= 1;
+      this.stats.workloads[workload.id].activeWorkers = Math.max(
+        0,
+        this.stats.workloads[workload.id].activeWorkers - 1
+      );
     }
   }
 
@@ -277,9 +342,25 @@ class InsertBlastEngine {
     const elapsed = Math.max(1, (Date.now() - this.previousStats.startedAt) / 1000);
     const deltaInserts = this.stats.inserts - this.previousStats.inserts;
     const deltaErrors = this.stats.errors - this.previousStats.errors;
+    const workloads = {};
+
+    Object.values(this.stats.workloads || {}).forEach((workloadStats) => {
+      const previousWorkload = this.previousStats.workloads?.[workloadStats.id] || {};
+      const workloadDeltaInserts = workloadStats.inserts - Number(previousWorkload.inserts || 0);
+      const workloadDeltaErrors = workloadStats.errors - Number(previousWorkload.errors || 0);
+
+      workloads[workloadStats.id] = {
+        ...workloadStats,
+        perSecond: {
+          inserts: Number((workloadDeltaInserts / elapsed).toFixed(2)),
+          errors: Number((workloadDeltaErrors / elapsed).toFixed(2))
+        }
+      };
+    });
+
     const payload = {
       isRunning: this.isRunning,
-      uptime: Math.floor((Date.now() - this.startedAt) / 1000),
+      uptime: this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : 0,
       activeWorkers: this.activeWorkers,
       total: {
         inserts: this.stats.inserts,
@@ -291,17 +372,13 @@ class InsertBlastEngine {
         errors: Number((deltaErrors / elapsed).toFixed(2))
       },
       byTable: this.stats.byTable,
+      workloads,
       config: this.config
     };
 
     if (this.io) {
       this.io.emit('insert-blast-metrics', payload);
-      this.io.emit('insert-blast-status', {
-        isRunning: this.isRunning,
-        config: this.config,
-        uptime: payload.uptime,
-        activeWorkers: this.activeWorkers
-      });
+      this.io.emit('insert-blast-status', this.getStatus());
     }
 
     this.previousStats = {
@@ -309,6 +386,9 @@ class InsertBlastEngine {
       commits: this.stats.commits,
       errors: this.stats.errors,
       byTable: { ...this.stats.byTable },
+      workloads: Object.fromEntries(
+        Object.entries(this.stats.workloads || {}).map(([id, workloadStats]) => [id, { ...workloadStats }])
+      ),
       startedAt: Date.now()
     };
   }
@@ -324,28 +404,69 @@ class InsertBlastEngine {
     this.runId = uuidv4();
     this.isRunning = true;
     this.startedAt = Date.now();
-    this.stats = this.initStats();
-    this.previousStats = this.initStats();
+    this.stats = this.initStats(this.config);
+    this.previousStats = this.initStats(this.config);
     this.tableNames = this.getTableNames();
-    this.pool = this.config.sessionMode === 'reuse'
-      ? await oracleDb.createStressPool(this.config.sessions)
-      : null;
+    this.insertSqlCache = Object.fromEntries(
+      this.tableNames.map((tableName) => [tableName, this.buildInsertSql(tableName)])
+    );
 
-    this.workers = Array.from({ length: this.config.sessions }, (_, index) => this.runWorker(index + 1));
-    this.statsInterval = setInterval(() => this.emitMetrics(), 1000);
+    this.runtimeWorkloads = this.config.workloads.map((workload) => ({
+      ...workload,
+      startedAt: Date.now(),
+      pool: null
+    }));
+
+    for (const workload of this.runtimeWorkloads) {
+      if (workload.sessionMode === 'reuse') {
+        workload.pool = await oracleDb.createStressPool(workload.sessions);
+      }
+    }
+
+    this.workers = this.runtimeWorkloads.flatMap((workload) => (
+      Array.from({ length: workload.sessions }, (_, index) => this.runWorker(workload, index + 1))
+    ));
+
+    this.statsInterval = setInterval(() => {
+      this.emitMetrics();
+
+      if (this.isRunning && this.runtimeWorkloads.every((workload) => !this.isWorkloadActive(workload)) && this.activeWorkers === 0) {
+        this.stop().catch(() => {});
+      }
+    }, 1000);
+
     this.stopTimer = setTimeout(() => {
       this.stop().catch(() => {});
-    }, this.config.durationSeconds * 1000);
+    }, (this.config.maxDurationSeconds + 1) * 1000);
 
     return this.getStatus();
   }
 
   getStatus() {
+    const workloadStatuses = (this.config?.workloads || []).map((workload) => {
+      const runtimeWorkload = this.runtimeWorkloads.find((item) => item.id === workload.id);
+      const workloadStats = this.stats.workloads?.[workload.id] || {};
+      const uptime = runtimeWorkload?.startedAt
+        ? Math.floor((Date.now() - runtimeWorkload.startedAt) / 1000)
+        : 0;
+
+      return {
+        ...workload,
+        isRunning: Boolean(runtimeWorkload && this.isWorkloadActive(runtimeWorkload)),
+        uptime,
+        activeWorkers: workloadStats.activeWorkers || 0,
+        inserts: workloadStats.inserts || 0,
+        commits: workloadStats.commits || 0,
+        errors: workloadStats.errors || 0
+      };
+    });
+
     return {
       isRunning: this.isRunning,
       config: this.config,
-      uptime: this.isRunning ? Math.floor((Date.now() - this.startedAt) / 1000) : 0,
+      uptime: this.isRunning && this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : 0,
       activeWorkers: this.activeWorkers,
+      workloads: workloadStatuses,
       stats: this.stats
     };
   }
@@ -371,13 +492,15 @@ class InsertBlastEngine {
       new Promise((resolve) => setTimeout(resolve, 3000))
     ]);
 
-    if (this.pool) {
-      try {
-        await this.pool.close(10);
-      } catch (error) {
-        console.log('Insert blast pool close error:', error.message);
+    for (const workload of this.runtimeWorkloads) {
+      if (workload.pool) {
+        try {
+          await workload.pool.close(10);
+        } catch (error) {
+          console.log(`Insert blast pool close error for ${workload.name}:`, error.message);
+        }
+        workload.pool = null;
       }
-      this.pool = null;
     }
 
     const killSummary = await this.killTrackedSessions();
@@ -390,11 +513,15 @@ class InsertBlastEngine {
       });
     }
 
+    this.emitMetrics();
+
     this.db = null;
+    this.insertSqlCache = {};
     this.workers = [];
+    this.runtimeWorkloads = [];
+    this.activeWorkers = 0;
     this.runId = null;
 
-    this.emitMetrics();
     return this.getStatus();
   }
 }

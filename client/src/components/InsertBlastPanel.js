@@ -1,5 +1,24 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
+import { Bar } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend
+} from 'chart.js';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend
+);
 
 const getServerUrl = () => {
   if (window.location.hostname !== 'localhost') {
@@ -9,22 +28,70 @@ const getServerUrl = () => {
 };
 
 const API_BASE = `${getServerUrl()}/api`;
+const WAIT_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#14b8a6', '#e11d48', '#84cc16'];
+const LMS_USED_COLOR = '#22c55e';
+const LMS_ALLOC_COLOR = '#f59e0b';
+
+const createWorkload = (index = 1) => ({
+  id: `workload_${Date.now()}_${index}`,
+  name: `Workload ${index}`,
+  sessions: 8,
+  durationSeconds: 60,
+  commitEvery: 50,
+  sessionMode: 'reuse'
+});
+
+const normalizeWorkload = (workload, index) => ({
+  id: workload.id || `workload_${index + 1}`,
+  name: workload.name || `Workload ${index + 1}`,
+  sessions: workload.sessions || 8,
+  durationSeconds: workload.durationSeconds || 60,
+  commitEvery: workload.commitEvery || 50,
+  sessionMode: workload.sessionMode || 'reuse'
+});
+
+const aggregateWaitEvents = (rows = []) => {
+  const grouped = new Map();
+
+  rows.forEach((row) => {
+    const key = row.event || 'Unknown Event';
+    const existing = grouped.get(key) || {
+      event: key,
+      waitClass: row.waitClass || 'Unknown',
+      totalWaits: 0,
+      timeWaitedSeconds: 0,
+      averageWaitMs: 0
+    };
+
+    existing.totalWaits += Number(row.totalWaits || 0);
+    existing.timeWaitedSeconds += Number(row.timeWaitedSeconds || 0);
+    grouped.set(key, existing);
+  });
+
+  return Array.from(grouped.values())
+    .map((row) => ({
+      ...row,
+      averageWaitMs: row.totalWaits > 0 ? (row.timeWaitedSeconds * 1000) / row.totalWaits : 0
+    }))
+    .sort((a, b) => b.timeWaitedSeconds - a.timeWaitedSeconds)
+    .slice(0, 10);
+};
 
 function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
   const [config, setConfig] = useState({
     tablePrefix: 'IBLAST',
     tableCount: 8,
     columnsPerTable: 24,
-    sessions: 8,
-    durationSeconds: 60,
-    commitEvery: 50,
-    sessionMode: 'reuse'
+    workloads: [createWorkload(1)]
   });
   const [schemaStatus, setSchemaStatus] = useState(null);
-  const [workloadStatus, setWorkloadStatus] = useState({ isRunning: false });
+  const [workloadStatus, setWorkloadStatus] = useState({ isRunning: false, workloads: [] });
   const [metrics, setMetrics] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [monitorSnapshot, setMonitorSnapshot] = useState(null);
+  const [waitEvents, setWaitEvents] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [monitorError, setMonitorError] = useState('');
 
   const loadStatus = async (nextConfig = config) => {
     if (!dbStatus.connected) {
@@ -39,24 +106,86 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
           columnsPerTable: nextConfig.columnsPerTable
         }
       });
+
       if (response.data.success) {
         setSchemaStatus(response.data.schema);
-        setWorkloadStatus(response.data.workload || { isRunning: false });
+        setWorkloadStatus(response.data.workload || { isRunning: false, workloads: [] });
+        if (response.data.workload?.config) {
+          setConfig((prev) => ({
+            ...prev,
+            tablePrefix: response.data.workload.config.tablePrefix || prev.tablePrefix,
+            tableCount: response.data.workload.config.tableCount || prev.tableCount,
+            columnsPerTable: response.data.workload.config.columnsPerTable || prev.columnsPerTable,
+            workloads: (response.data.workload.config.workloads || prev.workloads).map(normalizeWorkload)
+          }));
+        }
       }
     } catch (err) {
       onError?.(err.response?.data?.message || 'Failed to load insert blast status');
     }
   };
 
+  const loadMonitorSnapshot = async () => {
+    if (!dbStatus.connected) {
+      return;
+    }
+
+    try {
+      const response = await axios.get(`${API_BASE}/insert-blast/monitor`);
+      if (response.data.success) {
+        setMonitorSnapshot(response.data);
+        setMonitorError('');
+      }
+    } catch (err) {
+      setMonitorError(err.response?.data?.message || 'Failed to load insert-blast monitor data');
+    }
+  };
+
+  const loadWaitEvents = async () => {
+    if (!dbStatus.connected) {
+      return;
+    }
+
+    try {
+      const response = await axios.get(`${API_BASE}/monitor/waits`, {
+        params: { limit: 20 }
+      });
+      if (response.data.success) {
+        setWaitEvents(response.data.waits || []);
+      }
+    } catch (err) {
+      setMonitorError(err.response?.data?.message || 'Failed to load wait events');
+    }
+  };
+
   useEffect(() => {
     if (dbStatus.connected) {
       loadStatus();
+      loadMonitorSnapshot();
+      loadWaitEvents();
     } else {
       setSchemaStatus(null);
-      setWorkloadStatus({ isRunning: false });
+      setWorkloadStatus({ isRunning: false, workloads: [] });
       setMetrics(null);
       setProgress(null);
+      setMonitorSnapshot(null);
+      setWaitEvents([]);
+      setMonitorError('');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dbStatus.connected]);
+
+  useEffect(() => {
+    if (!dbStatus.connected) {
+      return undefined;
+    }
+
+    const interval = setInterval(() => {
+      loadMonitorSnapshot();
+      loadWaitEvents();
+    }, 5000);
+
+    return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbStatus.connected]);
 
@@ -69,11 +198,20 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       setProgress(data);
       if (data.progress === 100 || data.progress === -1) {
         setBusy(false);
-        setTimeout(() => loadStatus(), 500);
+        setTimeout(() => {
+          loadStatus();
+          loadMonitorSnapshot();
+        }, 500);
       }
     };
-    const handleStatus = (data) => setWorkloadStatus(data);
-    const handleMetrics = (data) => setMetrics(data);
+
+    const handleStatus = (data) => {
+      setWorkloadStatus(data || { isRunning: false, workloads: [] });
+    };
+
+    const handleMetrics = (data) => {
+      setMetrics(data);
+    };
 
     socket.on('insert-blast-progress', handleProgress);
     socket.on('insert-blast-status', handleStatus);
@@ -85,7 +223,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       socket.off('insert-blast-metrics', handleMetrics);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, config.tablePrefix, config.tableCount, config.columnsPerTable]);
+  }, [socket]);
 
   const handleChange = (field, value) => {
     setConfig((prev) => ({
@@ -94,9 +232,41 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     }));
   };
 
+  const handleWorkloadChange = (workloadId, field, value) => {
+    setConfig((prev) => ({
+      ...prev,
+      workloads: prev.workloads.map((workload) => (
+        workload.id === workloadId
+          ? { ...workload, [field]: value }
+          : workload
+      ))
+    }));
+  };
+
+  const addWorkload = () => {
+    setConfig((prev) => ({
+      ...prev,
+      workloads: [...prev.workloads, createWorkload(prev.workloads.length + 1)]
+    }));
+  };
+
+  const removeWorkload = (workloadId) => {
+    setConfig((prev) => {
+      if (prev.workloads.length <= 1) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        workloads: prev.workloads.filter((workload) => workload.id !== workloadId)
+      };
+    });
+  };
+
   const handleCreate = async () => {
     setBusy(true);
     setProgress({ step: 'Creating insert-blast tables...', progress: 0 });
+
     try {
       const response = await axios.post(`${API_BASE}/insert-blast/create`, config, {
         timeout: 600000
@@ -118,6 +288,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
 
     setBusy(true);
     setProgress({ step: 'Dropping insert-blast tables...', progress: 0 });
+
     try {
       const response = await axios.post(`${API_BASE}/insert-blast/drop`, config, {
         timeout: 600000
@@ -134,12 +305,23 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
 
   const handleStart = async () => {
     setBusy(true);
+
     try {
-      const response = await axios.post(`${API_BASE}/insert-blast/start`, config, {
+      const payload = {
+        ...config,
+        workloads: config.workloads.map((workload, index) => normalizeWorkload(workload, index))
+      };
+      const response = await axios.post(`${API_BASE}/insert-blast/start`, payload, {
         timeout: 120000
       });
+
       if (response.data.success) {
+        setConfig((prev) => ({
+          ...prev,
+          workloads: (response.data.config?.workloads || prev.workloads).map(normalizeWorkload)
+        }));
         setWorkloadStatus(response.data);
+        await Promise.all([loadMonitorSnapshot(), loadWaitEvents()]);
         onSuccess?.('Insert-only workload started');
       }
     } catch (err) {
@@ -151,12 +333,14 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
 
   const handleStop = async () => {
     setBusy(true);
+
     try {
       const response = await axios.post(`${API_BASE}/insert-blast/stop`, {}, {
         timeout: 60000
       });
       if (response.data.success) {
         setWorkloadStatus(response.data);
+        await Promise.all([loadMonitorSnapshot(), loadWaitEvents()]);
         onSuccess?.('Insert-only workload stopped');
       }
     } catch (err) {
@@ -167,12 +351,90 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
   };
 
   const existingCount = schemaStatus?.existingTables?.length || 0;
+  const runtimeWorkloadMap = useMemo(() => (
+    Object.fromEntries((workloadStatus?.workloads || []).map((workload) => [workload.id, workload]))
+  ), [workloadStatus?.workloads]);
+
   const tableSummary = useMemo(() => {
     const byTable = metrics?.byTable || {};
     return Object.entries(byTable)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
   }, [metrics]);
+
+  const workloadMetrics = useMemo(() => (
+    Object.values(metrics?.workloads || {}).sort((a, b) => b.inserts - a.inserts)
+  ), [metrics]);
+
+  const totalConfiguredSessions = useMemo(() => (
+    config.workloads.reduce((sum, workload) => sum + (Number.parseInt(workload.sessions, 10) || 0), 0)
+  ), [config.workloads]);
+
+  const topWaitEvents = useMemo(() => aggregateWaitEvents(waitEvents), [waitEvents]);
+  const waitEventsChartData = useMemo(() => ({
+    labels: topWaitEvents.map((row) => row.event),
+    datasets: [{
+      label: 'Time Waited (seconds)',
+      data: topWaitEvents.map((row) => Number(Number(row.timeWaitedSeconds || 0).toFixed(2))),
+      backgroundColor: topWaitEvents.map((_, index) => WAIT_COLORS[index % WAIT_COLORS.length]),
+      borderRadius: 6
+    }]
+  }), [topWaitEvents]);
+
+  const lmsRows = useMemo(() => (
+    [...(monitorSnapshot?.lmsProcessMemory?.rows || [])]
+      .sort((a, b) => Number(b.allocMb || 0) - Number(a.allocMb || 0))
+      .slice(0, 10)
+  ), [monitorSnapshot]);
+
+  const lmsChartData = useMemo(() => ({
+    labels: lmsRows.map((row) => `I${row.instId} ${row.processName}/${row.pid} ${row.category}`),
+    datasets: [
+      {
+        label: 'Allocated MB',
+        data: lmsRows.map((row) => row.allocMb || 0),
+        backgroundColor: LMS_ALLOC_COLOR,
+        borderRadius: 6
+      },
+      {
+        label: 'Used MB',
+        data: lmsRows.map((row) => row.usedMb || 0),
+        backgroundColor: LMS_USED_COLOR,
+        borderRadius: 6
+      }
+    ]
+  }), [lmsRows]);
+
+  const horizontalBarOptions = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    indexAxis: 'y',
+    plugins: {
+      legend: {
+        labels: {
+          color: '#cbd5e1'
+        }
+      }
+    },
+    scales: {
+      x: {
+        ticks: {
+          color: '#94a3b8'
+        },
+        grid: {
+          color: 'rgba(148, 163, 184, 0.12)'
+        }
+      },
+      y: {
+        ticks: {
+          color: '#cbd5e1'
+        },
+        grid: {
+          color: 'rgba(148, 163, 184, 0.05)'
+        }
+      }
+    }
+  }), []);
 
   if (!dbStatus.connected) {
     return (
@@ -191,13 +453,17 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     <div className="panel">
       <div className="panel-header">
         <h2>Insert Blast</h2>
-        <button className="btn btn-secondary btn-sm" type="button" onClick={() => loadStatus()} disabled={busy}>
+        <button className="btn btn-secondary btn-sm" type="button" onClick={() => {
+          loadStatus();
+          loadMonitorSnapshot();
+          loadWaitEvents();
+        }} disabled={busy}>
           Refresh
         </button>
       </div>
       <div className="panel-content">
         <p style={{ marginTop: 0, color: 'var(--text-muted)' }}>
-          Create many wide tables in the current schema, then run an insert-only workload for a chosen duration and session count.
+          Create many wide tables in the current schema, then run one or more insert-only workloads against them with independent session counts, durations, and session modes.
         </p>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.85rem' }}>
@@ -255,6 +521,14 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               </div>
             </div>
             <div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Configured Workloads</div>
+              <div style={{ fontWeight: 600 }}>{config.workloads.length}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Configured Sessions</div>
+              <div style={{ fontWeight: 600 }}>{totalConfiguredSessions}</div>
+            </div>
+            <div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Workload</div>
               <div style={{ fontWeight: 600, color: workloadStatus?.isRunning ? 'var(--accent-warning)' : 'var(--text-primary)' }}>
                 {workloadStatus?.isRunning ? `Running (${workloadStatus.uptime || 0}s)` : 'Stopped'}
@@ -281,64 +555,114 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
           </div>
         )}
 
-        <div style={{ marginTop: '1.25rem', display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.85rem' }}>
-          <div className="form-group">
-            <label htmlFor="ib-session-mode">Session Mode</label>
-            <select
-              id="ib-session-mode"
-              value={config.sessionMode}
-              onChange={(e) => handleChange('sessionMode', e.target.value)}
-              disabled={busy || workloadStatus.isRunning}
-            >
-              <option value="reuse">Logon once, reuse session, logoff at end</option>
-              <option value="reconnect">Logon, insert, logout each cycle</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label htmlFor="ib-sessions">Sessions</label>
-            <input
-              id="ib-sessions"
-              type="number"
-              min="1"
-              max="1000"
-              value={config.sessions}
-              onChange={(e) => handleChange('sessions', e.target.value)}
-              disabled={busy || workloadStatus.isRunning}
-            />
-          </div>
+        <div style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+          <h3 style={{ margin: 0 }}>Workloads</h3>
+          <button className="btn btn-secondary btn-sm" type="button" onClick={addWorkload} disabled={busy || workloadStatus.isRunning || config.workloads.length >= 20}>
+            Add Workload
+          </button>
         </div>
 
-        <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-          {config.sessionMode === 'reconnect'
-            ? `Each of the ${config.sessions} workers will repeatedly log on, insert, commit, and log off until the run ends.`
-            : `Each of the ${config.sessions} workers will log on once, keep the same session for the whole run, and log off at the end.`}
-        </div>
+        <div style={{ marginTop: '0.85rem', display: 'grid', gap: '0.85rem' }}>
+          {config.workloads.map((workload, index) => {
+            const runtime = runtimeWorkloadMap[workload.id];
 
-        <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.85rem' }}>
-          <div className="form-group">
-            <label htmlFor="ib-duration">Run Time (seconds)</label>
-            <input
-              id="ib-duration"
-              type="number"
-              min="1"
-              max="86400"
-              value={config.durationSeconds}
-              onChange={(e) => handleChange('durationSeconds', e.target.value)}
-              disabled={busy || workloadStatus.isRunning}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="ib-commit-every">Commit Every N Inserts</label>
-            <input
-              id="ib-commit-every"
-              type="number"
-              min="1"
-              max="1000"
-              value={config.commitEvery}
-              onChange={(e) => handleChange('commitEvery', e.target.value)}
-              disabled={busy || workloadStatus.isRunning}
-            />
-          </div>
+            return (
+              <div
+                key={workload.id}
+                style={{
+                  background: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  padding: '0.9rem'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <strong>{workload.name || `Workload ${index + 1}`}</strong>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    {runtime && (
+                      <span style={{ fontSize: '0.8rem', color: runtime.isRunning ? 'var(--accent-warning)' : 'var(--text-muted)' }}>
+                        {runtime.isRunning ? `Running ${runtime.uptime || 0}s` : 'Idle'}
+                      </span>
+                    )}
+                    <button
+                      className="btn btn-danger btn-sm"
+                      type="button"
+                      onClick={() => removeWorkload(workload.id)}
+                      disabled={busy || workloadStatus.isRunning || config.workloads.length <= 1}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: '0.85rem' }}>
+                  <div className="form-group">
+                    <label htmlFor={`ib-workload-name-${workload.id}`}>Name</label>
+                    <input
+                      id={`ib-workload-name-${workload.id}`}
+                      value={workload.name}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'name', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor={`ib-session-mode-${workload.id}`}>Session Mode</label>
+                    <select
+                      id={`ib-session-mode-${workload.id}`}
+                      value={workload.sessionMode}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'sessionMode', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    >
+                      <option value="reuse">Logon once, reuse session</option>
+                      <option value="reconnect">Logon/insert/logout loop</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor={`ib-sessions-${workload.id}`}>Sessions</label>
+                    <input
+                      id={`ib-sessions-${workload.id}`}
+                      type="number"
+                      min="1"
+                      max="1000"
+                      value={workload.sessions}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'sessions', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor={`ib-duration-${workload.id}`}>Run Time (seconds)</label>
+                    <input
+                      id={`ib-duration-${workload.id}`}
+                      type="number"
+                      min="1"
+                      max="86400"
+                      value={workload.durationSeconds}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'durationSeconds', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor={`ib-commit-${workload.id}`}>Commit Every</label>
+                    <input
+                      id={`ib-commit-${workload.id}`}
+                      type="number"
+                      min="1"
+                      max="1000"
+                      value={workload.commitEvery}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'commitEvery', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  {workload.sessionMode === 'reconnect'
+                    ? `${workload.sessions} clients will log on, insert, commit, and log off repeatedly for ${workload.durationSeconds} seconds.`
+                    : `${workload.sessions} clients will keep the same session open for ${workload.durationSeconds} seconds and commit every ${workload.commitEvery} inserts.`}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div className="btn-group" style={{ marginTop: '1rem' }}>
@@ -371,6 +695,42 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               </div>
             </div>
 
+            {workloadMetrics.length > 0 && (
+              <div style={{
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                padding: '0.9rem'
+              }}>
+                <h3 style={{ marginTop: 0 }}>Workload Breakdown</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem' }}>
+                  {workloadMetrics.map((workload) => (
+                    <div
+                      key={workload.id}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: '8px',
+                        padding: '0.75rem'
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>{workload.name}</div>
+                      <div style={{ marginTop: '0.4rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        {workload.sessionMode === 'reuse' ? 'Reuse session' : 'Reconnect each cycle'}
+                      </div>
+                      <div style={{ marginTop: '0.6rem', display: 'grid', gap: '0.3rem', fontSize: '0.9rem' }}>
+                        <div>Sessions: <strong>{workload.sessions}</strong></div>
+                        <div>Active Workers: <strong>{workload.activeWorkers}</strong></div>
+                        <div>Inserts: <strong>{workload.inserts}</strong></div>
+                        <div>Inserts/Sec: <strong>{workload.perSecond?.inserts || 0}</strong></div>
+                        <div>Commits: <strong>{workload.commits}</strong></div>
+                        <div>Errors: <strong>{workload.errors}</strong></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{
               background: 'var(--surface)',
               border: '1px solid var(--border)',
@@ -393,6 +753,88 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
             </div>
           </div>
         )}
+
+        <div style={{ marginTop: '1.25rem', display: 'grid', gap: '1rem' }}>
+          <div style={{
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+            padding: '0.9rem'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <h3 style={{ margin: 0 }}>Connected User Sessions Per Instance</h3>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                User: {monitorSnapshot?.userSessions?.username || dbStatus.config?.user || '-'}
+              </span>
+            </div>
+            <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
+              {(monitorSnapshot?.userSessions?.sessions || []).length > 0 ? (
+                monitorSnapshot.userSessions.sessions.map((row) => (
+                  <div
+                    key={`inst-${row.instId}`}
+                    style={{
+                      border: '1px solid var(--border)',
+                      borderRadius: '8px',
+                      padding: '0.75rem'
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>Instance {row.instId}</div>
+                    <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.25rem', fontSize: '0.9rem' }}>
+                      <div>Total: <strong>{row.totalSessions}</strong></div>
+                      <div>Active: <strong>{row.activeSessions}</strong></div>
+                      <div>Inactive: <strong>{row.inactiveSessions}</strong></div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p style={{ margin: 0, color: 'var(--text-muted)' }}>No user sessions found for the connected schema yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div style={{
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+            padding: '0.9rem'
+          }}>
+            <h3 style={{ margin: '0 0 0.85rem 0' }}>Top 10 Wait Events</h3>
+            {topWaitEvents.length > 0 ? (
+              <div style={{ height: '340px' }}>
+                <Bar data={waitEventsChartData} options={horizontalBarOptions} />
+              </div>
+            ) : (
+              <p style={{ margin: 0, color: 'var(--text-muted)' }}>Wait event data is not available yet.</p>
+            )}
+          </div>
+
+          <div style={{
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+            padding: '0.9rem'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <h3 style={{ margin: 0 }}>LMS Process Memory</h3>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                {monitorSnapshot?.lmsProcessMemory?.source || 'No source yet'}
+              </span>
+            </div>
+            {lmsRows.length > 0 ? (
+              <div style={{ marginTop: '0.85rem', height: '360px' }}>
+                <Bar data={lmsChartData} options={horizontalBarOptions} />
+              </div>
+            ) : (
+              <p style={{ marginTop: '0.85rem', marginBottom: 0, color: 'var(--text-muted)' }}>
+                No LMS rows returned by the database.
+              </p>
+            )}
+          </div>
+
+          {monitorError && (
+            <p style={{ margin: 0, color: 'var(--accent-danger)' }}>{monitorError}</p>
+          )}
+        </div>
       </div>
     </div>
   );
