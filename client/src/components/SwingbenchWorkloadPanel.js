@@ -176,7 +176,9 @@ function SwingbenchWorkloadPanel({ dbStatus, socket, onSuccess, onError }) {
       </div>
       <div className="panel-content">
         <p style={{ marginTop: 0, color: 'var(--text-muted)' }}>
-          This runner uses the packaged `ORDERENTRY` PL/SQL workload profile from `SOE_Server_Side_V2.xml`.
+          This runner uses JDBC-style SOE workloads modeled on the bundled `orderentryjdbc` Java sources such as
+          `NewCustomerProcess`, `NewOrderProcess`, `ProcessOrders`, `BrowseProducts`, `BrowseAndUpdateOrders`,
+          `SalesRepsOrdersQuery`, and `WarehouseOrdersQuery`. The shared `OrderEntryProcess` base logic is applied inside the engine.
         </p>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.85rem' }}>
