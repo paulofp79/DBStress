@@ -140,10 +140,14 @@ class InsertBlastManager {
     );
 
     const expectedSet = new Set(tableNames);
-    const existing = (result.rows || [])
+    const prefixMatches = (result.rows || []).map((row) => ({
+      tableName: row.TABLE_NAME,
+      estimatedRows: Number(row.NUM_ROWS || 0)
+    }));
+    const existing = prefixMatches
       .map((row) => ({
-        tableName: row.TABLE_NAME,
-        estimatedRows: Number(row.NUM_ROWS || 0)
+        tableName: row.tableName,
+        estimatedRows: row.estimatedRows
       }))
       .filter((row) => expectedSet.has(row.tableName));
 
@@ -151,6 +155,8 @@ class InsertBlastManager {
       config: normalized,
       ready: existing.length === tableNames.length,
       existingTables: existing,
+      existingTableCount: prefixMatches.length,
+      prefixMatchedTables: prefixMatches,
       missingTables: tableNames.filter((name) => !existing.some((row) => row.tableName === name))
     };
   }

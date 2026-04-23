@@ -110,12 +110,9 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       if (response.data.success) {
         setSchemaStatus(response.data.schema);
         setWorkloadStatus(response.data.workload || { isRunning: false, workloads: [] });
-        if (response.data.workload?.config) {
+        if (response.data.workload?.isRunning && response.data.workload?.config) {
           setConfig((prev) => ({
             ...prev,
-            tablePrefix: response.data.workload.config.tablePrefix || prev.tablePrefix,
-            tableCount: response.data.workload.config.tableCount || prev.tableCount,
-            columnsPerTable: response.data.workload.config.columnsPerTable || prev.columnsPerTable,
             workloads: (response.data.workload.config.workloads || prev.workloads).map(normalizeWorkload)
           }));
         }
@@ -350,7 +347,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     }
   };
 
-  const existingCount = schemaStatus?.existingTables?.length || 0;
+  const existingCount = Number(schemaStatus?.existingTableCount || 0);
   const runtimeWorkloadMap = useMemo(() => (
     Object.fromEntries((workloadStatus?.workloads || []).map((workload) => [workload.id, workload]))
   ), [workloadStatus?.workloads]);
@@ -512,7 +509,10 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
             <div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Existing Tables</div>
-              <div style={{ fontWeight: 600 }}>{existingCount} / {config.tableCount}</div>
+              <div style={{ fontWeight: 600 }}>{existingCount}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+                Requested: {config.tableCount}
+              </div>
             </div>
             <div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Schema Ready</div>
