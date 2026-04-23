@@ -9,7 +9,7 @@ const LAST_NAMES = ['smith', 'johnson', 'brown', 'silva', 'garcia', 'miller', 'r
 const TOWNS = ['Sao Paulo', 'Austin', 'Lisbon', 'Miami', 'Porto Alegre', 'Dallas', 'Curitiba', 'Seattle'];
 const COUNTIES = ['Travis', 'King', 'Orange', 'Cook', 'Broward', 'Maricopa', 'Fulton', 'Suffolk'];
 const COUNTRIES = ['Brazil', 'United States', 'Portugal', 'Mexico', 'Canada'];
-const NLS_LANGS = ['AMERICAN', 'BRAZILIAN PORTUGUESE', 'SPANISH', 'FRENCH'];
+const NLS_LANGS = ['US', 'BR', 'ES', 'FR', 'DE', 'UK'];
 const NLS_TERRITORIES = ['BRAZIL', 'AMERICA', 'PORTUGAL', 'MEXICO', 'CANADA'];
 
 const WORKLOAD_DEFINITIONS = [
