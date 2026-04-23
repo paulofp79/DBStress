@@ -1,7 +1,7 @@
 class InsertBlastManager {
   normalizeConfig(config = {}) {
     const tablePrefix = String(config.tablePrefix || 'IBLAST').trim().toUpperCase().replace(/[^A-Z0-9_$#]/g, '');
-    const tableCount = Math.max(1, Math.min(200, Number.parseInt(config.tableCount, 10) || 8));
+    const tableCount = Math.max(1, Math.min(5000, Number.parseInt(config.tableCount, 10) || 8));
     const columnsPerTable = Math.max(4, Math.min(200, Number.parseInt(config.columnsPerTable, 10) || 24));
 
     if (!tablePrefix) {
@@ -123,27 +123,29 @@ class InsertBlastManager {
   async getStatus(oracleDb, config = {}) {
     const normalized = this.normalizeConfig(config);
     const tableNames = this.getTableNames(normalized);
-    const binds = { owner: oracleDb.getStatus().config?.user?.toUpperCase?.() || null };
-
-    const nameBindMap = {};
-    tableNames.forEach((name, index) => {
-      nameBindMap[`t${index}`] = name;
-    });
+    const escapedPrefix = normalized.tablePrefix
+      .replace(/\\/g, '\\\\')
+      .replace(/_/g, '\\_')
+      .replace(/%/g, '\\%');
+    const likePattern = `${escapedPrefix}\\_T%`;
 
     const result = await oracleDb.execute(
       `
         SELECT table_name, num_rows
         FROM user_tables
-        WHERE table_name IN (${tableNames.map((_, index) => `:t${index}`).join(', ')})
+        WHERE table_name LIKE :likePattern ESCAPE '\\'
         ORDER BY table_name
       `,
-      nameBindMap
+      { likePattern }
     );
 
-    const existing = (result.rows || []).map((row) => ({
-      tableName: row.TABLE_NAME,
-      estimatedRows: Number(row.NUM_ROWS || 0)
-    }));
+    const expectedSet = new Set(tableNames);
+    const existing = (result.rows || [])
+      .map((row) => ({
+        tableName: row.TABLE_NAME,
+        estimatedRows: Number(row.NUM_ROWS || 0)
+      }))
+      .filter((row) => expectedSet.has(row.tableName));
 
     return {
       config: normalized,

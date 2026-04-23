@@ -216,7 +216,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               id="ib-table-count"
               type="number"
               min="1"
-              max="200"
+              max="5000"
               value={config.tableCount}
               onChange={(e) => handleChange('tableCount', e.target.value)}
               disabled={busy || workloadStatus.isRunning}

@@ -31,7 +31,7 @@ class InsertBlastEngine {
   normalizeConfig(config = {}) {
     return {
       tablePrefix: String(config.tablePrefix || 'IBLAST').trim().toUpperCase().replace(/[^A-Z0-9_$#]/g, ''),
-      tableCount: Math.max(1, Math.min(200, Number.parseInt(config.tableCount, 10) || 8)),
+      tableCount: Math.max(1, Math.min(5000, Number.parseInt(config.tableCount, 10) || 8)),
       columnsPerTable: Math.max(4, Math.min(200, Number.parseInt(config.columnsPerTable, 10) || 24)),
       sessions: Math.max(1, Math.min(1000, Number.parseInt(config.sessions, 10) || 8)),
       durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(config.durationSeconds, 10) || 60)),
