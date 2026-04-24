@@ -13,7 +13,7 @@ const API_BASE = `${getServerUrl()}/api`;
 function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
   const [snapshot, setSnapshot] = useState({ tablespaces: [], scheduler: { schedules: [] } });
   const [loading, setLoading] = useState(false);
-  const [selectedFileName, setSelectedFileName] = useState('');
+  const [selectedFileNames, setSelectedFileNames] = useState([]);
   const [config, setConfig] = useState({
     incrementMb: 100,
     intervalSeconds: 60
@@ -43,7 +43,7 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
       loadStatus();
     } else {
       setSnapshot({ tablespaces: [], scheduler: { schedules: [] } });
-      setSelectedFileName('');
+      setSelectedFileNames([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbStatus.connected]);
@@ -87,35 +87,62 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
   ), [snapshot.tablespaces]);
 
   useEffect(() => {
-    if (!selectedFileName && datafiles.length > 0) {
-      setSelectedFileName(datafiles[0].fileName);
+    if (selectedFileNames.length === 0 && datafiles.length > 0) {
+      setSelectedFileNames([datafiles[0].fileName]);
     }
-  }, [datafiles, selectedFileName]);
+  }, [datafiles, selectedFileNames]);
+
+  useEffect(() => {
+    setSelectedFileNames((prev) => prev.filter((fileName) => datafiles.some((item) => item.fileName === fileName)));
+  }, [datafiles]);
 
   const schedulesByFile = useMemo(() => (
     Object.fromEntries((snapshot.scheduler?.schedules || []).map((schedule) => [schedule.fileName, schedule]))
   ), [snapshot.scheduler]);
 
-  const selectedDatafile = datafiles.find((item) => item.fileName === selectedFileName) || null;
+  const selectedDatafiles = useMemo(() => (
+    datafiles.filter((item) => selectedFileNames.includes(item.fileName))
+  ), [datafiles, selectedFileNames]);
+
+  const selectedDatafile = selectedDatafiles[0] || null;
+
+  const toggleFileSelection = (fileName) => {
+    setSelectedFileNames((prev) => (
+      prev.includes(fileName)
+        ? prev.filter((item) => item !== fileName)
+        : [...prev, fileName]
+    ));
+  };
+
+  const handleSelectAll = () => {
+    setSelectedFileNames(datafiles.map((item) => item.fileName));
+  };
+
+  const handleClearSelection = () => {
+    setSelectedFileNames([]);
+  };
 
   const handleStart = async () => {
-    if (!selectedDatafile) {
-      onError?.('Choose a datafile first.');
+    if (selectedDatafiles.length === 0) {
+      onError?.('Choose at least one datafile first.');
       return;
     }
 
     setLoading(true);
     try {
-      const response = await axios.post(`${API_BASE}/datafiles/growth/start`, {
-        fileName: selectedDatafile.fileName,
-        tablespaceName: selectedDatafile.tablespaceName,
-        incrementMb: Number(config.incrementMb),
-        intervalSeconds: Number(config.intervalSeconds)
-      });
-      if (response.data.success) {
-        onSuccess?.(`Scheduled ${selectedDatafile.fileName} to grow by ${config.incrementMb} MB every ${config.intervalSeconds} seconds`);
-        await loadStatus();
+      for (const datafile of selectedDatafiles) {
+        const response = await axios.post(`${API_BASE}/datafiles/growth/start`, {
+          fileName: datafile.fileName,
+          tablespaceName: datafile.tablespaceName,
+          incrementMb: Number(config.incrementMb),
+          intervalSeconds: Number(config.intervalSeconds)
+        });
+        if (!response.data.success) {
+          throw new Error(`Failed to start schedule for ${datafile.fileName}`);
+        }
       }
+      onSuccess?.(`Scheduled ${selectedDatafiles.length} datafile(s) to grow by ${config.incrementMb} MB every ${config.intervalSeconds} seconds`);
+      await loadStatus();
     } catch (err) {
       onError?.(err.response?.data?.message || 'Failed to start datafile growth schedule');
     } finally {
@@ -123,18 +150,22 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
     }
   };
 
-  const handleStop = async (fileName = selectedFileName) => {
-    if (!fileName) {
+  const handleStop = async (fileNames = selectedFileNames) => {
+    const list = Array.isArray(fileNames) ? fileNames.filter(Boolean) : [fileNames].filter(Boolean);
+    if (list.length === 0) {
       return;
     }
 
     setLoading(true);
     try {
-      const response = await axios.post(`${API_BASE}/datafiles/growth/stop`, { fileName });
-      if (response.data.success) {
-        onSuccess?.(`Stopped schedule for ${fileName}`);
-        await loadStatus();
+      for (const fileName of list) {
+        const response = await axios.post(`${API_BASE}/datafiles/growth/stop`, { fileName });
+        if (!response.data.success) {
+          throw new Error(`Failed to stop schedule for ${fileName}`);
+        }
       }
+      onSuccess?.(`Stopped ${list.length} datafile growth schedule(s)`);
+      await loadStatus();
     } catch (err) {
       onError?.(err.response?.data?.message || 'Failed to stop datafile growth schedule');
     } finally {
@@ -180,7 +211,7 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
       </div>
       <div className="panel-content">
         <p style={{ marginTop: 0, color: 'var(--text-muted)' }}>
-          Review tablespaces and datafiles, then start a timed resize schedule such as growing a selected datafile by `100 MB` every `60` seconds.
+          Review tablespaces and datafiles, then start a timed resize schedule such as growing one or more selected datafiles by `100 MB` every `60` seconds.
         </p>
 
         <div style={{
@@ -191,12 +222,14 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
         }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) repeat(2, minmax(0, 1fr))', gap: '0.85rem' }}>
             <div className="form-group">
-              <label htmlFor="df-file-select">Datafile</label>
+              <label htmlFor="df-file-select">Selected Datafiles</label>
               <select
                 id="df-file-select"
-                value={selectedFileName}
-                onChange={(e) => setSelectedFileName(e.target.value)}
+                multiple
+                value={selectedFileNames}
+                onChange={(e) => setSelectedFileNames(Array.from(e.target.selectedOptions).map((option) => option.value))}
                 disabled={loading}
+                style={{ minHeight: '140px' }}
               >
                 {datafiles.map((datafile) => (
                   <option key={datafile.fileName} value={datafile.fileName}>
@@ -229,19 +262,33 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
             </div>
           </div>
 
-          {selectedDatafile && (
+          {selectedDatafiles.length > 0 && (
             <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              Current size: {selectedDatafile.sizeMb} MB
-              {selectedDatafile.maxSizeMb > 0 ? ` | Max size: ${selectedDatafile.maxSizeMb} MB` : ''}
-              {' | '}Tablespace: {selectedDatafile.tablespaceName}
+              {selectedDatafiles.length} selected
+              {selectedDatafile ? ` | First selected size: ${selectedDatafile.sizeMb} MB` : ''}
+              {selectedDatafile?.maxSizeMb > 0 ? ` | First selected max: ${selectedDatafile.maxSizeMb} MB` : ''}
             </div>
           )}
 
+          <div className="btn-group" style={{ marginTop: '0.75rem' }}>
+            <button className="btn btn-secondary btn-sm" type="button" onClick={handleSelectAll} disabled={loading || datafiles.length === 0}>
+              Select All
+            </button>
+            <button className="btn btn-secondary btn-sm" type="button" onClick={handleClearSelection} disabled={loading || selectedFileNames.length === 0}>
+              Clear Selection
+            </button>
+          </div>
+
           <div className="btn-group" style={{ marginTop: '1rem' }}>
-            <button className="btn btn-primary" type="button" onClick={handleStart} disabled={loading || !selectedDatafile}>
+            <button className="btn btn-primary" type="button" onClick={handleStart} disabled={loading || selectedDatafiles.length === 0}>
               Start Schedule
             </button>
-            <button className="btn btn-danger" type="button" onClick={() => handleStop()} disabled={loading || !selectedFileName || !schedulesByFile[selectedFileName]}>
+            <button
+              className="btn btn-danger"
+              type="button"
+              onClick={() => handleStop()}
+              disabled={loading || selectedFileNames.length === 0 || !selectedFileNames.some((fileName) => schedulesByFile[fileName])}
+            >
               Stop Selected
             </button>
             <button className="btn btn-secondary" type="button" onClick={handleStopAll} disabled={loading || (snapshot.scheduler?.schedules || []).length === 0}>
@@ -335,6 +382,7 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                       <thead>
                         <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                          <th style={{ textAlign: 'center', padding: '0.45rem' }}>Pick</th>
                           <th style={{ textAlign: 'left', padding: '0.45rem' }}>File</th>
                           <th style={{ textAlign: 'right', padding: '0.45rem' }}>Size MB</th>
                           <th style={{ textAlign: 'right', padding: '0.45rem' }}>Max MB</th>
@@ -348,6 +396,14 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
 
                           return (
                             <tr key={datafile.fileName} style={{ borderBottom: '1px solid var(--border)' }}>
+                              <td style={{ padding: '0.45rem', textAlign: 'center' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedFileNames.includes(datafile.fileName)}
+                                  onChange={() => toggleFileSelection(datafile.fileName)}
+                                  disabled={loading}
+                                />
+                              </td>
                               <td style={{ padding: '0.45rem', wordBreak: 'break-all' }}>{datafile.fileName}</td>
                               <td style={{ padding: '0.45rem', textAlign: 'right' }}>{datafile.sizeMb}</td>
                               <td style={{ padding: '0.45rem', textAlign: 'right' }}>{datafile.maxSizeMb}</td>
