@@ -25,6 +25,7 @@ class InsertBlastEngine {
       workloads[workload.id] = {
         id: workload.id,
         name: workload.name,
+        tableCount: workload.tableCount,
         sessions: workload.sessions,
         durationSeconds: workload.durationSeconds,
         commitEvery: workload.commitEvery,
@@ -48,10 +49,12 @@ class InsertBlastEngine {
   }
 
   normalizeWorkloads(config = {}) {
+    const totalTableCount = Math.max(1, Math.min(5000, Number.parseInt(config.tableCount, 10) || 8));
     const rawWorkloads = Array.isArray(config.workloads) && config.workloads.length > 0
       ? config.workloads
       : [{
         name: config.workloadName || 'Workload 1',
+        tableCount: totalTableCount,
         sessions: config.sessions,
         durationSeconds: config.durationSeconds,
         commitEvery: config.commitEvery,
@@ -67,6 +70,7 @@ class InsertBlastEngine {
       return {
         id,
         name: String(workload.name || `Workload ${index + 1}`).trim() || `Workload ${index + 1}`,
+        tableCount: Math.max(1, Math.min(totalTableCount, Number.parseInt(workload.tableCount, 10) || totalTableCount)),
         sessions: Math.max(1, Number.parseInt(workload.sessions, 10) || 8),
         durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(workload.durationSeconds, 10) || 60)),
         commitEvery: Math.max(1, Number.parseInt(workload.commitEvery, 10) || 50),
@@ -347,7 +351,8 @@ class InsertBlastEngine {
           }
 
           while (this.isWorkloadActive(workload)) {
-            const tableName = this.tableNames[Math.floor(Math.random() * this.tableNames.length)];
+            const workloadTableNames = workload.tableNames?.length ? workload.tableNames : this.tableNames;
+            const tableName = workloadTableNames[Math.floor(Math.random() * workloadTableNames.length)];
             const sql = this.insertSqlCache[tableName] || this.buildInsertSql(tableName);
             sequence += 1;
 
@@ -514,7 +519,8 @@ class InsertBlastEngine {
     this.runtimeWorkloads = this.config.workloads.map((workload) => ({
       ...workload,
       startedAt: Date.now(),
-      pool: null
+      pool: null,
+      tableNames: this.tableNames.slice(0, workload.tableCount)
     }));
 
     for (const workload of this.runtimeWorkloads) {

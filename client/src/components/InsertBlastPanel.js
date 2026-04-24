@@ -32,9 +32,10 @@ const WAIT_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06
 const LMS_USED_COLOR = '#22c55e';
 const LMS_ALLOC_COLOR = '#f59e0b';
 
-const createWorkload = (index = 1) => ({
+const createWorkload = (index = 1, defaultTableCount = 8) => ({
   id: `workload_${Date.now()}_${index}`,
   name: `Workload ${index}`,
+  tableCount: defaultTableCount,
   sessions: 8,
   durationSeconds: 60,
   commitEvery: 50,
@@ -44,6 +45,7 @@ const createWorkload = (index = 1) => ({
 const normalizeWorkload = (workload, index) => ({
   id: workload.id || `workload_${index + 1}`,
   name: workload.name || `Workload ${index + 1}`,
+  tableCount: workload.tableCount || 8,
   sessions: workload.sessions || 8,
   durationSeconds: workload.durationSeconds || 60,
   commitEvery: workload.commitEvery || 50,
@@ -88,7 +90,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       extentSizeMb: 128,
       allocateEveryInserts: 100000
     },
-    workloads: [createWorkload(1)]
+    workloads: [createWorkload(1, 8)]
   });
   const [schemaStatus, setSchemaStatus] = useState(null);
   const [workloadStatus, setWorkloadStatus] = useState({ isRunning: false, workloads: [] });
@@ -250,7 +252,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
   const addWorkload = () => {
     setConfig((prev) => ({
       ...prev,
-      workloads: [...prev.workloads, createWorkload(prev.workloads.length + 1)]
+      workloads: [...prev.workloads, createWorkload(prev.workloads.length + 1, prev.tableCount)]
     }));
   };
 
@@ -716,6 +718,18 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                     </select>
                   </div>
                   <div className="form-group">
+                    <label htmlFor={`ib-table-count-${workload.id}`}>Tables Used</label>
+                    <input
+                      id={`ib-table-count-${workload.id}`}
+                      type="number"
+                      min="1"
+                      max={config.tableCount}
+                      value={workload.tableCount}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'tableCount', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    />
+                  </div>
+                  <div className="form-group">
                     <label htmlFor={`ib-sessions-${workload.id}`}>Sessions</label>
                     <input
                       id={`ib-sessions-${workload.id}`}
@@ -753,8 +767,8 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
 
                 <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                   {workload.sessionMode === 'reconnect'
-                    ? `${workload.sessions} clients will log on, insert, commit, and log off repeatedly for ${workload.durationSeconds} seconds.`
-                    : `${workload.sessions} clients will keep the same session open for ${workload.durationSeconds} seconds and commit every ${workload.commitEvery} inserts.`}
+                    ? `${workload.sessions} clients will use ${workload.tableCount} table(s), log on, insert, commit, and log off repeatedly for ${workload.durationSeconds} seconds.`
+                    : `${workload.sessions} clients will use ${workload.tableCount} table(s), keep the same session open for ${workload.durationSeconds} seconds, and commit every ${workload.commitEvery} inserts.`}
                 </div>
               </div>
             );
@@ -819,6 +833,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                       </div>
                       <div style={{ marginTop: '0.6rem', display: 'grid', gap: '0.3rem', fontSize: '0.9rem' }}>
                         <div>Sessions: <strong>{workload.sessions}</strong></div>
+                        <div>Tables Used: <strong>{workload.tableCount}</strong></div>
                         <div>Active Workers: <strong>{workload.activeWorkers}</strong></div>
                         <div>Inserts: <strong>{workload.inserts}</strong></div>
                         <div>Inserts/Sec: <strong>{workload.perSecond?.inserts || 0}</strong></div>
