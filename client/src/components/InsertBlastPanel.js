@@ -82,6 +82,12 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     tablePrefix: 'IBLAST',
     tableCount: 8,
     columnsPerTable: 24,
+    hwMitigation: {
+      enabled: false,
+      preallocateOnStart: true,
+      extentSizeMb: 128,
+      allocateEveryInserts: 100000
+    },
     workloads: [createWorkload(1)]
   });
   const [schemaStatus, setSchemaStatus] = useState(null);
@@ -113,6 +119,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
         if (response.data.workload?.isRunning && response.data.workload?.config) {
           setConfig((prev) => ({
             ...prev,
+            hwMitigation: response.data.workload.config.hwMitigation || prev.hwMitigation,
             workloads: (response.data.workload.config.workloads || prev.workloads).map(normalizeWorkload)
           }));
         }
@@ -306,6 +313,12 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     try {
       const payload = {
         ...config,
+        hwMitigation: {
+          enabled: !!config.hwMitigation?.enabled,
+          preallocateOnStart: config.hwMitigation?.preallocateOnStart !== false,
+          extentSizeMb: Number(config.hwMitigation?.extentSizeMb || 128),
+          allocateEveryInserts: Number(config.hwMitigation?.allocateEveryInserts || 100000)
+        },
         workloads: config.workloads.map((workload, index) => normalizeWorkload(workload, index))
       };
       const response = await axios.post(`${API_BASE}/insert-blast/start`, payload, {
@@ -315,6 +328,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       if (response.data.success) {
         setConfig((prev) => ({
           ...prev,
+          hwMitigation: response.data.config?.hwMitigation || prev.hwMitigation,
           workloads: (response.data.config?.workloads || prev.workloads).map(normalizeWorkload)
         }));
         setWorkloadStatus(response.data);
@@ -500,6 +514,90 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
         </div>
 
         <div style={{
+          marginTop: '0.9rem',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: '8px',
+          padding: '0.9rem'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div>
+              <h3 style={{ margin: 0 }}>HW Contention Mitigation</h3>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                Pre-allocate table extents before the run, then add another extent after every X inserts per table to reduce `enq: HW - contention`.
+              </div>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                checked={!!config.hwMitigation?.enabled}
+                onChange={(e) => handleChange('hwMitigation', {
+                  ...config.hwMitigation,
+                  enabled: e.target.checked
+                })}
+                disabled={busy || workloadStatus.isRunning}
+              />
+              <span>Enable</span>
+            </label>
+          </div>
+
+          {config.hwMitigation?.enabled && (
+            <>
+              <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.85rem' }}>
+                <div className="form-group">
+                  <label htmlFor="ib-hw-extent-size">Extent Size (MB)</label>
+                  <input
+                    id="ib-hw-extent-size"
+                    type="number"
+                    min="8"
+                    max="1024"
+                    value={config.hwMitigation?.extentSizeMb ?? 128}
+                    onChange={(e) => handleChange('hwMitigation', {
+                      ...config.hwMitigation,
+                      extentSizeMb: e.target.value
+                    })}
+                    disabled={busy || workloadStatus.isRunning}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="ib-hw-allocate-every">Allocate Every X Inserts</label>
+                  <input
+                    id="ib-hw-allocate-every"
+                    type="number"
+                    min="1000"
+                    max="10000000"
+                    value={config.hwMitigation?.allocateEveryInserts ?? 100000}
+                    onChange={(e) => handleChange('hwMitigation', {
+                      ...config.hwMitigation,
+                      allocateEveryInserts: e.target.value
+                    })}
+                    disabled={busy || workloadStatus.isRunning}
+                  />
+                </div>
+                <div className="form-group" style={{ display: 'flex', alignItems: 'flex-end' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={config.hwMitigation?.preallocateOnStart !== false}
+                      onChange={(e) => handleChange('hwMitigation', {
+                        ...config.hwMitigation,
+                        preallocateOnStart: e.target.checked
+                      })}
+                      disabled={busy || workloadStatus.isRunning}
+                    />
+                    <span>Pre-allocate on start</span>
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                Recommended starting point: `128 MB` extents and another allocation every `100000` inserts per table. This reduces HW pressure, but it also grows segments faster.
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={{
           marginTop: '0.75rem',
           background: 'var(--surface)',
           border: '1px solid var(--border)',
@@ -623,7 +721,6 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                       id={`ib-sessions-${workload.id}`}
                       type="number"
                       min="1"
-                      max="1000"
                       value={workload.sessions}
                       onChange={(e) => handleWorkloadChange(workload.id, 'sessions', e.target.value)}
                       disabled={busy || workloadStatus.isRunning}
@@ -647,7 +744,6 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                       id={`ib-commit-${workload.id}`}
                       type="number"
                       min="1"
-                      max="1000"
                       value={workload.commitEvery}
                       onChange={(e) => handleWorkloadChange(workload.id, 'commitEvery', e.target.value)}
                       disabled={busy || workloadStatus.isRunning}
@@ -692,6 +788,10 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               <div className="schema-stat">
                 <div className="name">Errors</div>
                 <div className="count">{metrics.total?.errors || 0}</div>
+              </div>
+              <div className="schema-stat">
+                <div className="name">Extent Alloc</div>
+                <div className="count">{metrics.total?.extentAllocations || 0}</div>
               </div>
             </div>
 

@@ -40,6 +40,7 @@ class InsertBlastEngine {
       inserts: 0,
       commits: 0,
       errors: 0,
+      extentAllocations: 0,
       byTable: {},
       workloads,
       startedAt: Date.now()
@@ -66,9 +67,9 @@ class InsertBlastEngine {
       return {
         id,
         name: String(workload.name || `Workload ${index + 1}`).trim() || `Workload ${index + 1}`,
-        sessions: Math.max(1, Math.min(1000, Number.parseInt(workload.sessions, 10) || 8)),
+        sessions: Math.max(1, Number.parseInt(workload.sessions, 10) || 8),
         durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(workload.durationSeconds, 10) || 60)),
-        commitEvery: Math.max(1, Math.min(1000, Number.parseInt(workload.commitEvery, 10) || 50)),
+        commitEvery: Math.max(1, Number.parseInt(workload.commitEvery, 10) || 50),
         sessionMode: String(workload.sessionMode || 'reuse').trim().toLowerCase() === 'reconnect' ? 'reconnect' : 'reuse'
       };
     });
@@ -81,6 +82,12 @@ class InsertBlastEngine {
       0
     );
     const totalSessions = workloads.reduce((sum, workload) => sum + workload.sessions, 0);
+    const hwMitigation = {
+      enabled: config.hwMitigation?.enabled === true || config.hwMitigationEnabled === true,
+      preallocateOnStart: config.hwMitigation?.preallocateOnStart !== false && config.preallocateOnStart !== false,
+      extentSizeMb: Math.max(8, Math.min(1024, Number.parseInt(config.hwMitigation?.extentSizeMb ?? config.extentSizeMb, 10) || 128)),
+      allocateEveryInserts: Math.max(1000, Math.min(10000000, Number.parseInt(config.hwMitigation?.allocateEveryInserts ?? config.allocateEveryInserts, 10) || 100000))
+    };
 
     return {
       tablePrefix: String(config.tablePrefix || 'IBLAST').trim().toUpperCase().replace(/[^A-Z0-9_$#]/g, ''),
@@ -88,7 +95,8 @@ class InsertBlastEngine {
       columnsPerTable: Math.max(4, Math.min(200, Number.parseInt(config.columnsPerTable, 10) || 24)),
       workloads,
       totalSessions,
-      maxDurationSeconds
+      maxDurationSeconds,
+      hwMitigation
     };
   }
 
@@ -137,6 +145,89 @@ class InsertBlastEngine {
     }
 
     return binds;
+  }
+
+  buildAllocateExtentSql(tableName) {
+    const extentSizeMb = this.config?.hwMitigation?.extentSizeMb || 128;
+    return `ALTER TABLE ${tableName} ALLOCATE EXTENT (SIZE ${extentSizeMb}M)`;
+  }
+
+  async allocateExtent(tableName) {
+    if (!this.db) {
+      return false;
+    }
+
+    const connection = await this.db.createDirectConnection();
+    try {
+      await connection.execute(this.buildAllocateExtentSql(tableName));
+      this.stats.extentAllocations += 1;
+      return true;
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async preallocateExtentsBeforeStart() {
+    if (!this.config?.hwMitigation?.enabled || !this.config.hwMitigation.preallocateOnStart) {
+      return;
+    }
+
+    let completed = 0;
+    const totalTables = this.tableNames.length;
+    this.io?.emit('insert-blast-progress', {
+      step: `Pre-allocating ${this.config.hwMitigation.extentSizeMb} MB extent(s) for ${totalTables} tables...`,
+      progress: 0
+    });
+
+    for (const tableName of this.tableNames) {
+      try {
+        await this.allocateExtent(tableName);
+      } catch (error) {
+        console.log(`Insert blast extent pre-allocation failed for ${tableName}: ${error.message}`);
+      }
+
+      completed += 1;
+      if (completed === totalTables || completed % 25 === 0) {
+        this.io?.emit('insert-blast-progress', {
+          step: `Pre-allocated ${completed}/${totalTables} tables with ${this.config.hwMitigation.extentSizeMb} MB extents...`,
+          progress: Math.round((completed / totalTables) * 100)
+        });
+      }
+    }
+  }
+
+  maybeScheduleExtentAllocation(tableName, tableInsertCount) {
+    const hwMitigation = this.config?.hwMitigation;
+    if (!hwMitigation?.enabled || !tableName || !Number.isFinite(tableInsertCount)) {
+      return;
+    }
+
+    const threshold = Math.max(1, hwMitigation.allocateEveryInserts);
+    const nextThreshold = this.nextExtentAllocationAt?.[tableName] || threshold;
+
+    if (tableInsertCount < nextThreshold) {
+      return;
+    }
+
+    if (this.extentAllocationInFlight?.has(tableName)) {
+      return;
+    }
+
+    this.extentAllocationInFlight.add(tableName);
+
+    this.allocateExtent(tableName)
+      .then((allocated) => {
+        if (allocated) {
+          this.nextExtentAllocationAt[tableName] = nextThreshold + threshold;
+        }
+      })
+      .catch((error) => {
+        console.log(`Insert blast extent allocation failed for ${tableName}: ${error.message}`);
+        this.nextExtentAllocationAt[tableName] = nextThreshold + threshold;
+      })
+      .finally(() => {
+        this.extentAllocationInFlight.delete(tableName);
+      });
   }
 
   isWorkloadActive(workload) {
@@ -265,6 +356,7 @@ class InsertBlastEngine {
             this.stats.inserts += 1;
             this.stats.byTable[tableName] = (this.stats.byTable[tableName] || 0) + 1;
             this.stats.workloads[workload.id].inserts += 1;
+            this.maybeScheduleExtentAllocation(tableName, this.stats.byTable[tableName]);
 
             if (pending >= workload.commitEvery) {
               await connection.commit();
@@ -365,7 +457,8 @@ class InsertBlastEngine {
       total: {
         inserts: this.stats.inserts,
         commits: this.stats.commits,
-        errors: this.stats.errors
+        errors: this.stats.errors,
+        extentAllocations: this.stats.extentAllocations
       },
       perSecond: {
         inserts: Number((deltaInserts / elapsed).toFixed(2)),
@@ -389,6 +482,7 @@ class InsertBlastEngine {
       workloads: Object.fromEntries(
         Object.entries(this.stats.workloads || {}).map(([id, workloadStats]) => [id, { ...workloadStats }])
       ),
+      extentAllocations: this.stats.extentAllocations,
       startedAt: Date.now()
     };
   }
@@ -407,9 +501,15 @@ class InsertBlastEngine {
     this.stats = this.initStats(this.config);
     this.previousStats = this.initStats(this.config);
     this.tableNames = this.getTableNames();
+    this.nextExtentAllocationAt = Object.fromEntries(
+      this.tableNames.map((tableName) => [tableName, this.config.hwMitigation.allocateEveryInserts])
+    );
+    this.extentAllocationInFlight = new Set();
     this.insertSqlCache = Object.fromEntries(
       this.tableNames.map((tableName) => [tableName, this.buildInsertSql(tableName)])
     );
+
+    await this.preallocateExtentsBeforeStart();
 
     this.runtimeWorkloads = this.config.workloads.map((workload) => ({
       ...workload,
@@ -517,6 +617,8 @@ class InsertBlastEngine {
 
     this.db = null;
     this.insertSqlCache = {};
+    this.nextExtentAllocationAt = {};
+    this.extentAllocationInFlight = new Set();
     this.workers = [];
     this.runtimeWorkloads = [];
     this.activeWorkers = 0;
