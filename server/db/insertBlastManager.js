@@ -168,13 +168,15 @@ class InsertBlastManager {
       return {
         username: '',
         source: null,
-        sessions: []
+        sessions: [],
+        error: null
       };
     }
 
-    const buildRows = (rows = [], source) => ({
+    const buildRows = (rows = [], source, error = null) => ({
       username: connectedUser,
       source,
+      error,
       sessions: rows.map((row) => ({
         instId: Number(row.INST_ID || 1),
         totalSessions: Number(row.TOTAL_SESSIONS || 0),
@@ -202,27 +204,32 @@ class InsertBlastManager {
 
       return buildRows(result.rows, 'gv$session');
     } catch (error) {
-      const fallback = await oracleDb.execute(
-        `
-          SELECT
-            1 AS inst_id,
-            COUNT(*) AS total_sessions,
-            SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_sessions,
-            SUM(CASE WHEN status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive_sessions
-          FROM v$session
-          WHERE type = 'USER'
-            AND username = :connectedUser
-        `,
-        { connectedUser }
-      );
+      try {
+        const fallback = await oracleDb.execute(
+          `
+            SELECT
+              1 AS inst_id,
+              COUNT(*) AS total_sessions,
+              SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_sessions,
+              SUM(CASE WHEN status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive_sessions
+            FROM v$session
+            WHERE type = 'USER'
+              AND username = :connectedUser
+          `,
+          { connectedUser }
+        );
 
-      return buildRows(fallback.rows, 'v$session');
+        return buildRows(fallback.rows, 'v$session');
+      } catch (fallbackError) {
+        return buildRows([], null, fallbackError.message);
+      }
     }
   }
 
   async getLmsProcessMemory(oracleDb) {
-    const buildRows = (rows = [], source) => ({
+    const buildRows = (rows = [], source, error = null) => ({
       source,
+      error,
       rows: rows.map((row) => ({
         instId: Number(row.INST_ID || 1),
         pid: Number(row.PID || 0),
@@ -259,26 +266,30 @@ class InsertBlastManager {
 
       return buildRows(result.rows, 'gv$process/gv$process_memory');
     } catch (error) {
-      const fallback = await oracleDb.execute(`
-        SELECT
-          1 AS inst_id,
-          p.pid,
-          p.spid AS os_pid,
-          p.pname AS process_name,
-          ROUND(p.pga_used_mem / 1024 / 1024, 2) AS pga_used_mb,
-          ROUND(p.pga_alloc_mem / 1024 / 1024, 2) AS pga_alloc_mb,
-          m.category,
-          ROUND(m.allocated / 1024 / 1024, 3) AS alloc_mb,
-          ROUND(m.used / 1024 / 1024, 3) AS used_mb
-        FROM v$process p
-        JOIN v$process_memory m
-          ON m.pid = p.pid
-        WHERE p.pname LIKE 'LMS%'
-        ORDER BY p.pga_used_mem DESC, m.allocated DESC
-        FETCH FIRST 40 ROWS ONLY
-      `);
+      try {
+        const fallback = await oracleDb.execute(`
+          SELECT
+            1 AS inst_id,
+            p.pid,
+            p.spid AS os_pid,
+            p.pname AS process_name,
+            ROUND(p.pga_used_mem / 1024 / 1024, 2) AS pga_used_mb,
+            ROUND(p.pga_alloc_mem / 1024 / 1024, 2) AS pga_alloc_mb,
+            m.category,
+            ROUND(m.allocated / 1024 / 1024, 3) AS alloc_mb,
+            ROUND(m.used / 1024 / 1024, 3) AS used_mb
+          FROM v$process p
+          JOIN v$process_memory m
+            ON m.pid = p.pid
+          WHERE p.pname LIKE 'LMS%'
+          ORDER BY p.pga_used_mem DESC, m.allocated DESC
+          FETCH FIRST 40 ROWS ONLY
+        `);
 
-      return buildRows(fallback.rows, 'v$process/v$process_memory');
+        return buildRows(fallback.rows, 'v$process/v$process_memory');
+      } catch (fallbackError) {
+        return buildRows([], null, fallbackError.message);
+      }
     }
   }
 
@@ -288,10 +299,16 @@ class InsertBlastManager {
       this.getLmsProcessMemory(oracleDb)
     ]);
 
+    const warnings = [
+      userSessions?.error ? `User sessions: ${userSessions.error}` : null,
+      lmsProcessMemory?.error ? `LMS process memory: ${lmsProcessMemory.error}` : null
+    ].filter(Boolean);
+
     return {
       timestamp: Date.now(),
       userSessions,
-      lmsProcessMemory
+      lmsProcessMemory,
+      warnings
     };
   }
 }
