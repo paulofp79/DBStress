@@ -9,9 +9,11 @@ const oracleDb = require('./db/oracle');
 const schemaManager = require('./db/schemaManager');
 const swingbenchSOEManager = require('./db/swingbenchSOEManager');
 const insertBlastManager = require('./db/insertBlastManager');
+const tablespaceManager = require('./db/tablespaceManager');
 const stressEngine = require('./stress/engine');
 const swingbenchSOEEngine = require('./stress/swingbenchSOEEngine');
 const insertBlastEngine = require('./stress/insertBlastEngine');
+const datafileGrowthEngine = require('./stress/datafileGrowthEngine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
 const libraryCacheLockEngine = require('./stress/libraryCacheLockEngine');
 const statsComparisonEngine = require('./stress/statsComparisonEngine');
@@ -130,6 +132,62 @@ const fetchProcedureErrors = async (identifier) => {
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/api/datafiles/status', async (req, res) => {
+  try {
+    const snapshot = await tablespaceManager.getTablespacesAndDatafiles(oracleDb);
+    datafileGrowthEngine.configure(oracleDb, io);
+    res.json({
+      success: true,
+      ...snapshot,
+      scheduler: datafileGrowthEngine.getStatus()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/datafiles/growth/start', async (req, res) => {
+  try {
+    datafileGrowthEngine.configure(oracleDb, io);
+    const status = await datafileGrowthEngine.start(req.body || {});
+    res.json({
+      success: true,
+      message: 'Datafile growth schedule started',
+      scheduler: status
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/datafiles/growth/stop', async (req, res) => {
+  try {
+    datafileGrowthEngine.configure(oracleDb, io);
+    const status = await datafileGrowthEngine.stop(req.body?.fileName);
+    res.json({
+      success: true,
+      message: 'Datafile growth schedule stopped',
+      scheduler: status
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/datafiles/growth/stop-all', async (req, res) => {
+  try {
+    datafileGrowthEngine.configure(oracleDb, io);
+    const status = await datafileGrowthEngine.stopAll();
+    res.json({
+      success: true,
+      message: 'All datafile growth schedules stopped',
+      scheduler: status
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 app.get('/api/gc-benchmark/status', async (req, res) => {

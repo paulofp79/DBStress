@@ -23,6 +23,7 @@ import MonitorPanel from './components/MonitorPanel';
 import SwingbenchPanel from './components/SwingbenchPanel';
 import SwingbenchWorkloadPanel from './components/SwingbenchWorkloadPanel';
 import InsertBlastPanel from './components/InsertBlastPanel';
+import DatafileGrowthPanel from './components/DatafileGrowthPanel';
 
 // Auto-detect server URL based on where the page is loaded from
 const getServerUrl = () => {
@@ -542,6 +543,24 @@ function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab('datafile-growth')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'datafile-growth' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'datafile-growth' ? '2px solid #facc15' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'datafile-growth' ? '#facc15' : 'var(--text-muted)',
+              fontWeight: activeTab === 'datafile-growth' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            Datafile Growth
+          </button>
+
+          <button
             onClick={() => setActiveTab('tde-comparison')}
             style={{
               padding: '0.75rem 1.5rem',
@@ -743,6 +762,22 @@ function App() {
               onDisconnect={handleDisconnect}
             />
             <InsertBlastPanel
+              dbStatus={dbStatus}
+              socket={socket}
+              onSuccess={showSuccess}
+              onError={showError}
+            />
+          </div>
+        )}
+
+        {activeTab === 'datafile-growth' && (
+          <div className="grid-2">
+            <ConnectionPanel
+              dbStatus={dbStatus}
+              onConnect={handleConnect}
+              onDisconnect={handleDisconnect}
+            />
+            <DatafileGrowthPanel
               dbStatus={dbStatus}
               socket={socket}
               onSuccess={showSuccess}
