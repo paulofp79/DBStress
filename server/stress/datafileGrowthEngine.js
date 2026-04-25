@@ -1,4 +1,5 @@
 const tablespaceManager = require('../db/tablespaceManager');
+const MAX_VISIBLE_DATAFILE_MB = 32000;
 
 class DatafileGrowthEngine {
   constructor() {
@@ -57,7 +58,21 @@ class DatafileGrowthEngine {
     }
 
     const current = await tablespaceManager.getDatafileByName(this.db, fileName);
-    const nextSizeMb = Math.ceil(Number(current.sizeMb || 0) + Number(incrementMb || 0));
+    const currentSizeMb = Number(current.sizeMb || 0);
+    if (currentSizeMb >= MAX_VISIBLE_DATAFILE_MB) {
+      return {
+        previousSizeMb: currentSizeMb,
+        currentSizeMb,
+        nextSizeMb: currentSizeMb,
+        tablespaceName: current.tablespaceName,
+        reachedLimit: true
+      };
+    }
+
+    const nextSizeMb = Math.min(
+      MAX_VISIBLE_DATAFILE_MB,
+      Math.ceil(currentSizeMb + Number(incrementMb || 0))
+    );
     const escapedFileName = fileName.replace(/'/g, "''");
 
     await this.db.execute(`ALTER DATABASE DATAFILE '${escapedFileName}' RESIZE ${nextSizeMb}M`);
@@ -67,7 +82,8 @@ class DatafileGrowthEngine {
       previousSizeMb: current.sizeMb,
       currentSizeMb: updated.sizeMb,
       nextSizeMb,
-      tablespaceName: updated.tablespaceName
+      tablespaceName: updated.tablespaceName,
+      reachedLimit: Number(updated.sizeMb || 0) >= MAX_VISIBLE_DATAFILE_MB
     };
   }
 
@@ -78,15 +94,24 @@ class DatafileGrowthEngine {
         const result = await this.resizeDatafile(rule.fileName, rule.incrementMb);
         rule.currentSizeMb = result.currentSizeMb;
         rule.tablespaceName = result.tablespaceName || rule.tablespaceName;
-        rule.resizeCount += 1;
+        if (!result.reachedLimit || Number(result.previousSizeMb || 0) < Number(result.currentSizeMb || 0)) {
+          rule.resizeCount += 1;
+        }
         rule.lastRunAt = Date.now();
-        rule.lastError = null;
+        rule.lastError = result.reachedLimit
+          ? `Reached ${MAX_VISIBLE_DATAFILE_MB} MB limit. Schedule stopped automatically.`
+          : null;
       } catch (error) {
         rule.lastRunAt = Date.now();
         rule.lastError = error.message;
       } finally {
-        if (this.rules.has(rule.fileName)) {
+        if (this.rules.has(rule.fileName) && Number(rule.currentSizeMb || 0) < MAX_VISIBLE_DATAFILE_MB) {
           this.scheduleNext(rule);
+        } else if (this.rules.has(rule.fileName) && Number(rule.currentSizeMb || 0) >= MAX_VISIBLE_DATAFILE_MB) {
+          if (rule.timer) {
+            clearTimeout(rule.timer);
+          }
+          this.rules.delete(rule.fileName);
         }
         this.emitStatus();
       }
@@ -101,6 +126,9 @@ class DatafileGrowthEngine {
     }
 
     const current = await tablespaceManager.getDatafileByName(this.db, normalized.fileName);
+    if (Number(current.sizeMb || 0) >= MAX_VISIBLE_DATAFILE_MB) {
+      throw new Error(`Datafile ${normalized.fileName} is already at or above ${MAX_VISIBLE_DATAFILE_MB} MB.`);
+    }
 
     if (this.rules.has(normalized.fileName)) {
       await this.stop(normalized.fileName);

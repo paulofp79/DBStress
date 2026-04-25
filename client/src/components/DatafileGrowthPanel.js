@@ -9,6 +9,7 @@ const getServerUrl = () => {
 };
 
 const API_BASE = `${getServerUrl()}/api`;
+const MAX_DATAFILE_MB = 32000;
 
 function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
   const [snapshot, setSnapshot] = useState({ tablespaces: [], scheduler: { schedules: [] } });
@@ -84,6 +85,15 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
         tablespaceName: tablespace.tablespaceName
       }))
     ))
+  ).filter((datafile) => Number(datafile.sizeMb || 0) <= MAX_DATAFILE_MB), [snapshot.tablespaces]);
+
+  const visibleTablespaces = useMemo(() => (
+    (snapshot.tablespaces || [])
+      .map((tablespace) => ({
+        ...tablespace,
+        datafiles: (tablespace.datafiles || []).filter((datafile) => Number(datafile.sizeMb || 0) <= MAX_DATAFILE_MB)
+      }))
+      .filter((tablespace) => tablespace.datafiles.length > 0)
   ), [snapshot.tablespaces]);
 
   useEffect(() => {
@@ -212,6 +222,9 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
       <div className="panel-content">
         <p style={{ marginTop: 0, color: 'var(--text-muted)' }}>
           Review tablespaces and datafiles, then start a timed resize schedule such as growing one or more selected datafiles by `100 MB` every `60` seconds.
+        </p>
+        <p style={{ marginTop: '-0.4rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+          Files larger than `32000 MB` are hidden here. If a scheduled file reaches `32000 MB`, its resize schedule stops automatically.
         </p>
 
         <div style={{
@@ -357,7 +370,7 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
           }}>
             <h3 style={{ marginTop: 0 }}>Tablespaces and Datafiles</h3>
             <div style={{ display: 'grid', gap: '1rem' }}>
-              {(snapshot.tablespaces || []).map((tablespace) => (
+              {visibleTablespaces.map((tablespace) => (
                 <div
                   key={tablespace.tablespaceName}
                   style={{
