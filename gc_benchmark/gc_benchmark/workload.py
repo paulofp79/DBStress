@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import oracledb
-from oracle_session import DEFAULT_CALL_TIMEOUT_MS, apply_call_timeout
+from oracle_session import DEFAULT_WORKLOAD_CALL_TIMEOUT_MS, apply_call_timeout
 
 _MAX_PHYSICAL_WORKERS = 128
 MAX_WORKLOAD_SEED_ROWS = 100000
@@ -63,7 +63,7 @@ class WorkloadConfig:
     #              bouncing on the same data and index blocks
     contention_mode: str = "NORMAL"   # NORMAL | HAMMER | LMS_STRESS | EXTREME_LMS
     lock_hold_ms: int = 0              # ms to hold lock before UPDATE (HAMMER only)
-    call_timeout_ms: int = DEFAULT_CALL_TIMEOUT_MS
+    call_timeout_ms: int = DEFAULT_WORKLOAD_CALL_TIMEOUT_MS
 
 
 # ---------------------------------------------------------------------------
@@ -999,9 +999,13 @@ class WorkloadRunner:
             cursor = conn.cursor()
             tname = f"{cfg.table_prefix}_ORDER_{table_idx:02d}"
 
-            cursor.execute(f"SELECT COUNT(*) FROM {tname}")
-            existing = int(cursor.fetchone()[0])
-            missing = max(cfg.seed_rows - existing, 0)
+            cursor.execute(
+                f"SELECT order_id FROM {tname} "
+                f"ORDER BY order_id FETCH FIRST :lim ROWS ONLY",
+                {"lim": cfg.seed_rows},
+            )
+            all_pks = [int(r[0]) for r in cursor.fetchall()]
+            missing = max(cfg.seed_rows - len(all_pks), 0)
             if missing > 0:
                 batch_size = 100
                 for batch_start in range(0, missing, batch_size):
@@ -1036,12 +1040,12 @@ class WorkloadRunner:
                     )
                 conn.commit()
 
-            cursor.execute(
-                f"SELECT order_id FROM {tname} "
-                f"ORDER BY order_id FETCH FIRST :lim ROWS ONLY",
-                {"lim": cfg.seed_rows},
-            )
-            all_pks = [int(r[0]) for r in cursor.fetchall()]
+                cursor.execute(
+                    f"SELECT order_id FROM {tname} "
+                    f"ORDER BY order_id FETCH FIRST :lim ROWS ONLY",
+                    {"lim": cfg.seed_rows},
+                )
+                all_pks = [int(r[0]) for r in cursor.fetchall()]
             self._all_rows[table_idx] = all_pks
             hot_count = max(32, len(all_pks) * cfg.hot_row_pct // 100)
             self._hot_rows[table_idx] = all_pks[:min(len(all_pks), hot_count)]
