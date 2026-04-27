@@ -65,6 +65,15 @@ class WorkloadConfig:
     lock_hold_ms: int = 0              # ms to hold lock before UPDATE (HAMMER only)
     call_timeout_ms: int = DEFAULT_WORKLOAD_CALL_TIMEOUT_MS
 
+    def __post_init__(self) -> None:
+        # Workload shards can outlive/restart independently of the parent API
+        # process, so clamp stale serialized configs away from the old 15s
+        # generic connection timeout.
+        self.call_timeout_ms = max(
+            DEFAULT_WORKLOAD_CALL_TIMEOUT_MS,
+            int(self.call_timeout_ms or 0),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Thread-safe status tracking

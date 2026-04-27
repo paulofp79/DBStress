@@ -56,6 +56,7 @@ from login_workload import (
     call_mfes_online_session_procedure,
 )
 from oracle_session import (
+    DEFAULT_WORKLOAD_CALL_TIMEOUT_MS,
     MAX_TOTAL_GC_WORKERS,
     MAX_TOTAL_LOGIN_WORKERS,
     SUBPROCESS_FORCE_KILL_SECONDS,
@@ -2747,6 +2748,10 @@ async def workload_start(body: dict):
         pedt_update_pct=max(0, int(body.get("pedt_update_pct", 0))),
         contention_mode=body.get("contention_mode", "NORMAL").upper(),
         lock_hold_ms=max(0, min(500, int(body.get("lock_hold_ms", 0)))),
+        call_timeout_ms=max(
+            DEFAULT_WORKLOAD_CALL_TIMEOUT_MS,
+            int(body.get("call_timeout_ms", DEFAULT_WORKLOAD_CALL_TIMEOUT_MS) or 0),
+        ),
     )
 
     loop = asyncio.get_running_loop()
