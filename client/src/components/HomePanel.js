@@ -127,6 +127,7 @@ function HomePanel({ onOpenTab }) {
                 { label: 'Open Monitor', onClick: () => onOpenTab('monitor') },
                 { label: 'Open Stress Tab', onClick: () => onOpenTab('stress') },
                 { label: 'Open SOE Tool', onClick: () => onOpenTab('swingbench-soe') },
+                { label: 'Open COBOL SOE', onClick: () => onOpenTab('cobol-soe') },
                 { label: 'Open GC Benchmark Tab', onClick: () => onOpenTab('gc-benchmark') }
               ]}
             />

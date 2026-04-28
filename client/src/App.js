@@ -22,6 +22,7 @@ import HomePanel from './components/HomePanel';
 import MonitorPanel from './components/MonitorPanel';
 import SwingbenchPanel from './components/SwingbenchPanel';
 import SwingbenchWorkloadPanel from './components/SwingbenchWorkloadPanel';
+import CobolSOEWorkloadPanel from './components/CobolSOEWorkloadPanel';
 import InsertBlastPanel from './components/InsertBlastPanel';
 import DatafileGrowthPanel from './components/DatafileGrowthPanel';
 
@@ -543,6 +544,24 @@ function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab('cobol-soe')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'cobol-soe' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'cobol-soe' ? '2px solid #a3e635' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'cobol-soe' ? '#a3e635' : 'var(--text-muted)',
+              fontWeight: activeTab === 'cobol-soe' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            COBOL XA SOE
+          </button>
+
+          <button
             onClick={() => setActiveTab('datafile-growth')}
             style={{
               padding: '0.75rem 1.5rem',
@@ -768,6 +787,24 @@ function App() {
               onError={showError}
             />
           </div>
+        )}
+
+        {activeTab === 'cobol-soe' && (
+          <>
+            <div className="grid-2">
+              <ConnectionPanel
+                dbStatus={dbStatus}
+                onConnect={handleConnect}
+                onDisconnect={handleDisconnect}
+              />
+              <CobolSOEWorkloadPanel
+                dbStatus={dbStatus}
+                socket={socket}
+                onSuccess={showSuccess}
+                onError={showError}
+              />
+            </div>
+          </>
         )}
 
         {activeTab === 'datafile-growth' && (
