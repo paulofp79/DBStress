@@ -65,11 +65,7 @@ const WORKLOAD_DEFINITIONS = [
 ];
 
 class SwingbenchSOEEngine {
-  constructor(options = {}) {
-    this.eventPrefix = options.eventPrefix || 'swingbench-soe';
-    this.displayName = options.displayName || 'Swingbench SOE';
-    this.moduleName = options.moduleName || 'DBSTRESS_SWINGBENCH_SOE';
-    this.clientIdPrefix = options.clientIdPrefix || 'SOE';
+  constructor() {
     this.isRunning = false;
     this.config = null;
     this.pool = null;
@@ -353,9 +349,9 @@ class SwingbenchSOEEngine {
     }
 
     try {
-      connection.module = this.moduleName;
+      connection.module = 'DBSTRESS_SWINGBENCH_SOE';
       connection.action = `W${workerId}`;
-      connection.clientId = `${this.clientIdPrefix}:W${workerId}`;
+      connection.clientId = `SOE:W${workerId}`;
     } catch (err) {
       // Best effort only.
     }
@@ -1047,8 +1043,8 @@ class SwingbenchSOEEngine {
     };
 
     if (this.io) {
-      this.io.emit(`${this.eventPrefix}-metrics`, payload);
-      this.io.emit(`${this.eventPrefix}-status`, {
+      this.io.emit('swingbench-soe-metrics', payload);
+      this.io.emit('swingbench-soe-status', {
         isRunning: this.isRunning,
         config: this.config,
         uptime: payload.uptime,
@@ -1100,7 +1096,7 @@ class SwingbenchSOEEngine {
           }
 
           if (!String(error.message || '').includes('pool is closing')) {
-            console.log(`${this.displayName} worker ${workerId} error: ${error.message}`);
+            console.log(`Swingbench SOE worker ${workerId} error: ${error.message}`);
           }
         }
       }
@@ -1119,7 +1115,7 @@ class SwingbenchSOEEngine {
 
   async start(db, config = {}, io) {
     if (this.isRunning) {
-      throw new Error(`${this.displayName} workload is already running.`);
+      throw new Error('Swingbench SOE workload is already running.');
     }
 
     this.config = this.normalizeConfig(config);
@@ -1155,7 +1151,7 @@ class SwingbenchSOEEngine {
 
     if (this.config.durationSeconds > 0) {
       this.stopTimer = setTimeout(() => {
-        this.stop().catch((error) => console.log(`${this.displayName} auto-stop error:`, error.message));
+        this.stop().catch((error) => console.log('Swingbench SOE auto-stop error:', error.message));
       }, this.config.durationSeconds * 1000);
     }
 
@@ -1188,7 +1184,7 @@ class SwingbenchSOEEngine {
       try {
         await this.pool.close(10);
       } catch (error) {
-        console.log(`${this.displayName} pool close error:`, error.message);
+        console.log('Swingbench SOE pool close error:', error.message);
       } finally {
         this.pool = null;
       }
@@ -1197,7 +1193,7 @@ class SwingbenchSOEEngine {
     this.reportStats();
 
     if (this.io) {
-      this.io.emit(`${this.eventPrefix}-status`, {
+      this.io.emit('swingbench-soe-status', {
         isRunning: false,
         config: this.config,
         uptime: Math.floor((Date.now() - this.stats.startTime) / 1000),
@@ -1211,4 +1207,3 @@ class SwingbenchSOEEngine {
 }
 
 module.exports = new SwingbenchSOEEngine();
-module.exports.SwingbenchSOEEngine = SwingbenchSOEEngine;

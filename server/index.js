@@ -12,7 +12,6 @@ const insertBlastManager = require('./db/insertBlastManager');
 const tablespaceManager = require('./db/tablespaceManager');
 const stressEngine = require('./stress/engine');
 const swingbenchSOEEngine = require('./stress/swingbenchSOEEngine');
-const cobolSOEEngine = require('./stress/cobolSOEEngine');
 const insertBlastEngine = require('./stress/insertBlastEngine');
 const datafileGrowthEngine = require('./stress/datafileGrowthEngine');
 const indexContentionEngine = require('./stress/indexContentionEngine');
@@ -539,58 +538,6 @@ app.post('/api/swingbench/soe/workload/stop', async (req, res) => {
     res.json({
       success: true,
       message: 'Swingbench SOE workload stopped',
-      ...status
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-app.get('/api/cobol/soe/workload/defaults', (req, res) => {
-  try {
-    res.json({
-      success: true,
-      ...cobolSOEEngine.buildDefaultConfig()
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-app.get('/api/cobol/soe/workload/status', (req, res) => {
-  try {
-    res.json({
-      success: true,
-      ...cobolSOEEngine.getStatus()
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-app.post('/api/cobol/soe/workload/start', async (req, res) => {
-  try {
-    const status = await cobolSOEEngine.start(oracleDb, req.body || {}, io);
-    metricsCollector.start(oracleDb, io);
-    await metricsCollector.resetGCBaseline();
-
-    res.json({
-      success: true,
-      message: 'COBOL XA SOE workload started',
-      ...status
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-app.post('/api/cobol/soe/workload/stop', async (req, res) => {
-  try {
-    const status = await cobolSOEEngine.stop();
-    metricsCollector.stop();
-    res.json({
-      success: true,
-      message: 'COBOL XA SOE workload stopped',
       ...status
     });
   } catch (error) {
