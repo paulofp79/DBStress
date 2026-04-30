@@ -1,8 +1,42 @@
 class InsertBlastManager {
+  sanitizeIdentifier(value = '', fallback = '') {
+    const sanitized = String(value || fallback)
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_$#]/g, '');
+
+    if (!sanitized) {
+      return fallback;
+    }
+
+    return /^[A-Z]/.test(sanitized) ? sanitized : `T${sanitized}`;
+  }
+
+  isEnabled(value) {
+    return value === true || String(value).trim().toLowerCase() === 'true';
+  }
+
+  quoteSqlLiteral(value) {
+    return `'${String(value).replace(/'/g, "''")}'`;
+  }
+
   normalizeConfig(config = {}) {
-    const tablePrefix = String(config.tablePrefix || 'IBLAST').trim().toUpperCase().replace(/[^A-Z0-9_$#]/g, '');
+    const tablePrefix = this.sanitizeIdentifier(config.tablePrefix, 'IBLAST');
     const tableCount = Math.max(1, Math.min(5000, Number.parseInt(config.tableCount, 10) || 8));
     const columnsPerTable = Math.max(4, Math.min(200, Number.parseInt(config.columnsPerTable, 10) || 24));
+    const tablespaceConfig = config.tablespaces || {};
+    const defaultTablespacePrefix = `${tablePrefix}_TS`;
+    const tablespacePrefix = this.sanitizeIdentifier(
+      tablespaceConfig.tablespacePrefix || config.tablespacePrefix || defaultTablespacePrefix,
+      defaultTablespacePrefix
+    ).slice(0, 27);
+    const tablespaces = {
+      enabled: this.isEnabled(tablespaceConfig.enabled) || this.isEnabled(config.createTablespaces),
+      tablespacePrefix,
+      initialSizeMb: Math.max(64, Math.min(1048576, Number.parseInt(tablespaceConfig.initialSizeMb ?? config.tablespaceInitialSizeMb, 10) || 1024)),
+      autoextendNextMb: Math.max(16, Math.min(65536, Number.parseInt(tablespaceConfig.autoextendNextMb ?? config.tablespaceAutoextendNextMb, 10) || 1024)),
+      datafileLocation: String(tablespaceConfig.datafileLocation || config.tablespaceDatafileLocation || '').trim()
+    };
 
     if (!tablePrefix) {
       throw new Error('Table prefix is required.');
@@ -11,7 +45,8 @@ class InsertBlastManager {
     return {
       tablePrefix,
       tableCount,
-      columnsPerTable
+      columnsPerTable,
+      tablespaces
     };
   }
 
@@ -19,6 +54,13 @@ class InsertBlastManager {
     const normalized = this.normalizeConfig(config);
     return Array.from({ length: normalized.tableCount }, (_, index) => (
       `${normalized.tablePrefix}_T${String(index + 1).padStart(3, '0')}`
+    ));
+  }
+
+  getTablespaceNames(config = {}) {
+    const normalized = this.normalizeConfig(config);
+    return Array.from({ length: normalized.tableCount }, (_, index) => (
+      `${normalized.tablespaces.tablespacePrefix}${String(index + 1).padStart(3, '0')}`
     ));
   }
 
@@ -42,24 +84,68 @@ class InsertBlastManager {
     return columns;
   }
 
-  generateCreateTableDDL(tableName, columnsPerTable) {
+  generateCreateBigfileTablespaceDDL(tablespaceName, tablespaces) {
+    const datafileName = tablespaces.datafileLocation
+      ? this.quoteSqlLiteral(this.resolveDatafileName(tablespaces.datafileLocation, tablespaceName))
+      : '';
+    const datafileClause = datafileName
+      ? `DATAFILE ${datafileName} SIZE ${tablespaces.initialSizeMb}M`
+      : `DATAFILE SIZE ${tablespaces.initialSizeMb}M`;
+
+    return [
+      `CREATE BIGFILE TABLESPACE ${tablespaceName}`,
+      datafileClause,
+      `AUTOEXTEND ON NEXT ${tablespaces.autoextendNextMb}M`,
+      'MAXSIZE UNLIMITED'
+    ].join(' ');
+  }
+
+  resolveDatafileName(location, tablespaceName) {
+    const trimmed = String(location || '').trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    if (trimmed.startsWith('+')) {
+      return trimmed;
+    }
+
+    const separator = trimmed.endsWith('/') || trimmed.endsWith('\\') ? '' : '/';
+    return `${trimmed}${separator}${tablespaceName}.dbf`;
+  }
+
+  generateCreateTableDDL(tableName, columnsPerTable, tablespaceName = null) {
     const columns = this.buildColumnDefinitions(columnsPerTable);
-    return `CREATE TABLE ${tableName} (\n  ${columns.join(',\n  ')}\n) NOLOGGING`;
+    const tablespaceClause = tablespaceName ? `\nTABLESPACE ${tablespaceName}` : '';
+    return `CREATE TABLE ${tableName} (\n  ${columns.join(',\n  ')}\n)${tablespaceClause}\nNOLOGGING`;
   }
 
   async createTables(oracleDb, config = {}, progressCallback = () => {}) {
     const normalized = this.normalizeConfig(config);
     const tableNames = this.getTableNames(normalized);
+    const tablespaceNames = normalized.tablespaces.enabled ? this.getTablespaceNames(normalized) : [];
     const connection = await oracleDb.getConnection();
 
     try {
       for (let index = 0; index < tableNames.length; index += 1) {
         const tableName = tableNames[index];
+        const tablespaceName = tablespaceNames[index] || null;
+
+        if (tablespaceName) {
+          progressCallback({
+            step: `Creating BIGFILE tablespace ${tablespaceName}...`,
+            progress: Math.round((index / tableNames.length) * 100)
+          });
+          await connection.execute(this.generateCreateBigfileTablespaceDDL(tablespaceName, normalized.tablespaces), [], {
+            autoCommit: false
+          });
+        }
+
         progressCallback({
           step: `Creating ${tableName}...`,
           progress: Math.round((index / tableNames.length) * 100)
         });
-        await connection.execute(this.generateCreateTableDDL(tableName, normalized.columnsPerTable), [], {
+        await connection.execute(this.generateCreateTableDDL(tableName, normalized.columnsPerTable, tablespaceName), [], {
           autoCommit: false
         });
       }
@@ -72,7 +158,8 @@ class InsertBlastManager {
 
       return {
         config: normalized,
-        tableNames
+        tableNames,
+        tablespaceNames
       };
     } finally {
       await connection.close();
@@ -82,6 +169,7 @@ class InsertBlastManager {
   async dropTables(oracleDb, config = {}, progressCallback = () => {}) {
     const normalized = this.normalizeConfig(config);
     const tableNames = this.getTableNames(normalized);
+    const tablespaceNames = normalized.tablespaces.enabled ? this.getTablespaceNames(normalized) : [];
     let completed = 0;
 
     progressCallback({
@@ -89,14 +177,27 @@ class InsertBlastManager {
       progress: 0
     });
 
-    await Promise.all(tableNames.map(async (tableName) => {
+    await Promise.all(tableNames.map(async (tableName, index) => {
+      const tablespaceName = tablespaceNames[index] || null;
       const connection = await oracleDb.createDirectConnection();
 
       try {
-        await connection.execute(`DROP TABLE ${tableName} PURGE`);
-      } catch (error) {
-        if (error.errorNum !== 942) {
-          throw error;
+        try {
+          await connection.execute(`DROP TABLE ${tableName} PURGE`);
+        } catch (error) {
+          if (error.errorNum !== 942) {
+            throw error;
+          }
+        }
+
+        if (tablespaceName) {
+          try {
+            await connection.execute(`DROP TABLESPACE ${tablespaceName} INCLUDING CONTENTS AND DATAFILES`);
+          } catch (error) {
+            if (error.errorNum !== 959) {
+              throw error;
+            }
+          }
         }
       } finally {
         await connection.close();
@@ -104,7 +205,7 @@ class InsertBlastManager {
 
       completed += 1;
       progressCallback({
-        step: `Dropped ${completed}/${tableNames.length} tables...`,
+        step: `Dropped ${completed}/${tableNames.length} table${tablespaceName ? '/tablespace' : ''} pair(s)...`,
         progress: Math.round((completed / tableNames.length) * 100)
       });
     }));
@@ -116,7 +217,8 @@ class InsertBlastManager {
 
     return {
       config: normalized,
-      tableNames
+      tableNames,
+      tablespaceNames
     };
   }
 
@@ -131,33 +233,45 @@ class InsertBlastManager {
 
     const result = await oracleDb.execute(
       `
-        SELECT table_name, num_rows
-        FROM user_tables
-        WHERE table_name LIKE :likePattern ESCAPE '\\'
-        ORDER BY table_name
+          SELECT table_name, num_rows, tablespace_name
+          FROM user_tables
+          WHERE table_name LIKE :likePattern ESCAPE '\\'
+          ORDER BY table_name
       `,
       { likePattern }
     );
 
     const expectedSet = new Set(tableNames);
+    const expectedTablespaces = normalized.tablespaces.enabled ? this.getTablespaceNames(normalized) : [];
+    const expectedTablespaceByTable = new Map(tableNames.map((tableName, index) => [
+      tableName,
+      expectedTablespaces[index] || null
+    ]));
     const prefixMatches = (result.rows || []).map((row) => ({
       tableName: row.TABLE_NAME,
-      estimatedRows: Number(row.NUM_ROWS || 0)
+      estimatedRows: Number(row.NUM_ROWS || 0),
+      tablespaceName: row.TABLESPACE_NAME || null
     }));
     const existing = prefixMatches
       .map((row) => ({
         tableName: row.tableName,
-        estimatedRows: row.estimatedRows
+        estimatedRows: row.estimatedRows,
+        tablespaceName: row.tablespaceName
       }))
       .filter((row) => expectedSet.has(row.tableName));
+    const misplacedTables = normalized.tablespaces.enabled
+      ? existing.filter((row) => row.tablespaceName !== expectedTablespaceByTable.get(row.tableName))
+      : [];
 
     return {
       config: normalized,
-      ready: existing.length === tableNames.length,
+      ready: existing.length === tableNames.length && misplacedTables.length === 0,
       existingTables: existing,
       existingTableCount: prefixMatches.length,
       prefixMatchedTables: prefixMatches,
-      missingTables: tableNames.filter((name) => !existing.some((row) => row.tableName === name))
+      missingTables: tableNames.filter((name) => !existing.some((row) => row.tableName === name)),
+      expectedTablespaces,
+      misplacedTables
     };
   }
 

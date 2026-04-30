@@ -84,6 +84,13 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     tablePrefix: 'IBLAST',
     tableCount: 8,
     columnsPerTable: 24,
+    tablespaces: {
+      enabled: false,
+      tablespacePrefix: 'IBLAST_TS',
+      initialSizeMb: 1024,
+      autoextendNextMb: 1024,
+      datafileLocation: ''
+    },
     hwMitigation: {
       enabled: false,
       preallocateOnStart: true,
@@ -111,7 +118,12 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
         params: {
           tablePrefix: nextConfig.tablePrefix,
           tableCount: nextConfig.tableCount,
-          columnsPerTable: nextConfig.columnsPerTable
+          columnsPerTable: nextConfig.columnsPerTable,
+          createTablespaces: nextConfig.tablespaces?.enabled,
+          tablespacePrefix: nextConfig.tablespaces?.tablespacePrefix,
+          tablespaceInitialSizeMb: nextConfig.tablespaces?.initialSizeMb,
+          tablespaceAutoextendNextMb: nextConfig.tablespaces?.autoextendNextMb,
+          tablespaceDatafileLocation: nextConfig.tablespaces?.datafileLocation
         }
       });
 
@@ -238,6 +250,34 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
     }));
   };
 
+  const handleTablePrefixChange = (value) => {
+    setConfig((prev) => {
+      const previousDefaultTablespacePrefix = `${prev.tablePrefix}_TS`;
+      const nextDefaultTablespacePrefix = `${value}_TS`;
+      const shouldFollowTablePrefix = !prev.tablespaces?.tablespacePrefix
+        || prev.tablespaces.tablespacePrefix === previousDefaultTablespacePrefix;
+
+      return {
+        ...prev,
+        tablePrefix: value,
+        tablespaces: {
+          ...prev.tablespaces,
+          tablespacePrefix: shouldFollowTablePrefix ? nextDefaultTablespacePrefix : prev.tablespaces.tablespacePrefix
+        }
+      };
+    });
+  };
+
+  const handleTablespaceChange = (field, value) => {
+    setConfig((prev) => ({
+      ...prev,
+      tablespaces: {
+        ...prev.tablespaces,
+        [field]: value
+      }
+    }));
+  };
+
   const handleWorkloadChange = (workloadId, field, value) => {
     setConfig((prev) => ({
       ...prev,
@@ -288,7 +328,11 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
   };
 
   const handleDrop = async () => {
-    if (!window.confirm(`Drop insert-blast tables for prefix '${config.tablePrefix}'?`)) {
+    const tablespaceText = config.tablespaces?.enabled
+      ? ` and BIGFILE tablespaces for prefix '${config.tablespaces.tablespacePrefix}'`
+      : '';
+
+    if (!window.confirm(`Drop insert-blast tables for prefix '${config.tablePrefix}'${tablespaceText}?`)) {
       return;
     }
 
@@ -485,7 +529,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
             <input
               id="ib-prefix"
               value={config.tablePrefix}
-              onChange={(e) => handleChange('tablePrefix', e.target.value.toUpperCase().replace(/[^A-Z0-9_$#]/g, ''))}
+              onChange={(e) => handleTablePrefixChange(e.target.value.toUpperCase().replace(/[^A-Z0-9_$#]/g, ''))}
               disabled={busy || workloadStatus.isRunning}
             />
           </div>
@@ -513,6 +557,86 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               disabled={busy || workloadStatus.isRunning}
             />
           </div>
+        </div>
+
+        <div style={{
+          marginTop: '0.9rem',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: '8px',
+          padding: '0.9rem'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Table Tablespaces</h3>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                Create one BIGFILE tablespace per Insert Blast table and place each table in its matching tablespace.
+              </div>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                checked={!!config.tablespaces?.enabled}
+                onChange={(e) => handleTablespaceChange('enabled', e.target.checked)}
+                disabled={busy || workloadStatus.isRunning}
+              />
+              <span>Enable</span>
+            </label>
+          </div>
+
+          {config.tablespaces?.enabled && (
+            <>
+              <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.85rem' }}>
+                <div className="form-group">
+                  <label htmlFor="ib-tablespace-prefix">Tablespace Prefix</label>
+                  <input
+                    id="ib-tablespace-prefix"
+                    value={config.tablespaces?.tablespacePrefix || ''}
+                    onChange={(e) => handleTablespaceChange('tablespacePrefix', e.target.value.toUpperCase().replace(/[^A-Z0-9_$#]/g, '').slice(0, 27))}
+                    disabled={busy || workloadStatus.isRunning}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="ib-tablespace-location">Datafile Location</label>
+                  <input
+                    id="ib-tablespace-location"
+                    value={config.tablespaces?.datafileLocation || ''}
+                    placeholder="OMF default"
+                    onChange={(e) => handleTablespaceChange('datafileLocation', e.target.value)}
+                    disabled={busy || workloadStatus.isRunning}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="ib-tablespace-size">Initial Size (MB)</label>
+                  <input
+                    id="ib-tablespace-size"
+                    type="number"
+                    min="64"
+                    max="1048576"
+                    value={config.tablespaces?.initialSizeMb ?? 1024}
+                    onChange={(e) => handleTablespaceChange('initialSizeMb', e.target.value)}
+                    disabled={busy || workloadStatus.isRunning}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="ib-tablespace-next">Autoextend Next (MB)</label>
+                  <input
+                    id="ib-tablespace-next"
+                    type="number"
+                    min="16"
+                    max="65536"
+                    value={config.tablespaces?.autoextendNextMb ?? 1024}
+                    onChange={(e) => handleTablespaceChange('autoextendNextMb', e.target.value)}
+                    disabled={busy || workloadStatus.isRunning}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                Names are generated as `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}001`, `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}002`, and so on. Leave datafile location blank for Oracle Managed Files, or use a directory/disk group such as `/u01/oradata` or `+DATA`.
+              </div>
+            </>
+          )}
         </div>
 
         <div style={{
@@ -619,6 +743,11 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               <div style={{ fontWeight: 600, color: schemaStatus?.ready ? 'var(--accent-success)' : 'var(--text-primary)' }}>
                 {schemaStatus?.ready ? 'Yes' : 'Not yet'}
               </div>
+              {schemaStatus?.misplacedTables?.length > 0 && (
+                <div style={{ fontSize: '0.75rem', color: 'var(--accent-warning)', marginTop: '0.15rem' }}>
+                  {schemaStatus.misplacedTables.length} tablespace mismatch(es)
+                </div>
+              )}
             </div>
             <div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Configured Workloads</div>
