@@ -454,6 +454,78 @@ Current behavior:
 - supports filtering by minimum `avg_wait_ms`
 - now works in `since-start` mode so it matches the GC Benchmark chart more closely
 
+### `scripts/insert-blast.sh`
+
+This helper runs the Insert Blast tool directly from a Linux shell on an Oracle database host. It uses `sqlplus`, so it does not require the DBStress web server to be running.
+
+Typical flow:
+
+```bash
+export ORACLE_CONNECT_STRING='app_user/app_password@host:1521/service'
+
+./scripts/insert-blast.sh create \
+  --prefix IBLAST \
+  --tables 8 \
+  --columns 24
+
+./scripts/insert-blast.sh run \
+  --prefix IBLAST \
+  --tables 8 \
+  --columns 24 \
+  --workload Workload_1:8:8:60:50:reuse
+```
+
+Run the monitor in a second terminal while the workload is active:
+
+```bash
+./scripts/insert-blast.sh monitor --interval 5
+```
+
+Create one BIGFILE tablespace per Insert Blast table:
+
+```bash
+./scripts/insert-blast.sh create \
+  --prefix IBLAST \
+  --tables 8 \
+  --columns 24 \
+  --create-tablespaces true \
+  --tablespace-prefix IBLAST_TS \
+  --tablespace-initial-mb 1024 \
+  --tablespace-next-mb 1024 \
+  --tablespace-datafile-location /u02/oradata
+```
+
+Run multiple workloads and optional extent allocation:
+
+```bash
+./scripts/insert-blast.sh run \
+  --prefix IBLAST \
+  --tables 16 \
+  --columns 24 \
+  --workload OLTP_A:8:16:300:50:reuse \
+  --workload OLTP_B:16:8:300:100:reuse \
+  --hw-mitigation true \
+  --preallocate-on-start true \
+  --extent-size-mb 128 \
+  --allocate-every-inserts 100000
+```
+
+Other useful commands:
+
+```bash
+./scripts/insert-blast.sh status --prefix IBLAST --tables 8
+./scripts/insert-blast.sh drop --prefix IBLAST --tables 8
+./scripts/insert-blast.sh --help
+```
+
+The workload spec is:
+
+```text
+NAME:TABLES:SESSIONS:DURATION_SECONDS:COMMIT_EVERY:MODE
+```
+
+`MODE` can be `reuse` or `reconnect`. Worker logs are written to `./insert-blast-logs` by default.
+
 ## API Highlights
 
 ### DBStress backend
