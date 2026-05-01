@@ -31,6 +31,7 @@ const API_BASE = `${getServerUrl()}/api`;
 const WAIT_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#14b8a6', '#e11d48', '#84cc16'];
 const LMS_USED_COLOR = '#22c55e';
 const LMS_ALLOC_COLOR = '#f59e0b';
+const INSERT_BLAST_CONFIG_STORAGE_KEY = 'dbstress.insertBlast.config';
 
 const createWorkload = (index = 1, defaultTableCount = 8) => ({
   id: `workload_${Date.now()}_${index}`,
@@ -51,6 +52,58 @@ const normalizeWorkload = (workload, index) => ({
   commitEvery: workload.commitEvery || 50,
   sessionMode: workload.sessionMode || 'reuse'
 });
+
+const createDefaultConfig = () => ({
+  tablePrefix: 'IBLAST',
+  tableCount: 8,
+  columnsPerTable: 24,
+  tablespaces: {
+    enabled: false,
+    tablespacePrefix: 'IBLAST_TS',
+    initialSizeMb: 1024,
+    autoextendNextMb: 1024,
+    datafileLocation: ''
+  },
+  hwMitigation: {
+    enabled: false,
+    preallocateOnStart: true,
+    extentSizeMb: 128,
+    allocateEveryInserts: 100000
+  },
+  workloads: [createWorkload(1, 8)]
+});
+
+const normalizeConfigState = (storedConfig = {}) => {
+  const defaults = createDefaultConfig();
+  return {
+    ...defaults,
+    ...storedConfig,
+    tablespaces: {
+      ...defaults.tablespaces,
+      ...(storedConfig.tablespaces || {})
+    },
+    hwMitigation: {
+      ...defaults.hwMitigation,
+      ...(storedConfig.hwMitigation || {})
+    },
+    workloads: Array.isArray(storedConfig.workloads) && storedConfig.workloads.length > 0
+      ? storedConfig.workloads.map(normalizeWorkload)
+      : defaults.workloads
+  };
+};
+
+const loadStoredConfig = () => {
+  if (typeof window === 'undefined') {
+    return createDefaultConfig();
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(INSERT_BLAST_CONFIG_STORAGE_KEY);
+    return rawValue ? normalizeConfigState(JSON.parse(rawValue)) : createDefaultConfig();
+  } catch (error) {
+    return createDefaultConfig();
+  }
+};
 
 const aggregateWaitEvents = (rows = []) => {
   const grouped = new Map();
@@ -80,25 +133,7 @@ const aggregateWaitEvents = (rows = []) => {
 };
 
 function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
-  const [config, setConfig] = useState({
-    tablePrefix: 'IBLAST',
-    tableCount: 8,
-    columnsPerTable: 24,
-    tablespaces: {
-      enabled: false,
-      tablespacePrefix: 'IBLAST_TS',
-      initialSizeMb: 1024,
-      autoextendNextMb: 1024,
-      datafileLocation: ''
-    },
-    hwMitigation: {
-      enabled: false,
-      preallocateOnStart: true,
-      extentSizeMb: 128,
-      allocateEveryInserts: 100000
-    },
-    workloads: [createWorkload(1, 8)]
-  });
+  const [config, setConfig] = useState(() => loadStoredConfig());
   const [schemaStatus, setSchemaStatus] = useState(null);
   const [workloadStatus, setWorkloadStatus] = useState({ isRunning: false, workloads: [] });
   const [metrics, setMetrics] = useState(null);
@@ -107,6 +142,18 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
   const [waitEvents, setWaitEvents] = useState([]);
   const [busy, setBusy] = useState(false);
   const [monitorError, setMonitorError] = useState('');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(INSERT_BLAST_CONFIG_STORAGE_KEY, JSON.stringify(config));
+    } catch (error) {
+      // Ignore storage failures so the panel still works in restricted environments.
+    }
+  }, [config]);
 
   const loadStatus = async (nextConfig = config) => {
     if (!dbStatus.connected) {
@@ -318,8 +365,15 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
         timeout: 600000
       });
       if (response.data.success) {
+        const nextConfig = response.data.config
+          ? normalizeConfigState({
+            ...config,
+            ...response.data.config
+          })
+          : config;
+        setConfig(nextConfig);
         onSuccess?.(response.data.message);
-        await loadStatus(config);
+        await loadStatus(nextConfig);
       }
     } catch (err) {
       setBusy(false);
@@ -633,7 +687,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
               </div>
 
               <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                Names are generated as `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}001`, `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}002`, and so on. Leave datafile location blank for Oracle Managed Files, or use a directory/disk group such as `/u01/oradata` or `+DATA`.
+                Names are generated as <code>{`${config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}001`}</code>, <code>{`${config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}002`}</code>, and so on. Leave datafile location blank for Oracle Managed Files, or use a directory/disk group such as `/u01/oradata` or `+DATA`.
               </div>
             </>
           )}
