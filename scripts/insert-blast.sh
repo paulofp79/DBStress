@@ -387,6 +387,26 @@ sql_value_concat_expression() {
   printf '%s' "$expression"
 }
 
+single_insert_values_csv() {
+  local workload_id="$1"
+  local worker_id="$2"
+  local sequence="$3"
+  local values=()
+  local index suffix
+  for ((index = 1; index <= COLUMNS_PER_TABLE; index += 1)); do
+    suffix="$(printf '%03d' "$index")"
+    if (( index % 3 == 1 )); then
+      values+=("$(sql_literal "${workload_id}_W${worker_id}_R${sequence}_C${suffix}")")
+    elif (( index % 3 == 2 )); then
+      values+=("$(( (worker_id * 1000000) + sequence + index ))")
+    else
+      values+=("SYSDATE - (MOD($((sequence + index)), 86400) / 86400)")
+    fi
+  done
+  local IFS=", "
+  printf '%s' "${values[*]}"
+}
+
 worker_sql() {
   local workload_id="$1"
   local workload_name="$2"
@@ -480,6 +500,30 @@ EXIT
 SQL
 }
 
+single_insert_sql() {
+  local workload_id="$1"
+  local table_name="$2"
+  local worker_id="$3"
+  local sequence="$4"
+  local run_id="$5"
+  local columns values
+  columns="$(insert_columns_csv)"
+  values="$(single_insert_values_csv "$workload_id" "$worker_id" "$sequence")"
+
+  cat <<SQL
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 32767 TRIMSPOOL ON SERVEROUTPUT ON
+BEGIN
+  DBMS_APPLICATION_INFO.SET_MODULE('DBSTRESS_INSERT_BLAST', '${run_id}');
+  DBMS_SESSION.SET_IDENTIFIER('IBLAST:${run_id}:${workload_id}:W${worker_id}');
+END;
+/
+INSERT INTO ${table_name} (${columns}) VALUES (${values});
+COMMIT;
+EXIT
+SQL
+}
+
 run_worker_reuse() {
   local workload_id="$1"
   local workload_name="$2"
@@ -502,21 +546,44 @@ run_worker_reconnect() {
   local worker_id="$6"
   local run_id="$7"
   local log_file="${LOG_DIR}/${workload_id}_worker_${worker_id}.log"
-  local end_epoch now remaining chunk
+  local end_epoch now sequence=0 inserts=0 errors=0 table_index table
+  local -a table_insert_counts=()
+  local -a next_allocations=()
   end_epoch=$(( $(date +%s) + duration ))
   : >"$log_file"
+
+  for ((i = 1; i <= table_limit; i += 1)); do
+    table_insert_counts[$i]=0
+    next_allocations[$i]="$ALLOCATE_EVERY_INSERTS"
+  done
 
   while true; do
     now="$(date +%s)"
     (( now >= end_epoch )) && break
-    remaining=$(( end_epoch - now ))
-    chunk="$remaining"
-    if (( chunk > 1 )); then
-      chunk=1
+
+    table_index=$(( (RANDOM % table_limit) + 1 ))
+    table="$(table_name "$table_index")"
+    sequence=$((sequence + 1))
+    table_insert_counts[$table_index]=$(( ${table_insert_counts[$table_index]:-0} + 1 ))
+
+    if [[ "$HW_MITIGATION_ENABLED" == "true" ]]; then
+      if (( ${table_insert_counts[$table_index]} >= ${next_allocations[$table_index]:-$ALLOCATE_EVERY_INSERTS} )); then
+        if ! allocate_extent_for_table "$table"; then
+          echo "  ${table}: reconnect extent allocation failed, continuing" >>"$log_file"
+        fi
+        next_allocations[$table_index]=$(( ${next_allocations[$table_index]:-$ALLOCATE_EVERY_INSERTS} + ALLOCATE_EVERY_INSERTS ))
+      fi
     fi
-    worker_sql "$workload_id" "$workload_name" "$table_limit" "$chunk" "$commit_every" "$worker_id" "$run_id" |
-      sqlplus -s "$CONNECT_STRING" >>"$log_file" 2>&1 || true
+
+    if single_insert_sql "$workload_id" "$table" "$worker_id" "$sequence" "$run_id" |
+      sqlplus -s "$CONNECT_STRING" >>"$log_file" 2>&1; then
+      inserts=$((inserts + 1))
+    else
+      errors=$((errors + 1))
+    fi
   done
+
+  echo "${workload_name} worker ${worker_id}: inserts=${inserts} errors=${errors}" >>"$log_file"
 }
 
 run_workload() {
