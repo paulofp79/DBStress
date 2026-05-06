@@ -20,6 +20,20 @@ class InsertBlastManager {
     return `'${String(value).replace(/'/g, "''")}'`;
   }
 
+  normalizeEncryptionAlgorithm(value = 'AES256') {
+    const algorithm = String(value || 'AES256')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    const supportedAlgorithms = new Set(['AES128', 'AES192', 'AES256', '3DES168']);
+
+    if (!supportedAlgorithms.has(algorithm)) {
+      throw new Error('Tablespace encryption algorithm must be AES128, AES192, AES256, or 3DES168.');
+    }
+
+    return algorithm;
+  }
+
   normalizeConfig(config = {}) {
     const tablePrefix = this.sanitizeIdentifier(config.tablePrefix, 'IBLAST');
     const tableCount = Math.max(1, Math.min(5000, Number.parseInt(config.tableCount, 10) || 8));
@@ -35,7 +49,11 @@ class InsertBlastManager {
       tablespacePrefix,
       initialSizeMb: Math.max(64, Math.min(1048576, Number.parseInt(tablespaceConfig.initialSizeMb ?? config.tablespaceInitialSizeMb, 10) || 1024)),
       autoextendNextMb: Math.max(16, Math.min(65536, Number.parseInt(tablespaceConfig.autoextendNextMb ?? config.tablespaceAutoextendNextMb, 10) || 1024)),
-      datafileLocation: String(tablespaceConfig.datafileLocation || config.tablespaceDatafileLocation || '').trim()
+      datafileLocation: String(tablespaceConfig.datafileLocation || config.tablespaceDatafileLocation || '').trim(),
+      encryption: {
+        enabled: this.isEnabled(tablespaceConfig.encryption?.enabled) || this.isEnabled(config.tablespaceEncryption),
+        algorithm: this.normalizeEncryptionAlgorithm(tablespaceConfig.encryption?.algorithm || config.tablespaceEncryptionAlgorithm)
+      }
     };
 
     if (!tablePrefix) {
@@ -92,12 +110,19 @@ class InsertBlastManager {
       ? `DATAFILE ${datafileName} SIZE ${tablespaces.initialSizeMb}M`
       : `DATAFILE SIZE ${tablespaces.initialSizeMb}M`;
 
-    return [
+    const ddl = [
       `CREATE BIGFILE TABLESPACE ${tablespaceName}`,
       datafileClause,
       `AUTOEXTEND ON NEXT ${tablespaces.autoextendNextMb}M`,
       'MAXSIZE UNLIMITED'
-    ].join(' ');
+    ];
+
+    if (tablespaces.encryption?.enabled) {
+      ddl.push(`ENCRYPTION USING '${tablespaces.encryption.algorithm}'`);
+      ddl.push('DEFAULT STORAGE (ENCRYPT)');
+    }
+
+    return ddl.join(' ');
   }
 
   resolveDatafileName(location, tablespaceName) {

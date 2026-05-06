@@ -12,6 +12,8 @@ TABLESPACE_PREFIX=""
 TABLESPACE_INITIAL_MB="1024"
 TABLESPACE_NEXT_MB="1024"
 TABLESPACE_DATAFILE_LOCATION=""
+TABLESPACE_ENCRYPTION_ENABLED="false"
+TABLESPACE_ENCRYPTION_ALGORITHM="AES256"
 WORKLOADS=()
 HW_MITIGATION_ENABLED="false"
 PREALLOCATE_ON_START="true"
@@ -42,6 +44,8 @@ Schema options, matching Insert Blast defaults:
   --tablespace-initial-mb NUMBER          Default: 1024
   --tablespace-next-mb NUMBER             Default: 1024
   --tablespace-datafile-location VALUE    Directory or ASM diskgroup for datafiles.
+  --tablespace-encryption true|false      Create encrypted tablespaces. Default: false
+  --tablespace-encryption-algorithm VALUE TDE algorithm. Default: AES256
 
 Workload options:
   --workload NAME:TABLES:SESSIONS:DURATION:COMMIT_EVERY:MODE
@@ -114,6 +118,15 @@ clamp_int() {
   printf '%s' "$value"
 }
 
+normalize_encryption_algorithm() {
+  local algorithm
+  algorithm="$(printf '%s' "${1:-AES256}" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]//g')"
+  case "$algorithm" in
+    AES128|AES192|AES256|3DES168) printf '%s' "$algorithm" ;;
+    *) die "Invalid tablespace encryption algorithm '${1:-}'. Use AES128, AES192, AES256, or 3DES168." ;;
+  esac
+}
+
 normalize_config() {
   TABLE_PREFIX="$(sanitize_identifier "$TABLE_PREFIX" "IBLAST")"
   TABLE_COUNT="$(clamp_int "$TABLE_COUNT" 1 5000 8)"
@@ -124,6 +137,7 @@ normalize_config() {
   TABLESPACE_NEXT_MB="$(clamp_int "$TABLESPACE_NEXT_MB" 16 65536 1024)"
   EXTENT_SIZE_MB="$(clamp_int "$EXTENT_SIZE_MB" 8 1024 128)"
   ALLOCATE_EVERY_INSERTS="$(clamp_int "$ALLOCATE_EVERY_INSERTS" 1000 10000000 100000)"
+  TABLESPACE_ENCRYPTION_ALGORITHM="$(normalize_encryption_algorithm "$TABLESPACE_ENCRYPTION_ALGORITHM")"
   MONITOR_INTERVAL="$(clamp_int "$MONITOR_INTERVAL" 1 86400 5)"
   MONITOR_ITERATIONS="$(clamp_int "$MONITOR_ITERATIONS" 0 1000000 0)"
 }
@@ -220,7 +234,7 @@ insert_columns_csv() {
 
 create_tables() {
   normalize_config
-  local column_defs table ts datafile datafile_clause tablespace_clause sql=""
+  local column_defs table ts datafile datafile_clause tablespace_clause encryption_clause sql=""
   column_defs="$(build_column_definitions)"
 
   for ((i = 1; i <= TABLE_COUNT; i += 1)); do
@@ -238,7 +252,15 @@ create_tables() {
 CREATE BIGFILE TABLESPACE ${ts}
   ${datafile_clause}
   AUTOEXTEND ON NEXT ${TABLESPACE_NEXT_MB}M
-  MAXSIZE UNLIMITED;
+  MAXSIZE UNLIMITED"
+      if [[ "$TABLESPACE_ENCRYPTION_ENABLED" == "true" ]]; then
+        encryption_clause="
+  ENCRYPTION USING '${TABLESPACE_ENCRYPTION_ALGORITHM}'
+  DEFAULT STORAGE (ENCRYPT)"
+      else
+        encryption_clause=""
+      fi
+      sql+="${encryption_clause};
 "
       tablespace_clause="
 TABLESPACE ${ts}"
@@ -649,6 +671,8 @@ parse_args() {
       --tablespace-initial-mb) TABLESPACE_INITIAL_MB="${2:-}"; shift 2 ;;
       --tablespace-next-mb|--tablespace-autoextend-next-mb) TABLESPACE_NEXT_MB="${2:-}"; shift 2 ;;
       --tablespace-datafile-location) TABLESPACE_DATAFILE_LOCATION="${2:-}"; shift 2 ;;
+      --tablespace-encryption|--encrypt-tablespaces) TABLESPACE_ENCRYPTION_ENABLED="$(to_bool "${2:-}")"; shift 2 ;;
+      --tablespace-encryption-algorithm|--tablespace-encryption-cipher) TABLESPACE_ENCRYPTION_ALGORITHM="${2:-}"; shift 2 ;;
       --workload) WORKLOADS+=("${2:-}"); shift 2 ;;
       --hw-mitigation) HW_MITIGATION_ENABLED="$(to_bool "${2:-}")"; shift 2 ;;
       --preallocate-on-start) PREALLOCATE_ON_START="$(to_bool "${2:-}")"; shift 2 ;;

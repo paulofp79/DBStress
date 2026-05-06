@@ -89,7 +89,11 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       tablespacePrefix: 'IBLAST_TS',
       initialSizeMb: 1024,
       autoextendNextMb: 1024,
-      datafileLocation: ''
+      datafileLocation: '',
+      encryption: {
+        enabled: false,
+        algorithm: 'AES256'
+      }
     },
     hwMitigation: {
       enabled: false,
@@ -123,7 +127,9 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
           tablespacePrefix: nextConfig.tablespaces?.tablespacePrefix,
           tablespaceInitialSizeMb: nextConfig.tablespaces?.initialSizeMb,
           tablespaceAutoextendNextMb: nextConfig.tablespaces?.autoextendNextMb,
-          tablespaceDatafileLocation: nextConfig.tablespaces?.datafileLocation
+          tablespaceDatafileLocation: nextConfig.tablespaces?.datafileLocation,
+          tablespaceEncryption: nextConfig.tablespaces?.encryption?.enabled,
+          tablespaceEncryptionAlgorithm: nextConfig.tablespaces?.encryption?.algorithm
         }
       });
 
@@ -274,6 +280,19 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       tablespaces: {
         ...prev.tablespaces,
         [field]: value
+      }
+    }));
+  };
+
+  const handleTablespaceEncryptionChange = (field, value) => {
+    setConfig((prev) => ({
+      ...prev,
+      tablespaces: {
+        ...prev.tablespaces,
+        encryption: {
+          ...(prev.tablespaces?.encryption || {}),
+          [field]: value
+        }
       }
     }));
   };
@@ -630,10 +649,36 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                     disabled={busy || workloadStatus.isRunning}
                   />
                 </div>
+                <div className="form-group">
+                  <label htmlFor="ib-tablespace-encryption">Encryption</label>
+                  <select
+                    id="ib-tablespace-encryption"
+                    value={config.tablespaces?.encryption?.enabled ? 'true' : 'false'}
+                    onChange={(e) => handleTablespaceEncryptionChange('enabled', e.target.value === 'true')}
+                    disabled={busy || workloadStatus.isRunning}
+                  >
+                    <option value="false">Disabled</option>
+                    <option value="true">Enabled</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label htmlFor="ib-tablespace-encryption-algorithm">Encryption Algorithm</label>
+                  <select
+                    id="ib-tablespace-encryption-algorithm"
+                    value={config.tablespaces?.encryption?.algorithm || 'AES256'}
+                    onChange={(e) => handleTablespaceEncryptionChange('algorithm', e.target.value)}
+                    disabled={busy || workloadStatus.isRunning || !config.tablespaces?.encryption?.enabled}
+                  >
+                    <option value="AES256">AES256</option>
+                    <option value="AES192">AES192</option>
+                    <option value="AES128">AES128</option>
+                    <option value="3DES168">3DES168</option>
+                  </select>
+                </div>
               </div>
 
               <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                Names are generated as `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}001`, `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}002`, and so on. Leave datafile location blank for Oracle Managed Files, or use a directory/disk group such as `/u01/oradata` or `+DATA`.
+                Names are generated as `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}001`, `{config.tablespaces?.tablespacePrefix || 'IBLAST_TS'}002`, and so on. Leave datafile location blank for Oracle Managed Files, or use a directory/disk group such as `/u01/oradata` or `+DATA`. Encryption requires TDE/wallet configuration in the database.
               </div>
             </>
           )}
