@@ -8,6 +8,8 @@ TABLE_PREFIX="IBLAST"
 TABLE_COUNT="8"
 COLUMNS_PER_TABLE="24"
 CREATE_TABLESPACES="false"
+DROP_TABLESPACES="false"
+USE_EXISTING_TABLESPACES="false"
 TABLESPACE_PREFIX=""
 TABLESPACE_INITIAL_MB="1024"
 TABLESPACE_NEXT_MB="1024"
@@ -40,12 +42,17 @@ Schema options, matching Insert Blast defaults:
   --tables NUMBER                         Number of tables. Default: 8
   --columns NUMBER                        Insert payload columns per table. Default: 24
   --create-tablespaces true|false         Create one BIGFILE tablespace per table. Default: false
+  --use-existing-tablespaces true|false   Place tables in existing tablespaces. Default: false
   --tablespace-prefix VALUE               Default: <prefix>_TS
   --tablespace-initial-mb NUMBER          Default: 1024
   --tablespace-next-mb NUMBER             Default: 1024
   --tablespace-datafile-location VALUE    Directory or ASM diskgroup for datafiles.
   --tablespace-encryption true|false      Create encrypted tablespaces. Default: false
   --tablespace-encryption-algorithm VALUE TDE algorithm. Default: AES256
+
+Drop options:
+  drop discovers matching <prefix>_T% tables from USER_TABLES; --tables is not required.
+  --drop-tablespaces true|false           Also drop tablespaces used by matching tables. Default: false
 
 Workload options:
   --workload NAME:TABLES:SESSIONS:DURATION:COMMIT_EVERY:MODE
@@ -68,6 +75,9 @@ Examples:
   scripts/insert-blast.sh run --prefix IBLAST --tables 8 \
     --workload Workload_1:8:8:60:50:reuse
   scripts/insert-blast.sh monitor --interval 5
+  scripts/insert-blast.sh drop --prefix IBLAST --drop-tablespaces true
+  scripts/insert-blast.sh create --prefix IBLAST4 --tables 1000 \
+    --use-existing-tablespaces true --tablespace-prefix IBLAST3_TS
 EOF
 }
 
@@ -237,31 +247,37 @@ create_tables() {
   local column_defs table ts datafile datafile_clause tablespace_clause encryption_clause sql=""
   column_defs="$(build_column_definitions)"
 
+  if [[ "$CREATE_TABLESPACES" == "true" && "$USE_EXISTING_TABLESPACES" == "true" ]]; then
+    die "Use either --create-tablespaces true or --use-existing-tablespaces true, not both."
+  fi
+
   for ((i = 1; i <= TABLE_COUNT; i += 1)); do
     table="$(table_name "$i")"
     tablespace_clause=""
-    if [[ "$CREATE_TABLESPACES" == "true" ]]; then
+    if [[ "$CREATE_TABLESPACES" == "true" || "$USE_EXISTING_TABLESPACES" == "true" ]]; then
       ts="$(tablespace_name "$i")"
-      datafile="$(resolve_datafile_name "$TABLESPACE_DATAFILE_LOCATION" "$ts")"
-      if [[ -n "$datafile" ]]; then
-        datafile_clause="DATAFILE $(sql_literal "$datafile") SIZE ${TABLESPACE_INITIAL_MB}M"
-      else
-        datafile_clause="DATAFILE SIZE ${TABLESPACE_INITIAL_MB}M"
-      fi
-      sql+="PROMPT Creating BIGFILE tablespace ${ts}
+      if [[ "$CREATE_TABLESPACES" == "true" ]]; then
+        datafile="$(resolve_datafile_name "$TABLESPACE_DATAFILE_LOCATION" "$ts")"
+        if [[ -n "$datafile" ]]; then
+          datafile_clause="DATAFILE $(sql_literal "$datafile") SIZE ${TABLESPACE_INITIAL_MB}M"
+        else
+          datafile_clause="DATAFILE SIZE ${TABLESPACE_INITIAL_MB}M"
+        fi
+        sql+="PROMPT Creating BIGFILE tablespace ${ts}
 CREATE BIGFILE TABLESPACE ${ts}
   ${datafile_clause}
   AUTOEXTEND ON NEXT ${TABLESPACE_NEXT_MB}M
   MAXSIZE UNLIMITED"
-      if [[ "$TABLESPACE_ENCRYPTION_ENABLED" == "true" ]]; then
-        encryption_clause="
+        if [[ "$TABLESPACE_ENCRYPTION_ENABLED" == "true" ]]; then
+          encryption_clause="
   ENCRYPTION USING '${TABLESPACE_ENCRYPTION_ALGORITHM}'
   DEFAULT STORAGE (ENCRYPT)"
-      else
-        encryption_clause=""
-      fi
-      sql+="${encryption_clause};
+        else
+          encryption_clause=""
+        fi
+        sql+="${encryption_clause};
 "
+      fi
       tablespace_clause="
 TABLESPACE ${ts}"
     fi
@@ -279,42 +295,64 @@ NOLOGGING;
 
 drop_tables() {
   normalize_config
-  local sql="SET SERVEROUTPUT ON
-"
-  local table ts
-  for ((i = 1; i <= TABLE_COUNT; i += 1)); do
-    table="$(table_name "$i")"
-    sql+="BEGIN
-  EXECUTE IMMEDIATE 'DROP TABLE ${table} PURGE';
-  DBMS_OUTPUT.PUT_LINE('Dropped table ${table}');
-EXCEPTION
-  WHEN OTHERS THEN
-    IF SQLCODE = -942 THEN
-      DBMS_OUTPUT.PUT_LINE('Table ${table} does not exist');
-    ELSE
-      RAISE;
+  local escaped_prefix like_pattern
+  escaped_prefix="${TABLE_PREFIX//\\/\\\\}"
+  escaped_prefix="${escaped_prefix//_/\\_}"
+  escaped_prefix="${escaped_prefix//%/\\%}"
+  like_pattern="${escaped_prefix}\\_T%"
+  run_sql "SET SERVEROUTPUT ON
+DECLARE
+  TYPE t_name_list IS TABLE OF VARCHAR2(128);
+  l_tablespaces t_name_list := t_name_list();
+
+  PROCEDURE remember_tablespace(p_tablespace_name VARCHAR2) IS
+  BEGIN
+    IF p_tablespace_name IS NULL THEN
+      RETURN;
     END IF;
+
+    FOR i IN 1 .. l_tablespaces.COUNT LOOP
+      IF l_tablespaces(i) = p_tablespace_name THEN
+        RETURN;
+      END IF;
+    END LOOP;
+
+    l_tablespaces.EXTEND;
+    l_tablespaces(l_tablespaces.COUNT) := p_tablespace_name;
+  END;
+BEGIN
+  FOR table_rec IN (
+    SELECT table_name, tablespace_name
+    FROM user_tables
+    WHERE table_name LIKE $(sql_literal "$like_pattern") ESCAPE '\'
+    ORDER BY table_name
+  ) LOOP
+    IF $(sql_literal "$DROP_TABLESPACES") = 'true' THEN
+      remember_tablespace(table_rec.tablespace_name);
+    END IF;
+
+    EXECUTE IMMEDIATE 'DROP TABLE ' || DBMS_ASSERT.SIMPLE_SQL_NAME(table_rec.table_name) || ' PURGE';
+    DBMS_OUTPUT.PUT_LINE('Dropped table ' || table_rec.table_name);
+  END LOOP;
+
+  IF $(sql_literal "$DROP_TABLESPACES") = 'true' THEN
+    FOR i IN 1 .. l_tablespaces.COUNT LOOP
+      BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLESPACE ' || DBMS_ASSERT.SIMPLE_SQL_NAME(l_tablespaces(i)) || ' INCLUDING CONTENTS AND DATAFILES';
+        DBMS_OUTPUT.PUT_LINE('Dropped tablespace ' || l_tablespaces(i));
+      EXCEPTION
+        WHEN OTHERS THEN
+          IF SQLCODE = -959 THEN
+            DBMS_OUTPUT.PUT_LINE('Tablespace ' || l_tablespaces(i) || ' does not exist');
+          ELSE
+            RAISE;
+          END IF;
+      END;
+    END LOOP;
+  END IF;
 END;
 /
 "
-    if [[ "$CREATE_TABLESPACES" == "true" ]]; then
-      ts="$(tablespace_name "$i")"
-      sql+="BEGIN
-  EXECUTE IMMEDIATE 'DROP TABLESPACE ${ts} INCLUDING CONTENTS AND DATAFILES';
-  DBMS_OUTPUT.PUT_LINE('Dropped tablespace ${ts}');
-EXCEPTION
-  WHEN OTHERS THEN
-    IF SQLCODE = -959 THEN
-      DBMS_OUTPUT.PUT_LINE('Tablespace ${ts} does not exist');
-    ELSE
-      RAISE;
-    END IF;
-END;
-/
-"
-    fi
-  done
-  run_sql "$sql"
 }
 
 status_tables() {
@@ -667,6 +705,8 @@ parse_args() {
       --tables|--table-count) TABLE_COUNT="${2:-}"; shift 2 ;;
       --columns|--columns-per-table) COLUMNS_PER_TABLE="${2:-}"; shift 2 ;;
       --create-tablespaces) CREATE_TABLESPACES="$(to_bool "${2:-}")"; shift 2 ;;
+      --use-existing-tablespaces) USE_EXISTING_TABLESPACES="$(to_bool "${2:-}")"; shift 2 ;;
+      --drop-tablespaces) DROP_TABLESPACES="$(to_bool "${2:-}")"; shift 2 ;;
       --tablespace-prefix) TABLESPACE_PREFIX="${2:-}"; shift 2 ;;
       --tablespace-initial-mb) TABLESPACE_INITIAL_MB="${2:-}"; shift 2 ;;
       --tablespace-next-mb|--tablespace-autoextend-next-mb) TABLESPACE_NEXT_MB="${2:-}"; shift 2 ;;

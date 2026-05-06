@@ -462,6 +462,13 @@ body {
   gap: 1.5rem;
 }
 
+.monitor-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  align-items: start;
+  gap: 1.5rem;
+}
+
 .grid-3 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -475,6 +482,7 @@ body {
 }
 
 @media (max-width: 900px) {
+  .monitor-layout,
   .grid-2,
   .grid-3 {
     grid-template-columns: 1fr;

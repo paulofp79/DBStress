@@ -617,7 +617,7 @@ function App() {
         )}
 
         <div style={{ display: activeTab === 'monitor' ? 'block' : 'none' }}>
-          <div className="grid-2">
+          <div className="monitor-layout">
             <ConnectionPanel
               dbStatus={dbStatus}
               onConnect={handleConnect}
