@@ -617,6 +617,16 @@ run_worker_reconnect() {
   done
 }
 
+print_worker_failure_summary() {
+  [[ -d "$LOG_DIR" ]] || return 0
+
+  local log_count
+  log_count="$(find "$LOG_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+  echo "Worker log files: ${log_count}"
+  echo "Sample worker errors:"
+  grep -RnhE 'ORA-|SP2-|TNS-|ERROR|error|maximum number|resource busy|insufficient privileges|no listener' "$LOG_DIR" | head -n 20 || echo "  No ORA/TNS/SP2 error lines found in ${LOG_DIR}"
+}
+
 run_workload() {
   normalize_config
   default_workloads_if_needed
@@ -666,6 +676,9 @@ run_workload() {
   done
 
   echo "Insert Blast run complete. Worker failures: ${failures}"
+  if (( failures > 0 )); then
+    print_worker_failure_summary
+  fi
   echo "Worker summaries:"
   grep -h "worker .*: operation=" "${LOG_DIR}"/*.log 2>/dev/null || true
   trap - INT TERM
