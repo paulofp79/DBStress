@@ -52,7 +52,7 @@ Schema options, matching Insert Blast defaults:
 
 Drop options:
   drop discovers matching <prefix>_T% tables from USER_TABLES; --tables is not required.
-  --drop-tablespaces true|false           Also drop tablespaces used by matching tables. Default: false
+  --drop-tablespaces true|false           Also drop matching <tablespace-prefix>% tablespaces. Default: false
 
 Workload options:
   --workload NAME:TABLES:SESSIONS:DURATION:COMMIT_EVERY:MODE
@@ -295,11 +295,15 @@ NOLOGGING;
 
 drop_tables() {
   normalize_config
-  local escaped_prefix like_pattern
+  local escaped_prefix like_pattern escaped_tablespace_prefix tablespace_like_pattern
   escaped_prefix="${TABLE_PREFIX//\\/\\\\}"
   escaped_prefix="${escaped_prefix//_/\\_}"
   escaped_prefix="${escaped_prefix//%/\\%}"
   like_pattern="${escaped_prefix}\\_T%"
+  escaped_tablespace_prefix="${TABLESPACE_PREFIX//\\/\\\\}"
+  escaped_tablespace_prefix="${escaped_tablespace_prefix//_/\\_}"
+  escaped_tablespace_prefix="${escaped_tablespace_prefix//%/\\%}"
+  tablespace_like_pattern="${escaped_tablespace_prefix}%"
   run_sql "SET SERVEROUTPUT ON
 DECLARE
   TYPE t_name_list IS TABLE OF VARCHAR2(128);
@@ -327,7 +331,8 @@ BEGIN
     WHERE table_name LIKE $(sql_literal "$like_pattern") ESCAPE '\'
     ORDER BY table_name
   ) LOOP
-    IF $(sql_literal "$DROP_TABLESPACES") = 'true' THEN
+    IF $(sql_literal "$DROP_TABLESPACES") = 'true'
+       AND table_rec.tablespace_name LIKE $(sql_literal "$tablespace_like_pattern") ESCAPE '\' THEN
       remember_tablespace(table_rec.tablespace_name);
     END IF;
 
