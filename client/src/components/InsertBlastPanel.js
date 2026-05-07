@@ -35,6 +35,7 @@ const LMS_ALLOC_COLOR = '#f59e0b';
 const createWorkload = (index = 1, defaultTableCount = 8) => ({
   id: `workload_${Date.now()}_${index}`,
   name: `Workload ${index}`,
+  operation: 'insert',
   tableCount: defaultTableCount,
   sessions: 8,
   durationSeconds: 60,
@@ -45,12 +46,27 @@ const createWorkload = (index = 1, defaultTableCount = 8) => ({
 const normalizeWorkload = (workload, index) => ({
   id: workload.id || `workload_${index + 1}`,
   name: workload.name || `Workload ${index + 1}`,
+  operation: workload.operation === 'select' ? 'select' : 'insert',
   tableCount: workload.tableCount || 8,
   sessions: workload.sessions || 8,
   durationSeconds: workload.durationSeconds || 60,
   commitEvery: workload.commitEvery || 50,
   sessionMode: workload.sessionMode || 'reuse'
 });
+
+const getWorkloadSummary = (workload) => {
+  const operation = workload.operation === 'select' ? 'select' : 'insert';
+
+  if (operation === 'select') {
+    return workload.sessionMode === 'reconnect'
+      ? `${workload.sessions} clients will use ${workload.tableCount} table(s), log on, run a small SELECT, and log off repeatedly for ${workload.durationSeconds} seconds.`
+      : `${workload.sessions} clients will use ${workload.tableCount} table(s), keep the same session open for ${workload.durationSeconds} seconds, and repeatedly run small SELECT statements.`;
+  }
+
+  return workload.sessionMode === 'reconnect'
+    ? `${workload.sessions} clients will use ${workload.tableCount} table(s), log on, insert, commit, and log off repeatedly for ${workload.durationSeconds} seconds.`
+    : `${workload.sessions} clients will use ${workload.tableCount} table(s), keep the same session open for ${workload.durationSeconds} seconds, and commit every ${workload.commitEvery} inserts.`;
+};
 
 const aggregateWaitEvents = (rows = []) => {
   const grouped = new Map();
@@ -398,10 +414,10 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
         }));
         setWorkloadStatus(response.data);
         await Promise.all([loadMonitorSnapshot(), loadWaitEvents()]);
-        onSuccess?.('Insert-only workload started');
+        onSuccess?.('Insert Blast workload started');
       }
     } catch (err) {
-      onError?.(err.response?.data?.message || 'Failed to start insert-only workload');
+      onError?.(err.response?.data?.message || 'Failed to start Insert Blast workload');
     } finally {
       setBusy(false);
     }
@@ -417,10 +433,10 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       if (response.data.success) {
         setWorkloadStatus(response.data);
         await Promise.all([loadMonitorSnapshot(), loadWaitEvents()]);
-        onSuccess?.('Insert-only workload stopped');
+        onSuccess?.('Insert Blast workload stopped');
       }
     } catch (err) {
-      onError?.(err.response?.data?.message || 'Failed to stop insert-only workload');
+      onError?.(err.response?.data?.message || 'Failed to stop Insert Blast workload');
     } finally {
       setBusy(false);
     }
@@ -439,7 +455,9 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
   }, [metrics]);
 
   const workloadMetrics = useMemo(() => (
-    Object.values(metrics?.workloads || {}).sort((a, b) => b.inserts - a.inserts)
+    Object.values(metrics?.workloads || {}).sort(
+      (a, b) => Number(b.operations || 0) - Number(a.operations || 0)
+    )
   ), [metrics]);
 
   const totalConfiguredSessions = useMemo(() => (
@@ -539,7 +557,10 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
       </div>
       <div className="panel-content">
         <p style={{ marginTop: 0, color: 'var(--text-muted)' }}>
-          Create many wide tables in the current schema, then run one or more insert-only workloads against them with independent session counts, durations, and session modes.
+          Create many wide tables in the current schema, then run one or more insert or select workloads against them with independent session counts, durations, and session modes.
+        </p>
+        <p style={{ marginTop: '0.2rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+          Select workloads repeatedly sample their target tables with small `SELECT` statements, so they are most meaningful after the tables contain data.
         </p>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.85rem' }}>
@@ -695,7 +716,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
             <div>
               <h3 style={{ margin: 0 }}>HW Contention Mitigation</h3>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                Pre-allocate table extents before the run, then add another extent after every X inserts per table to reduce `enq: HW - contention`.
+                Pre-allocate table extents before the run, then add another extent after every X inserts per table to reduce `enq: HW - contention`. This applies only to insert workloads.
               </div>
             </div>
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -869,7 +890,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                   </div>
                 </div>
 
-                <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: '0.85rem' }}>
+                <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.85rem' }}>
                   <div className="form-group">
                     <label htmlFor={`ib-workload-name-${workload.id}`}>Name</label>
                     <input
@@ -880,6 +901,18 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                     />
                   </div>
                   <div className="form-group">
+                    <label htmlFor={`ib-workload-operation-${workload.id}`}>Workload Type</label>
+                    <select
+                      id={`ib-workload-operation-${workload.id}`}
+                      value={workload.operation || 'insert'}
+                      onChange={(e) => handleWorkloadChange(workload.id, 'operation', e.target.value)}
+                      disabled={busy || workloadStatus.isRunning}
+                    >
+                      <option value="insert">Insert only</option>
+                      <option value="select">Select only</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
                     <label htmlFor={`ib-session-mode-${workload.id}`}>Session Mode</label>
                     <select
                       id={`ib-session-mode-${workload.id}`}
@@ -888,7 +921,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                       disabled={busy || workloadStatus.isRunning}
                     >
                       <option value="reuse">Logon once, reuse session</option>
-                      <option value="reconnect">Logon/insert/logout loop</option>
+                      <option value="reconnect">Reconnect for each operation</option>
                     </select>
                   </div>
                   <div className="form-group">
@@ -927,22 +960,20 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                     />
                   </div>
                   <div className="form-group">
-                    <label htmlFor={`ib-commit-${workload.id}`}>Commit Every</label>
+                    <label htmlFor={`ib-commit-${workload.id}`}>Commit Every (insert only)</label>
                     <input
                       id={`ib-commit-${workload.id}`}
                       type="number"
                       min="1"
                       value={workload.commitEvery}
                       onChange={(e) => handleWorkloadChange(workload.id, 'commitEvery', e.target.value)}
-                      disabled={busy || workloadStatus.isRunning}
+                      disabled={busy || workloadStatus.isRunning || workload.operation === 'select'}
                     />
                   </div>
                 </div>
 
                 <div style={{ marginTop: '0.35rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  {workload.sessionMode === 'reconnect'
-                    ? `${workload.sessions} clients will use ${workload.tableCount} table(s), log on, insert, commit, and log off repeatedly for ${workload.durationSeconds} seconds.`
-                    : `${workload.sessions} clients will use ${workload.tableCount} table(s), keep the same session open for ${workload.durationSeconds} seconds, and commit every ${workload.commitEvery} inserts.`}
+                  {getWorkloadSummary(workload)}
                 </div>
               </div>
             );
@@ -951,7 +982,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
 
         <div className="btn-group" style={{ marginTop: '1rem' }}>
           <button className="btn btn-primary" type="button" onClick={handleStart} disabled={busy || workloadStatus.isRunning || !schemaStatus?.ready}>
-            Start Insert Workload
+            Start Workload
           </button>
           <button className="btn btn-danger" type="button" onClick={handleStop} disabled={busy || !workloadStatus.isRunning}>
             Stop Workload
@@ -962,8 +993,20 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
           <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
             <div className="schema-stats">
               <div className="schema-stat">
-                <div className="name">Inserts/Sec</div>
-                <div className="count">{metrics.perSecond?.inserts || 0}</div>
+                <div className="name">Ops/Sec</div>
+                <div className="count">{metrics.perSecond?.operations || 0}</div>
+              </div>
+              <div className="schema-stat">
+                <div className="name">Total Ops</div>
+                <div className="count">{metrics.total?.operations || 0}</div>
+              </div>
+              <div className="schema-stat">
+                <div className="name">Selects/Sec</div>
+                <div className="count">{metrics.perSecond?.selects || 0}</div>
+              </div>
+              <div className="schema-stat">
+                <div className="name">Total Selects</div>
+                <div className="count">{metrics.total?.selects || 0}</div>
               </div>
               <div className="schema-stat">
                 <div className="name">Total Inserts</div>
@@ -1003,14 +1046,20 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                     >
                       <div style={{ fontWeight: 600 }}>{workload.name}</div>
                       <div style={{ marginTop: '0.4rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        {(workload.operation === 'select' ? 'Select only' : 'Insert only')}
+                        {' · '}
                         {workload.sessionMode === 'reuse' ? 'Reuse session' : 'Reconnect each cycle'}
                       </div>
                       <div style={{ marginTop: '0.6rem', display: 'grid', gap: '0.3rem', fontSize: '0.9rem' }}>
                         <div>Sessions: <strong>{workload.sessions}</strong></div>
                         <div>Tables Used: <strong>{workload.tableCount}</strong></div>
                         <div>Active Workers: <strong>{workload.activeWorkers}</strong></div>
+                        <div>Operations: <strong>{workload.operations || 0}</strong></div>
+                        <div>Ops/Sec: <strong>{workload.perSecond?.operations || 0}</strong></div>
                         <div>Inserts: <strong>{workload.inserts}</strong></div>
+                        <div>Selects: <strong>{workload.selects || 0}</strong></div>
                         <div>Inserts/Sec: <strong>{workload.perSecond?.inserts || 0}</strong></div>
+                        <div>Selects/Sec: <strong>{workload.perSecond?.selects || 0}</strong></div>
                         <div>Commits: <strong>{workload.commits}</strong></div>
                         <div>Errors: <strong>{workload.errors}</strong></div>
                       </div>
@@ -1037,7 +1086,7 @@ function InsertBlastPanel({ dbStatus, socket, onSuccess, onError }) {
                   ))}
                 </div>
               ) : (
-                <p style={{ margin: 0, color: 'var(--text-muted)' }}>No inserts recorded yet.</p>
+                <p style={{ margin: 0, color: 'var(--text-muted)' }}>No workload activity recorded yet.</p>
               )}
             </div>
           </div>

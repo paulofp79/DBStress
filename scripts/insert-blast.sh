@@ -55,10 +55,12 @@ Drop options:
   --drop-tablespaces true|false           Also drop matching <tablespace-prefix>% tablespaces. Default: false
 
 Workload options:
-  --workload NAME:TABLES:SESSIONS:DURATION:COMMIT_EVERY:MODE
+  --workload NAME:TABLES:SESSIONS:DURATION:COMMIT_EVERY:MODE[:OPERATION]
                                           Repeat for multiple workloads.
                                           MODE is reuse or reconnect.
-                                          Default: Workload_1:<tables>:8:60:50:reuse
+                                          OPERATION is insert or select. Default: insert
+                                          COMMIT_EVERY is ignored for select workloads.
+                                          Default: Workload_1:<tables>:8:60:50:reuse:insert
   --hw-mitigation true|false              Allocate extents during the run. Default: false
   --preallocate-on-start true|false       Allocate one extent per table before workers start. Default: true
   --extent-size-mb NUMBER                 Default: 128
@@ -73,7 +75,9 @@ Examples:
   export ORACLE_CONNECT_STRING='app_user/app_password@racdb'
   scripts/insert-blast.sh create --prefix IBLAST --tables 8 --columns 24
   scripts/insert-blast.sh run --prefix IBLAST --tables 8 \
-    --workload Workload_1:8:8:60:50:reuse
+    --workload Workload_1:8:8:60:50:reuse:insert
+  scripts/insert-blast.sh run --prefix IBLAST --tables 8 \
+    --workload Select_Only:8:32:120:1:reuse:select
   scripts/insert-blast.sh monitor --interval 5
   scripts/insert-blast.sh drop --prefix IBLAST --drop-tablespaces true
   scripts/insert-blast.sh create --prefix IBLAST4 --tables 1000 \
@@ -383,6 +387,16 @@ allocate_extent_for_table() {
 
 preallocate_extents() {
   [[ "$HW_MITIGATION_ENABLED" == "true" && "$PREALLOCATE_ON_START" == "true" ]] || return 0
+  local parsed _name _tables _sessions _duration _commit_every _mode operation has_insert_workload="false"
+  for spec in "${WORKLOADS[@]}"; do
+    parsed="$(parse_workload_spec "$spec")"
+    IFS=':' read -r _name _tables _sessions _duration _commit_every _mode operation <<<"$parsed"
+    if [[ "$operation" == "insert" ]]; then
+      has_insert_workload="true"
+      break
+    fi
+  done
+  [[ "$has_insert_workload" == "true" ]] || return 0
   echo "Pre-allocating ${EXTENT_SIZE_MB} MB extents for ${TABLE_COUNT} table(s)..."
   local table
   for ((i = 1; i <= TABLE_COUNT; i += 1)); do
@@ -397,24 +411,29 @@ preallocate_extents() {
 
 parse_workload_spec() {
   local spec="$1"
-  local name tables sessions duration commit_every mode
-  IFS=':' read -r name tables sessions duration commit_every mode <<<"$spec"
+  local name tables sessions duration commit_every mode operation
+  IFS=':' read -r name tables sessions duration commit_every mode operation <<<"$spec"
   [[ -n "${name:-}" ]] || name="Workload_1"
   tables="$(clamp_int "${tables:-$TABLE_COUNT}" 1 "$TABLE_COUNT" "$TABLE_COUNT")"
   sessions="$(clamp_int "${sessions:-8}" 1 100000 8)"
   duration="$(clamp_int "${duration:-60}" 1 86400 60)"
   commit_every="$(clamp_int "${commit_every:-50}" 1 100000000 50)"
   mode="${mode:-reuse}"
+  operation="${operation:-insert}"
   case "${mode,,}" in
     reuse|reconnect) mode="${mode,,}" ;;
     *) die "Invalid workload mode '${mode}'. Use reuse or reconnect." ;;
   esac
-  printf '%s:%s:%s:%s:%s:%s' "$name" "$tables" "$sessions" "$duration" "$commit_every" "$mode"
+  case "${operation,,}" in
+    insert|select) operation="${operation,,}" ;;
+    *) die "Invalid workload operation '${operation}'. Use insert or select." ;;
+  esac
+  printf '%s:%s:%s:%s:%s:%s:%s' "$name" "$tables" "$sessions" "$duration" "$commit_every" "$mode" "$operation"
 }
 
 default_workloads_if_needed() {
   if (( ${#WORKLOADS[@]} == 0 )); then
-    WORKLOADS=("Workload_1:${TABLE_COUNT}:8:60:50:reuse")
+    WORKLOADS=("Workload_1:${TABLE_COUNT}:8:60:50:reuse:insert")
   fi
 }
 
@@ -458,8 +477,9 @@ worker_sql() {
   local table_limit="$3"
   local duration="$4"
   local commit_every="$5"
-  local worker_id="$6"
-  local run_id="$7"
+  local operation="$6"
+  local worker_id="$7"
+  local run_id="$8"
   local columns values table_list hw_enabled
   columns="$(insert_columns_csv)"
   values="$(sql_value_concat_expression "$workload_id" "$worker_id")"
@@ -480,8 +500,11 @@ DECLARE
   l_sql CLOB;
   l_sequence PLS_INTEGER := 0;
   l_pending PLS_INTEGER := 0;
+  l_operations PLS_INTEGER := 0;
   l_inserts PLS_INTEGER := 0;
+  l_selects PLS_INTEGER := 0;
   l_errors PLS_INTEGER := 0;
+  l_sample_rows PLS_INTEGER := 0;
 
   PROCEDURE maybe_allocate_extent(p_table_name VARCHAR2) IS
   BEGIN
@@ -511,20 +534,28 @@ BEGIN
     BEGIN
       l_table_name := l_tables(TRUNC(DBMS_RANDOM.VALUE(1, l_tables.COUNT + 1)));
       l_sequence := l_sequence + 1;
-      l_sql := 'INSERT INTO ' || l_table_name || ' (${columns}) VALUES (' || ${values} || ')';
-      EXECUTE IMMEDIATE l_sql;
+      IF '${operation}' = 'select' THEN
+        l_sql := 'SELECT COUNT(*) FROM ' || l_table_name || ' WHERE ROWNUM <= 10';
+        EXECUTE IMMEDIATE l_sql INTO l_sample_rows;
+        l_selects := l_selects + 1;
+        l_operations := l_operations + 1;
+      ELSE
+        l_sql := 'INSERT INTO ' || l_table_name || ' (${columns}) VALUES (' || ${values} || ')';
+        EXECUTE IMMEDIATE l_sql;
 
-      IF NOT l_counts.EXISTS(l_table_name) THEN
-        l_counts(l_table_name) := 0;
-      END IF;
-      l_counts(l_table_name) := l_counts(l_table_name) + 1;
-      maybe_allocate_extent(l_table_name);
+        IF NOT l_counts.EXISTS(l_table_name) THEN
+          l_counts(l_table_name) := 0;
+        END IF;
+        l_counts(l_table_name) := l_counts(l_table_name) + 1;
+        maybe_allocate_extent(l_table_name);
 
-      l_pending := l_pending + 1;
-      l_inserts := l_inserts + 1;
-      IF l_pending >= ${commit_every} THEN
-        COMMIT;
-        l_pending := 0;
+        l_pending := l_pending + 1;
+        l_inserts := l_inserts + 1;
+        l_operations := l_operations + 1;
+        IF l_pending >= ${commit_every} THEN
+          COMMIT;
+          l_pending := 0;
+        END IF;
       END IF;
     EXCEPTION
       WHEN OTHERS THEN
@@ -538,7 +569,7 @@ BEGIN
     COMMIT;
   END IF;
 
-  DBMS_OUTPUT.PUT_LINE('${workload_name} worker ${worker_id}: inserts=' || l_inserts || ' errors=' || l_errors);
+  DBMS_OUTPUT.PUT_LINE('${workload_name} worker ${worker_id}: operation=${operation} operations=' || l_operations || ' inserts=' || l_inserts || ' selects=' || l_selects || ' errors=' || l_errors);
 END;
 /
 EXIT
@@ -551,10 +582,11 @@ run_worker_reuse() {
   local table_limit="$3"
   local duration="$4"
   local commit_every="$5"
-  local worker_id="$6"
-  local run_id="$7"
+  local operation="$6"
+  local worker_id="$7"
+  local run_id="$8"
   local log_file="${LOG_DIR}/${workload_id}_worker_${worker_id}.log"
-  worker_sql "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$worker_id" "$run_id" |
+  worker_sql "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$operation" "$worker_id" "$run_id" |
     sqlplus -s "$CONNECT_STRING" >"$log_file" 2>&1
 }
 
@@ -564,8 +596,9 @@ run_worker_reconnect() {
   local table_limit="$3"
   local duration="$4"
   local commit_every="$5"
-  local worker_id="$6"
-  local run_id="$7"
+  local operation="$6"
+  local worker_id="$7"
+  local run_id="$8"
   local log_file="${LOG_DIR}/${workload_id}_worker_${worker_id}.log"
   local end_epoch now remaining chunk
   end_epoch=$(( $(date +%s) + duration ))
@@ -579,7 +612,7 @@ run_worker_reconnect() {
     if (( chunk > 1 )); then
       chunk=1
     fi
-    worker_sql "$workload_id" "$workload_name" "$table_limit" "$chunk" "$commit_every" "$worker_id" "$run_id" |
+    worker_sql "$workload_id" "$workload_name" "$table_limit" "$chunk" "$commit_every" "$operation" "$worker_id" "$run_id" |
       sqlplus -s "$CONNECT_STRING" >>"$log_file" 2>&1 || true
   done
 }
@@ -593,7 +626,7 @@ run_workload() {
 
   local run_id="manual_$(date +%Y%m%d%H%M%S)_$$"
   local pids=()
-  local parsed workload_id workload_name table_limit sessions duration commit_every mode worker
+  local parsed workload_id workload_name table_limit sessions duration commit_every mode operation worker
 
   preallocate_extents
   echo "Starting Insert Blast run ${run_id}. Logs: ${LOG_DIR}"
@@ -601,16 +634,16 @@ run_workload() {
 
   for spec in "${WORKLOADS[@]}"; do
     parsed="$(parse_workload_spec "$spec")"
-    IFS=':' read -r workload_name table_limit sessions duration commit_every mode <<<"$parsed"
+    IFS=':' read -r workload_name table_limit sessions duration commit_every mode operation <<<"$parsed"
     workload_id="$(printf '%s' "$workload_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g')"
     [[ -n "$workload_id" ]] || workload_id="workload"
 
-    echo "  ${workload_name}: tables=${table_limit}, sessions=${sessions}, duration=${duration}s, commitEvery=${commit_every}, mode=${mode}"
+    echo "  ${workload_name}: tables=${table_limit}, sessions=${sessions}, duration=${duration}s, commitEvery=${commit_every}, mode=${mode}, operation=${operation}"
     for ((worker = 1; worker <= sessions; worker += 1)); do
       if [[ "$mode" == "reconnect" ]]; then
-        run_worker_reconnect "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$worker" "$run_id" &
+        run_worker_reconnect "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$operation" "$worker" "$run_id" &
       else
-        run_worker_reuse "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$worker" "$run_id" &
+        run_worker_reuse "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$operation" "$worker" "$run_id" &
       fi
       pids+=("$!")
     done
@@ -634,7 +667,7 @@ run_workload() {
 
   echo "Insert Blast run complete. Worker failures: ${failures}"
   echo "Worker summaries:"
-  grep -h "worker .*: inserts=" "${LOG_DIR}"/*.log 2>/dev/null || true
+  grep -h "worker .*: operation=" "${LOG_DIR}"/*.log 2>/dev/null || true
   trap - INT TERM
   (( failures == 0 ))
 }

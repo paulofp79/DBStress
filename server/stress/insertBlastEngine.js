@@ -8,6 +8,7 @@ class InsertBlastEngine {
     this.db = null;
     this.tableNames = [];
     this.insertSqlCache = {};
+    this.selectSqlCache = {};
     this.workers = [];
     this.runtimeWorkloads = [];
     this.activeWorkers = 0;
@@ -25,12 +26,14 @@ class InsertBlastEngine {
       workloads[workload.id] = {
         id: workload.id,
         name: workload.name,
+        operation: workload.operation,
         tableCount: workload.tableCount,
         sessions: workload.sessions,
         durationSeconds: workload.durationSeconds,
         commitEvery: workload.commitEvery,
         sessionMode: workload.sessionMode,
         inserts: 0,
+        selects: 0,
         commits: 0,
         errors: 0,
         activeWorkers: 0
@@ -39,6 +42,7 @@ class InsertBlastEngine {
 
     return {
       inserts: 0,
+      selects: 0,
       commits: 0,
       errors: 0,
       extentAllocations: 0,
@@ -58,7 +62,8 @@ class InsertBlastEngine {
         sessions: config.sessions,
         durationSeconds: config.durationSeconds,
         commitEvery: config.commitEvery,
-        sessionMode: config.sessionMode
+        sessionMode: config.sessionMode,
+        operation: config.operation
       }];
 
     return rawWorkloads.slice(0, 20).map((workload, index) => {
@@ -70,6 +75,9 @@ class InsertBlastEngine {
       return {
         id,
         name: String(workload.name || `Workload ${index + 1}`).trim() || `Workload ${index + 1}`,
+        operation: String(workload.operation || workload.workloadType || 'insert').trim().toLowerCase() === 'select'
+          ? 'select'
+          : 'insert',
         tableCount: Math.max(1, Math.min(totalTableCount, Number.parseInt(workload.tableCount, 10) || totalTableCount)),
         sessions: Math.max(1, Number.parseInt(workload.sessions, 10) || 8),
         durationSeconds: Math.max(1, Math.min(86400, Number.parseInt(workload.durationSeconds, 10) || 60)),
@@ -132,6 +140,10 @@ class InsertBlastEngine {
     return `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${values.join(', ')})`;
   }
 
+  buildSelectSql(tableName) {
+    return `SELECT COUNT(*) AS sample_rows FROM ${tableName} WHERE ROWNUM <= 10`;
+  }
+
   buildBindValues(workloadId, workerId, sequence) {
     const binds = {};
 
@@ -172,7 +184,8 @@ class InsertBlastEngine {
   }
 
   async preallocateExtentsBeforeStart() {
-    if (!this.config?.hwMitigation?.enabled || !this.config.hwMitigation.preallocateOnStart) {
+    const hasInsertWorkload = this.config?.workloads?.some((workload) => workload.operation === 'insert');
+    if (!this.config?.hwMitigation?.enabled || !this.config.hwMitigation.preallocateOnStart || !hasInsertWorkload) {
       return;
     }
 
@@ -334,6 +347,7 @@ class InsertBlastEngine {
     let sequence = 0;
     let pending = 0;
     let connection = null;
+    const isInsertWorkload = workload.operation !== 'select';
     const reuseSession = workload.sessionMode === 'reuse';
 
     try {
@@ -353,21 +367,29 @@ class InsertBlastEngine {
           while (this.isWorkloadActive(workload)) {
             const workloadTableNames = workload.tableNames?.length ? workload.tableNames : this.tableNames;
             const tableName = workloadTableNames[Math.floor(Math.random() * workloadTableNames.length)];
-            const sql = this.insertSqlCache[tableName] || this.buildInsertSql(tableName);
             sequence += 1;
 
-            await connection.execute(sql, this.buildBindValues(workload.id, workerId, sequence), { autoCommit: false });
-            pending += 1;
-            this.stats.inserts += 1;
-            this.stats.byTable[tableName] = (this.stats.byTable[tableName] || 0) + 1;
-            this.stats.workloads[workload.id].inserts += 1;
-            this.maybeScheduleExtentAllocation(tableName, this.stats.byTable[tableName]);
+            if (isInsertWorkload) {
+              const sql = this.insertSqlCache[tableName] || this.buildInsertSql(tableName);
+              await connection.execute(sql, this.buildBindValues(workload.id, workerId, sequence), { autoCommit: false });
+              pending += 1;
+              this.stats.byTable[tableName] = (this.stats.byTable[tableName] || 0) + 1;
+              this.stats.inserts += 1;
+              this.stats.workloads[workload.id].inserts += 1;
+              this.maybeScheduleExtentAllocation(tableName, this.stats.byTable[tableName]);
 
-            if (pending >= workload.commitEvery) {
-              await connection.commit();
-              pending = 0;
-              this.stats.commits += 1;
-              this.stats.workloads[workload.id].commits += 1;
+              if (pending >= workload.commitEvery) {
+                await connection.commit();
+                pending = 0;
+                this.stats.commits += 1;
+                this.stats.workloads[workload.id].commits += 1;
+              }
+            } else {
+              const sql = this.selectSqlCache[tableName] || this.buildSelectSql(tableName);
+              await connection.execute(sql);
+              this.stats.byTable[tableName] = (this.stats.byTable[tableName] || 0) + 1;
+              this.stats.selects += 1;
+              this.stats.workloads[workload.id].selects += 1;
             }
 
             if (!reuseSession) {
@@ -391,7 +413,7 @@ class InsertBlastEngine {
           this.stats.errors += 1;
           this.stats.workloads[workload.id].errors += 1;
 
-          if (connection) {
+          if (connection && pending > 0) {
             try {
               await connection.rollback();
             } catch (rollbackError) {
@@ -438,18 +460,23 @@ class InsertBlastEngine {
   emitMetrics() {
     const elapsed = Math.max(1, (Date.now() - this.previousStats.startedAt) / 1000);
     const deltaInserts = this.stats.inserts - this.previousStats.inserts;
+    const deltaSelects = this.stats.selects - this.previousStats.selects;
     const deltaErrors = this.stats.errors - this.previousStats.errors;
     const workloads = {};
 
     Object.values(this.stats.workloads || {}).forEach((workloadStats) => {
       const previousWorkload = this.previousStats.workloads?.[workloadStats.id] || {};
       const workloadDeltaInserts = workloadStats.inserts - Number(previousWorkload.inserts || 0);
+      const workloadDeltaSelects = workloadStats.selects - Number(previousWorkload.selects || 0);
       const workloadDeltaErrors = workloadStats.errors - Number(previousWorkload.errors || 0);
 
       workloads[workloadStats.id] = {
         ...workloadStats,
+        operations: workloadStats.inserts + workloadStats.selects,
         perSecond: {
+          operations: Number(((workloadDeltaInserts + workloadDeltaSelects) / elapsed).toFixed(2)),
           inserts: Number((workloadDeltaInserts / elapsed).toFixed(2)),
+          selects: Number((workloadDeltaSelects / elapsed).toFixed(2)),
           errors: Number((workloadDeltaErrors / elapsed).toFixed(2))
         }
       };
@@ -460,13 +487,17 @@ class InsertBlastEngine {
       uptime: this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : 0,
       activeWorkers: this.activeWorkers,
       total: {
+        operations: this.stats.inserts + this.stats.selects,
         inserts: this.stats.inserts,
+        selects: this.stats.selects,
         commits: this.stats.commits,
         errors: this.stats.errors,
         extentAllocations: this.stats.extentAllocations
       },
       perSecond: {
+        operations: Number(((deltaInserts + deltaSelects) / elapsed).toFixed(2)),
         inserts: Number((deltaInserts / elapsed).toFixed(2)),
+        selects: Number((deltaSelects / elapsed).toFixed(2)),
         errors: Number((deltaErrors / elapsed).toFixed(2))
       },
       byTable: this.stats.byTable,
@@ -481,6 +512,7 @@ class InsertBlastEngine {
 
     this.previousStats = {
       inserts: this.stats.inserts,
+      selects: this.stats.selects,
       commits: this.stats.commits,
       errors: this.stats.errors,
       byTable: { ...this.stats.byTable },
@@ -512,6 +544,9 @@ class InsertBlastEngine {
     this.extentAllocationInFlight = new Set();
     this.insertSqlCache = Object.fromEntries(
       this.tableNames.map((tableName) => [tableName, this.buildInsertSql(tableName)])
+    );
+    this.selectSqlCache = Object.fromEntries(
+      this.tableNames.map((tableName) => [tableName, this.buildSelectSql(tableName)])
     );
 
     await this.preallocateExtentsBeforeStart();
@@ -562,6 +597,7 @@ class InsertBlastEngine {
         uptime,
         activeWorkers: workloadStats.activeWorkers || 0,
         inserts: workloadStats.inserts || 0,
+        selects: workloadStats.selects || 0,
         commits: workloadStats.commits || 0,
         errors: workloadStats.errors || 0
       };
@@ -623,6 +659,7 @@ class InsertBlastEngine {
 
     this.db = null;
     this.insertSqlCache = {};
+    this.selectSqlCache = {};
     this.nextExtentAllocationAt = {};
     this.extentAllocationInFlight = new Set();
     this.workers = [];
