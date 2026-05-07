@@ -480,8 +480,8 @@ worker_sql() {
   local operation="$6"
   local worker_id="$7"
   local run_id="$8"
-  local table_list hw_enabled
-  table_list="$(sql_name_list "$table_limit")"
+  local table_name_prefix hw_enabled
+  table_name_prefix="$(sql_literal "${TABLE_PREFIX}_T")"
   hw_enabled="$HW_MITIGATION_ENABLED"
 
   if [[ "$operation" == "select" ]]; then
@@ -489,9 +489,8 @@ worker_sql() {
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 32767 TRIMSPOOL ON SERVEROUTPUT ON
 DECLARE
-  TYPE t_table_names IS TABLE OF VARCHAR2(128);
-  l_tables t_table_names := t_table_names(${table_list});
   l_end_time TIMESTAMP := SYSTIMESTAMP + NUMTODSINTERVAL(${duration}, 'SECOND');
+  l_table_number PLS_INTEGER := 0;
   l_table_name VARCHAR2(128);
   l_sql VARCHAR2(512);
   l_sequence PLS_INTEGER := 0;
@@ -505,7 +504,8 @@ BEGIN
 
   WHILE SYSTIMESTAMP < l_end_time LOOP
     BEGIN
-      l_table_name := l_tables(TRUNC(DBMS_RANDOM.VALUE(1, l_tables.COUNT + 1)));
+      l_table_number := TRUNC(DBMS_RANDOM.VALUE(1, ${table_limit} + 1));
+      l_table_name := ${table_name_prefix} || LPAD(l_table_number, 3, '0');
       l_sequence := l_sequence + 1;
       l_sql := 'SELECT COUNT(*) FROM ' || l_table_name || ' WHERE ROWNUM <= 10';
       EXECUTE IMMEDIATE l_sql INTO l_sample_rows;
@@ -533,12 +533,11 @@ SQL
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 32767 TRIMSPOOL ON SERVEROUTPUT ON
 DECLARE
-  TYPE t_table_names IS TABLE OF VARCHAR2(128);
   TYPE t_counts IS TABLE OF PLS_INTEGER INDEX BY VARCHAR2(128);
-  l_tables t_table_names := t_table_names(${table_list});
   l_counts t_counts;
   l_next_alloc t_counts;
   l_end_time TIMESTAMP := SYSTIMESTAMP + NUMTODSINTERVAL(${duration}, 'SECOND');
+  l_table_number PLS_INTEGER := 0;
   l_table_name VARCHAR2(128);
   l_sql CLOB;
   l_sequence PLS_INTEGER := 0;
@@ -575,7 +574,8 @@ BEGIN
 
   WHILE SYSTIMESTAMP < l_end_time LOOP
     BEGIN
-      l_table_name := l_tables(TRUNC(DBMS_RANDOM.VALUE(1, l_tables.COUNT + 1)));
+      l_table_number := TRUNC(DBMS_RANDOM.VALUE(1, ${table_limit} + 1));
+      l_table_name := ${table_name_prefix} || LPAD(l_table_number, 3, '0');
       l_sequence := l_sequence + 1;
       l_sql := 'INSERT INTO ' || l_table_name || ' (${columns}) VALUES (' || ${values} || ')';
       EXECUTE IMMEDIATE l_sql;
