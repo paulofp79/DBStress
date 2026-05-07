@@ -480,11 +480,54 @@ worker_sql() {
   local operation="$6"
   local worker_id="$7"
   local run_id="$8"
-  local columns values table_list hw_enabled
-  columns="$(insert_columns_csv)"
-  values="$(sql_value_concat_expression "$workload_id" "$worker_id")"
+  local table_list hw_enabled
   table_list="$(sql_name_list "$table_limit")"
   hw_enabled="$HW_MITIGATION_ENABLED"
+
+  if [[ "$operation" == "select" ]]; then
+    cat <<SQL
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 32767 TRIMSPOOL ON SERVEROUTPUT ON
+DECLARE
+  TYPE t_table_names IS TABLE OF VARCHAR2(128);
+  l_tables t_table_names := t_table_names(${table_list});
+  l_end_time TIMESTAMP := SYSTIMESTAMP + NUMTODSINTERVAL(${duration}, 'SECOND');
+  l_table_name VARCHAR2(128);
+  l_sql VARCHAR2(512);
+  l_sequence PLS_INTEGER := 0;
+  l_operations PLS_INTEGER := 0;
+  l_selects PLS_INTEGER := 0;
+  l_errors PLS_INTEGER := 0;
+  l_sample_rows PLS_INTEGER := 0;
+BEGIN
+  DBMS_APPLICATION_INFO.SET_MODULE('DBSTRESS_INSERT_BLAST', '${run_id}');
+  DBMS_SESSION.SET_IDENTIFIER('IBLAST:${run_id}:${workload_id}:W${worker_id}');
+
+  WHILE SYSTIMESTAMP < l_end_time LOOP
+    BEGIN
+      l_table_name := l_tables(TRUNC(DBMS_RANDOM.VALUE(1, l_tables.COUNT + 1)));
+      l_sequence := l_sequence + 1;
+      l_sql := 'SELECT COUNT(*) FROM ' || l_table_name || ' WHERE ROWNUM <= 10';
+      EXECUTE IMMEDIATE l_sql INTO l_sample_rows;
+      l_selects := l_selects + 1;
+      l_operations := l_operations + 1;
+    EXCEPTION
+      WHEN OTHERS THEN
+        l_errors := l_errors + 1;
+    END;
+  END LOOP;
+
+  DBMS_OUTPUT.PUT_LINE('${workload_name} worker ${worker_id}: operation=select operations=' || l_operations || ' inserts=0 selects=' || l_selects || ' errors=' || l_errors);
+END;
+/
+EXIT
+SQL
+    return
+  fi
+
+  local columns values
+  columns="$(insert_columns_csv)"
+  values="$(sql_value_concat_expression "$workload_id" "$worker_id")"
 
   cat <<SQL
 WHENEVER SQLERROR EXIT SQL.SQLCODE
@@ -534,28 +577,21 @@ BEGIN
     BEGIN
       l_table_name := l_tables(TRUNC(DBMS_RANDOM.VALUE(1, l_tables.COUNT + 1)));
       l_sequence := l_sequence + 1;
-      IF '${operation}' = 'select' THEN
-        l_sql := 'SELECT COUNT(*) FROM ' || l_table_name || ' WHERE ROWNUM <= 10';
-        EXECUTE IMMEDIATE l_sql INTO l_sample_rows;
-        l_selects := l_selects + 1;
-        l_operations := l_operations + 1;
-      ELSE
-        l_sql := 'INSERT INTO ' || l_table_name || ' (${columns}) VALUES (' || ${values} || ')';
-        EXECUTE IMMEDIATE l_sql;
+      l_sql := 'INSERT INTO ' || l_table_name || ' (${columns}) VALUES (' || ${values} || ')';
+      EXECUTE IMMEDIATE l_sql;
 
-        IF NOT l_counts.EXISTS(l_table_name) THEN
-          l_counts(l_table_name) := 0;
-        END IF;
-        l_counts(l_table_name) := l_counts(l_table_name) + 1;
-        maybe_allocate_extent(l_table_name);
+      IF NOT l_counts.EXISTS(l_table_name) THEN
+        l_counts(l_table_name) := 0;
+      END IF;
+      l_counts(l_table_name) := l_counts(l_table_name) + 1;
+      maybe_allocate_extent(l_table_name);
 
-        l_pending := l_pending + 1;
-        l_inserts := l_inserts + 1;
-        l_operations := l_operations + 1;
-        IF l_pending >= ${commit_every} THEN
-          COMMIT;
-          l_pending := 0;
-        END IF;
+      l_pending := l_pending + 1;
+      l_inserts := l_inserts + 1;
+      l_operations := l_operations + 1;
+      IF l_pending >= ${commit_every} THEN
+        COMMIT;
+        l_pending := 0;
       END IF;
     EXCEPTION
       WHEN OTHERS THEN
@@ -618,13 +654,27 @@ run_worker_reconnect() {
 }
 
 print_worker_failure_summary() {
-  [[ -d "$LOG_DIR" ]] || return 0
+  (( $# > 0 )) || return 0
 
-  local log_count
-  log_count="$(find "$LOG_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
-  echo "Worker log files: ${log_count}"
+  local existing_logs=()
+  local log_file
+  for log_file in "$@"; do
+    if [[ -f "$log_file" ]]; then
+      existing_logs+=("$log_file")
+    fi
+  done
+
+  (( ${#existing_logs[@]} > 0 )) || return 0
+
+  echo "Worker log files: ${#existing_logs[@]}"
   echo "Sample worker errors:"
-  grep -RnhE 'ORA-|SP2-|TNS-|ERROR|error|maximum number|resource busy|insufficient privileges|no listener' "$LOG_DIR" | head -n 20 || echo "  No ORA/TNS/SP2 error lines found in ${LOG_DIR}"
+  local matches
+  matches="$(grep -nHE 'ORA-|SP2-|TNS-|^ERROR:$|maximum number|resource busy|insufficient privileges|no listener' "${existing_logs[@]}" 2>/dev/null | sed -n '1,20p' || true)"
+  if [[ -n "$matches" ]]; then
+    printf '%s\n' "$matches"
+  else
+    echo "  No ORA/TNS/SP2 error lines found in current worker logs"
+  fi
 }
 
 run_workload() {
@@ -636,6 +686,7 @@ run_workload() {
 
   local run_id="manual_$(date +%Y%m%d%H%M%S)_$$"
   local pids=()
+  local current_log_files=()
   local parsed workload_id workload_name table_limit sessions duration commit_every mode operation worker
 
   preallocate_extents
@@ -650,6 +701,7 @@ run_workload() {
 
     echo "  ${workload_name}: tables=${table_limit}, sessions=${sessions}, duration=${duration}s, commitEvery=${commit_every}, mode=${mode}, operation=${operation}"
     for ((worker = 1; worker <= sessions; worker += 1)); do
+      current_log_files+=("${LOG_DIR}/${workload_id}_worker_${worker}.log")
       if [[ "$mode" == "reconnect" ]]; then
         run_worker_reconnect "$workload_id" "$workload_name" "$table_limit" "$duration" "$commit_every" "$operation" "$worker" "$run_id" &
       else
@@ -677,10 +729,10 @@ run_workload() {
 
   echo "Insert Blast run complete. Worker failures: ${failures}"
   if (( failures > 0 )); then
-    print_worker_failure_summary
+    print_worker_failure_summary "${current_log_files[@]}"
   fi
   echo "Worker summaries:"
-  grep -h "worker .*: operation=" "${LOG_DIR}"/*.log 2>/dev/null || true
+  grep -h "worker .*: operation=" "${current_log_files[@]}" 2>/dev/null || true
   trap - INT TERM
   (( failures == 0 ))
 }
