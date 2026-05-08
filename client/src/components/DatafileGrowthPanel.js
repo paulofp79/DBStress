@@ -10,6 +10,7 @@ const getServerUrl = () => {
 
 const API_BASE = `${getServerUrl()}/api`;
 const MAX_DATAFILE_MB = 32000;
+const DATAFILE_STATUS_TIMEOUT_MS = 300000;
 
 function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
   const [snapshot, setSnapshot] = useState({ tablespaces: [], scheduler: { schedules: [] } });
@@ -26,7 +27,9 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
     }
 
     try {
-      const response = await axios.get(`${API_BASE}/datafiles/status`);
+      const response = await axios.get(`${API_BASE}/datafiles/status`, {
+        timeout: DATAFILE_STATUS_TIMEOUT_MS
+      });
       if (response.data.success) {
         setSnapshot({
           tablespaces: response.data.tablespaces || [],
