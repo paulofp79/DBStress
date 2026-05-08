@@ -65,9 +65,14 @@ function ConnectionPanel({ dbStatus, onConnect, onDisconnect }) {
   const handleConnect = async (e) => {
     e.preventDefault();
     setConnecting(true);
-    await onConnect(credentials);
-    saveRecentConnection(credentials);
-    setConnecting(false);
+    try {
+      const connected = await onConnect(credentials);
+      if (connected) {
+        saveRecentConnection(credentials);
+      }
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const handleDisconnect = async () => {

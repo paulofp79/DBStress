@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 
 const getServerUrl = () => {
@@ -20,12 +20,14 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
     incrementMb: 100,
     intervalSeconds: 60
   });
+  const loadStatusInFlightRef = useRef(false);
 
   const loadStatus = async () => {
-    if (!dbStatus.connected) {
+    if (!dbStatus.connected || loadStatusInFlightRef.current) {
       return;
     }
 
+    loadStatusInFlightRef.current = true;
     try {
       const response = await axios.get(`${API_BASE}/datafiles/status`, {
         timeout: DATAFILE_STATUS_TIMEOUT_MS
@@ -39,6 +41,8 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
       }
     } catch (err) {
       onError?.(err.response?.data?.message || 'Failed to load tablespaces/datafiles');
+    } finally {
+      loadStatusInFlightRef.current = false;
     }
   };
 
@@ -46,6 +50,7 @@ function DatafileGrowthPanel({ dbStatus, socket, onSuccess, onError }) {
     if (dbStatus.connected) {
       loadStatus();
     } else {
+      loadStatusInFlightRef.current = false;
       setSnapshot({ tablespaces: [], scheduler: { schedules: [] } });
       setSelectedFileNames([]);
     }

@@ -239,9 +239,12 @@ function App() {
         setDbStatus({ connected: true, config: { user: credentials.user, connectionString: credentials.connectionString } });
         showSuccess('Connected to Oracle database');
         fetchSchemas();
+        return true;
       }
+      return false;
     } catch (err) {
       showError(err.response?.data?.message || 'Failed to connect to database');
+      return false;
     }
   };
 

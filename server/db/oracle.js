@@ -43,7 +43,7 @@ class OracleDatabase {
     }
   }
 
-  async initialize(user, password, connectionString, poolMin = 4, poolMax = 50) {
+  async initialize(user, password, connectionString, poolMin = 1, poolMax = 50) {
     if (this.pool) {
       await this.close();
     }
@@ -57,7 +57,7 @@ class OracleDatabase {
       connectionString,
       poolMin,
       poolMax,
-      poolIncrement: 2,
+      poolIncrement: 1,
       poolTimeout: 60,
       queueTimeout: 60000,
       enableStatistics: true
