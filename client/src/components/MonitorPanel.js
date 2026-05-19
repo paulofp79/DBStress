@@ -62,6 +62,8 @@ function MonitorPanel({ dbStatus }) {
     return value.toFixed(0);
   };
 
+  const formatIntegerTps = (num) => String(Math.round(Number(num) || 0));
+
   const waitClasses = useMemo(() => {
     const classes = Array.from(new Set(waits.map((item) => item.waitClass).filter(Boolean)));
     classes.sort();
@@ -486,7 +488,7 @@ function MonitorPanel({ dbStatus }) {
             <div className="panel-header">
               <h2>Transactions per Second</h2>
               <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                <span>Current: <strong style={{ color: '#22c55e' }}>{currentTps.toFixed(2)} TPS</strong></span>
+                <span>Current: <strong style={{ color: '#22c55e' }}>{formatIntegerTps(currentTps)} TPS</strong></span>
                 <span>Total: {formatNumber(totalTransactions)}</span>
               </div>
             </div>
