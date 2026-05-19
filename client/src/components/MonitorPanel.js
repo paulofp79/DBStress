@@ -8,7 +8,8 @@ import {
   LineElement,
   Title,
   Tooltip,
-  Legend
+  Legend,
+  Filler
 } from 'chart.js';
 
 ChartJS.register(
@@ -18,7 +19,8 @@ ChartJS.register(
   LineElement,
   Title,
   Tooltip,
-  Legend
+  Legend,
+  Filler
 );
 
 const getServerUrl = () => {
@@ -39,6 +41,10 @@ function MonitorPanel({ dbStatus }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [error, setError] = useState('');
   const [chartState, setChartState] = useState({ labels: [], series: {} });
+  const [tpsChartState, setTpsChartState] = useState({ labels: [], total: [], instances: {} });
+  const [transactionSource, setTransactionSource] = useState('');
+  const [currentTps, setCurrentTps] = useState(0);
+  const [totalTransactions, setTotalTransactions] = useState(0);
   const [filters, setFilters] = useState({
     scope: 'all',
     waitClass: '',
@@ -47,6 +53,7 @@ function MonitorPanel({ dbStatus }) {
   });
   const intervalRef = useRef(null);
   const previousSnapshotRef = useRef(new Map());
+  const previousTransactionSnapshotRef = useRef(null);
 
   const formatNumber = (num) => {
     const value = Number(num) || 0;
@@ -102,9 +109,14 @@ function MonitorPanel({ dbStatus }) {
       if (filters.search) params.set('search', filters.search);
 
       const response = await fetch(`${API_BASE}/monitor/waits?${params.toString()}`);
+      const transactionResponse = await fetch(`${API_BASE}/monitor/transactions`);
       const data = await response.json();
+      const transactionData = await transactionResponse.json();
       if (!response.ok || !data.success) {
         throw new Error(data.message || 'Failed to load waits');
+      }
+      if (!transactionResponse.ok || !transactionData.success) {
+        throw new Error(transactionData.message || 'Failed to load transaction metrics');
       }
 
       const rows = data.waits || [];
@@ -150,6 +162,48 @@ function MonitorPanel({ dbStatus }) {
         return { labels: nextLabels, series: nextSeries };
       });
 
+      const transactionSnapshot = new Map();
+      (transactionData.instances || []).forEach((row) => {
+        transactionSnapshot.set(String(row.instId || 1), Number(row.totalTransactions || 0));
+      });
+
+      const previousTransactionSnapshot = previousTransactionSnapshotRef.current;
+      const elapsedSeconds = previousTransactionSnapshot
+        ? Math.max(0.001, (Number(transactionData.timestamp || Date.now()) - previousTransactionSnapshot.timestamp) / 1000)
+        : 0;
+      let nextTotalTps = 0;
+      const nextInstanceTps = {};
+
+      transactionSnapshot.forEach((total, instId) => {
+        const previousTotal = previousTransactionSnapshot?.totals.get(instId) || 0;
+        const tps = elapsedSeconds > 0 ? Math.max(0, total - previousTotal) / elapsedSeconds : 0;
+        const roundedTps = Number(tps.toFixed(2));
+        nextInstanceTps[instId] = roundedTps;
+        nextTotalTps += roundedTps;
+      });
+
+      const roundedTotalTps = Number(nextTotalTps.toFixed(2));
+      previousTransactionSnapshotRef.current = {
+        timestamp: Number(transactionData.timestamp || Date.now()),
+        totals: transactionSnapshot
+      };
+
+      setTpsChartState((prev) => {
+        const nextLabels = [...prev.labels, label].slice(-40);
+        const nextInstances = {};
+        Object.entries(nextInstanceTps).forEach(([instId, tps]) => {
+          const prior = prev.instances[instId] || [];
+          nextInstances[instId] = [...prior, tps].slice(-40);
+        });
+        return {
+          labels: nextLabels,
+          total: [...prev.total, roundedTotalTps].slice(-40),
+          instances: nextInstances
+        };
+      });
+      setCurrentTps(roundedTotalTps);
+      setTotalTransactions(Number(transactionData.totalTransactions || 0));
+      setTransactionSource(transactionData.source || '');
       setWaits(aggregated);
       setSource(data.source || '');
       setLastUpdated(data.timestamp || Date.now());
@@ -163,7 +217,12 @@ function MonitorPanel({ dbStatus }) {
 
   const resetMonitoringState = useCallback(() => {
     previousSnapshotRef.current = new Map();
+    previousTransactionSnapshotRef.current = null;
     setChartState({ labels: [], series: {} });
+    setTpsChartState({ labels: [], total: [], instances: {} });
+    setCurrentTps(0);
+    setTotalTransactions(0);
+    setTransactionSource('');
     setWaits([]);
   }, []);
 
@@ -256,6 +315,76 @@ function MonitorPanel({ dbStatus }) {
     }
   };
 
+  const instanceIds = Object.keys(tpsChartState.instances).sort((a, b) => Number(a) - Number(b));
+  const tpsChartData = {
+    labels: tpsChartState.labels,
+    datasets: [
+      {
+        label: 'Total TPS',
+        data: tpsChartState.total,
+        borderColor: '#22c55e',
+        backgroundColor: 'rgba(34, 197, 94, 0.16)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        pointHoverRadius: 4
+      },
+      ...instanceIds.map((instId, index) => ({
+        label: `INST ${instId}`,
+        data: tpsChartState.instances[instId] || [],
+        borderColor: SERIES_COLORS[index % SERIES_COLORS.length],
+        backgroundColor: SERIES_COLORS[index % SERIES_COLORS.length],
+        fill: false,
+        tension: 0.3,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        borderDash: [5, 5]
+      }))
+    ]
+  };
+
+  const tpsChartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 0 },
+    interaction: {
+      intersect: false,
+      mode: 'index'
+    },
+    plugins: {
+      legend: {
+        position: 'top',
+        labels: { color: '#a0a0b0', usePointStyle: true, boxWidth: 10 }
+      },
+      tooltip: {
+        backgroundColor: 'rgba(26, 26, 46, 0.95)',
+        titleColor: '#ffffff',
+        bodyColor: '#a0a0b0',
+        borderColor: '#2a2a45',
+        borderWidth: 1,
+        callbacks: {
+          label: (context) => `${context.dataset.label}: ${Number(context.raw || 0).toFixed(2)} TPS`
+        }
+      }
+    },
+    scales: {
+      x: {
+        grid: { color: 'rgba(42, 42, 69, 0.5)' },
+        ticks: { color: '#6b6b80', maxTicksLimit: 8 }
+      },
+      y: {
+        beginAtZero: true,
+        grid: { color: 'rgba(42, 42, 69, 0.5)' },
+        ticks: { color: '#6b6b80' },
+        title: {
+          display: true,
+          text: 'Transactions / Second',
+          color: '#6b6b80'
+        }
+      }
+    }
+  };
+
   if (!dbStatus.connected) {
     return (
       <div className="panel" style={{ minHeight: '100%' }}>
@@ -279,6 +408,7 @@ function MonitorPanel({ dbStatus }) {
           {source && (
             <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
               Source: {source}
+              {transactionSource ? `, ${transactionSource}` : ''}
             </span>
           )}
           <button className="btn btn-success btn-sm" disabled={isRunning || isLoading} onClick={handleStart}>
@@ -335,6 +465,9 @@ function MonitorPanel({ dbStatus }) {
         }}>
           Real-time top waits from Oracle. Includes per-instance breakdown from `gv$` when available and delta charting between polls.
           <span style={{ display: 'block', marginTop: '0.4rem' }}>
+            TPS is calculated from deltas in Oracle user commits plus user rollbacks.
+          </span>
+          <span style={{ display: 'block', marginTop: '0.4rem' }}>
             Observation: Avg wait in this tab is cumulative since instance startup, so it is better for understanding overall database behavior than the immediate effect of one workload.
           </span>
           {lastUpdated && (
@@ -348,13 +481,30 @@ function MonitorPanel({ dbStatus }) {
           <div className="alert alert-danger">{error}</div>
         )}
 
-        <div className="panel" style={{ marginBottom: '1rem' }}>
-          <div className="panel-header">
-            <h2>Wait Trend</h2>
+        <div className="grid-2" style={{ marginBottom: '1rem' }}>
+          <div className="panel">
+            <div className="panel-header">
+              <h2>Transactions per Second</h2>
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                <span>Current: <strong style={{ color: '#22c55e' }}>{currentTps.toFixed(2)} TPS</strong></span>
+                <span>Total: {formatNumber(totalTransactions)}</span>
+              </div>
+            </div>
+            <div className="panel-content">
+              <div style={{ height: '280px' }}>
+                <Line data={tpsChartData} options={tpsChartOptions} />
+              </div>
+            </div>
           </div>
-          <div className="panel-content">
-            <div style={{ height: '280px' }}>
-              <Line data={chartData} options={chartOptions} />
+
+          <div className="panel">
+            <div className="panel-header">
+              <h2>Wait Trend</h2>
+            </div>
+            <div className="panel-content">
+              <div style={{ height: '280px' }}>
+                <Line data={chartData} options={chartOptions} />
+              </div>
             </div>
           </div>
         </div>

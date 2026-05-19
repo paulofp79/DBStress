@@ -304,6 +304,62 @@ app.get('/api/monitor/waits', async (req, res) => {
   }
 });
 
+app.get('/api/monitor/transactions', async (req, res) => {
+  const buildResponse = (rows, sourceName) => {
+    const instances = (rows || []).map((row) => ({
+      instId: row.INST_ID || 1,
+      userCommits: Number(row.USER_COMMITS || 0),
+      userRollbacks: Number(row.USER_ROLLBACKS || 0),
+      totalTransactions: Number(row.TOTAL_TRANSACTIONS || 0)
+    }));
+
+    const total = instances.reduce((sum, row) => sum + row.totalTransactions, 0);
+
+    return {
+      success: true,
+      source: sourceName,
+      timestamp: Date.now(),
+      totalTransactions: total,
+      instances
+    };
+  };
+
+  try {
+    const result = await oracleDb.execute(`
+      SELECT
+        inst_id,
+        SUM(CASE WHEN name = 'user commits' THEN value ELSE 0 END) AS user_commits,
+        SUM(CASE WHEN name = 'user rollbacks' THEN value ELSE 0 END) AS user_rollbacks,
+        SUM(CASE WHEN name IN ('user commits', 'user rollbacks') THEN value ELSE 0 END) AS total_transactions
+      FROM gv$sysstat
+      WHERE name IN ('user commits', 'user rollbacks')
+      GROUP BY inst_id
+      ORDER BY inst_id
+    `);
+
+    res.json(buildResponse(result.rows, 'gv$sysstat'));
+  } catch (error) {
+    try {
+      const fallback = await oracleDb.execute(`
+        SELECT
+          1 AS inst_id,
+          SUM(CASE WHEN name = 'user commits' THEN value ELSE 0 END) AS user_commits,
+          SUM(CASE WHEN name = 'user rollbacks' THEN value ELSE 0 END) AS user_rollbacks,
+          SUM(CASE WHEN name IN ('user commits', 'user rollbacks') THEN value ELSE 0 END) AS total_transactions
+        FROM v$sysstat
+        WHERE name IN ('user commits', 'user rollbacks')
+      `);
+
+      res.json(buildResponse(fallback.rows, 'v$sysstat'));
+    } catch (fallbackError) {
+      res.status(500).json({
+        success: false,
+        message: fallbackError.message
+      });
+    }
+  }
+});
+
 // Test database connection
 app.post('/api/db/test-connection', async (req, res) => {
   const { user, password, connectionString } = req.body;
