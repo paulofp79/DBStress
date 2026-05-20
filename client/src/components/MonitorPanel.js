@@ -45,6 +45,8 @@ function MonitorPanel({ dbStatus }) {
   const [responseTimeChartState, setResponseTimeChartState] = useState({ labels: [], total: [], instances: {} });
   const [transactionSource, setTransactionSource] = useState('');
   const [responseTimeSource, setResponseTimeSource] = useState('');
+  const [transactionError, setTransactionError] = useState('');
+  const [responseTimeError, setResponseTimeError] = useState('');
   const [currentTps, setCurrentTps] = useState(0);
   const [currentResponseTime, setCurrentResponseTime] = useState(0);
   const [totalTransactions, setTotalTransactions] = useState(0);
@@ -115,19 +117,31 @@ function MonitorPanel({ dbStatus }) {
       if (filters.search) params.set('search', filters.search);
 
       const response = await fetch(`${API_BASE}/monitor/waits?${params.toString()}`);
-      const transactionResponse = await fetch(`${API_BASE}/monitor/transactions`);
-      const responseTimeResponse = await fetch(`${API_BASE}/monitor/response-time`);
+      const transactionResultPromise = fetch(`${API_BASE}/monitor/transactions`)
+        .then(async (transactionResponse) => {
+          const transactionData = await transactionResponse.json();
+          if (!transactionResponse.ok || !transactionData.success) {
+            throw new Error(transactionData.message || 'Failed to load transaction metrics');
+          }
+          return { data: transactionData };
+        })
+        .catch((transactionErr) => ({
+          error: transactionErr.message || 'Failed to load transaction metrics'
+        }));
+      const responseTimeResultPromise = fetch(`${API_BASE}/monitor/response-time`)
+        .then(async (responseTimeResponse) => {
+          const responseTimeData = await responseTimeResponse.json();
+          if (!responseTimeResponse.ok || !responseTimeData.success) {
+            throw new Error(responseTimeData.message || 'Failed to load response time metrics');
+          }
+          return { data: responseTimeData };
+        })
+        .catch((responseTimeErr) => ({
+          error: responseTimeErr.message || 'Failed to load response time metrics'
+        }));
       const data = await response.json();
-      const transactionData = await transactionResponse.json();
-      const responseTimeData = await responseTimeResponse.json();
       if (!response.ok || !data.success) {
         throw new Error(data.message || 'Failed to load waits');
-      }
-      if (!transactionResponse.ok || !transactionData.success) {
-        throw new Error(transactionData.message || 'Failed to load transaction metrics');
-      }
-      if (!responseTimeResponse.ok || !responseTimeData.success) {
-        throw new Error(responseTimeData.message || 'Failed to load response time metrics');
       }
 
       const rows = data.waits || [];
@@ -173,98 +187,112 @@ function MonitorPanel({ dbStatus }) {
         return { labels: nextLabels, series: nextSeries };
       });
 
-      const transactionSnapshot = new Map();
-      (transactionData.instances || []).forEach((row) => {
-        transactionSnapshot.set(String(row.instId || 1), Number(row.totalTransactions || 0));
-      });
-
-      const previousTransactionSnapshot = previousTransactionSnapshotRef.current;
-      const elapsedSeconds = previousTransactionSnapshot
-        ? Math.max(0.001, (Number(transactionData.timestamp || Date.now()) - previousTransactionSnapshot.timestamp) / 1000)
-        : 0;
-      let nextTotalTps = 0;
-      const nextInstanceTps = {};
-
-      transactionSnapshot.forEach((total, instId) => {
-        const previousTotal = previousTransactionSnapshot?.totals.get(instId) || 0;
-        const tps = elapsedSeconds > 0 ? Math.max(0, total - previousTotal) / elapsedSeconds : 0;
-        const roundedTps = Number(tps.toFixed(2));
-        nextInstanceTps[instId] = roundedTps;
-        nextTotalTps += roundedTps;
-      });
-
-      const roundedTotalTps = Number(nextTotalTps.toFixed(2));
-      previousTransactionSnapshotRef.current = {
-        timestamp: Number(transactionData.timestamp || Date.now()),
-        totals: transactionSnapshot
-      };
-
-      setTpsChartState((prev) => {
-        const nextLabels = [...prev.labels, label].slice(-40);
-        const nextInstances = {};
-        Object.entries(nextInstanceTps).forEach(([instId, tps]) => {
-          const prior = prev.instances[instId] || [];
-          nextInstances[instId] = [...prior, tps].slice(-40);
+      const transactionResult = await transactionResultPromise;
+      if (transactionResult.data) {
+        const transactionData = transactionResult.data;
+        const transactionSnapshot = new Map();
+        (transactionData.instances || []).forEach((row) => {
+          transactionSnapshot.set(String(row.instId || 1), Number(row.totalTransactions || 0));
         });
-        return {
-          labels: nextLabels,
-          total: [...prev.total, roundedTotalTps].slice(-40),
-          instances: nextInstances
-        };
-      });
-      setCurrentTps(roundedTotalTps);
-      setTotalTransactions(Number(transactionData.totalTransactions || 0));
-      setTransactionSource(transactionData.source || '');
 
-      const responseSnapshot = new Map();
-      (responseTimeData.instances || []).forEach((row) => {
-        responseSnapshot.set(String(row.instId || 1), {
-          dbTimeMicroseconds: Number(row.dbTimeMicroseconds || 0),
-          userCalls: Number(row.userCalls || 0)
-        });
-      });
-
-      const previousResponseSnapshot = previousResponseTimeSnapshotRef.current;
-      let totalDeltaDbTimeMicroseconds = 0;
-      let totalDeltaUserCalls = 0;
-      const nextInstanceResponseTimes = {};
-
-      responseSnapshot.forEach((metrics, instId) => {
-        const previousMetrics = previousResponseSnapshot?.totals.get(instId);
-        const deltaDbTimeMicroseconds = Math.max(0, metrics.dbTimeMicroseconds - Number(previousMetrics?.dbTimeMicroseconds || 0));
-        const deltaUserCalls = Math.max(0, metrics.userCalls - Number(previousMetrics?.userCalls || 0));
-        const responseTimeMs = previousResponseSnapshot && deltaUserCalls > 0
-          ? deltaDbTimeMicroseconds / deltaUserCalls / 1000
+        const previousTransactionSnapshot = previousTransactionSnapshotRef.current;
+        const elapsedSeconds = previousTransactionSnapshot
+          ? Math.max(0.001, (Number(transactionData.timestamp || Date.now()) - previousTransactionSnapshot.timestamp) / 1000)
           : 0;
+        let nextTotalTps = 0;
+        const nextInstanceTps = {};
 
-        nextInstanceResponseTimes[instId] = Number(responseTimeMs.toFixed(2));
-        totalDeltaDbTimeMicroseconds += deltaDbTimeMicroseconds;
-        totalDeltaUserCalls += deltaUserCalls;
-      });
-
-      const totalResponseTime = previousResponseSnapshot && totalDeltaUserCalls > 0
-        ? Number((totalDeltaDbTimeMicroseconds / totalDeltaUserCalls / 1000).toFixed(2))
-        : 0;
-      previousResponseTimeSnapshotRef.current = {
-        timestamp: Number(responseTimeData.timestamp || Date.now()),
-        totals: responseSnapshot
-      };
-
-      setResponseTimeChartState((prev) => {
-        const nextLabels = [...prev.labels, label].slice(-40);
-        const nextInstances = {};
-        Object.entries(nextInstanceResponseTimes).forEach(([instId, responseTimeMs]) => {
-          const prior = prev.instances[instId] || [];
-          nextInstances[instId] = [...prior, responseTimeMs].slice(-40);
+        transactionSnapshot.forEach((total, instId) => {
+          const previousTotal = previousTransactionSnapshot?.totals.get(instId) || 0;
+          const tps = elapsedSeconds > 0 ? Math.max(0, total - previousTotal) / elapsedSeconds : 0;
+          const roundedTps = Number(tps.toFixed(2));
+          nextInstanceTps[instId] = roundedTps;
+          nextTotalTps += roundedTps;
         });
-        return {
-          labels: nextLabels,
-          total: [...prev.total, totalResponseTime].slice(-40),
-          instances: nextInstances
+
+        const roundedTotalTps = Number(nextTotalTps.toFixed(2));
+        previousTransactionSnapshotRef.current = {
+          timestamp: Number(transactionData.timestamp || Date.now()),
+          totals: transactionSnapshot
         };
-      });
-      setCurrentResponseTime(totalResponseTime);
-      setResponseTimeSource(responseTimeData.source || '');
+
+        setTpsChartState((prev) => {
+          const nextLabels = [...prev.labels, label].slice(-40);
+          const nextInstances = {};
+          Object.entries(nextInstanceTps).forEach(([instId, tps]) => {
+            const prior = prev.instances[instId] || [];
+            nextInstances[instId] = [...prior, tps].slice(-40);
+          });
+          return {
+            labels: nextLabels,
+            total: [...prev.total, roundedTotalTps].slice(-40),
+            instances: nextInstances
+          };
+        });
+        setCurrentTps(roundedTotalTps);
+        setTotalTransactions(Number(transactionData.totalTransactions || 0));
+        setTransactionSource(transactionData.source || '');
+        setTransactionError('');
+      } else {
+        setTransactionError(transactionResult.error || 'Failed to load transaction metrics');
+      }
+
+      const responseTimeResult = await responseTimeResultPromise;
+      if (responseTimeResult.data) {
+        const responseTimeData = responseTimeResult.data;
+        const responseSnapshot = new Map();
+        (responseTimeData.instances || []).forEach((row) => {
+          responseSnapshot.set(String(row.instId || 1), {
+            dbTimeMicroseconds: Number(row.dbTimeMicroseconds || 0),
+            userCalls: Number(row.userCalls || 0)
+          });
+        });
+
+        const previousResponseSnapshot = previousResponseTimeSnapshotRef.current;
+        let totalDeltaDbTimeMicroseconds = 0;
+        let totalDeltaUserCalls = 0;
+        const nextInstanceResponseTimes = {};
+
+        responseSnapshot.forEach((metrics, instId) => {
+          const previousMetrics = previousResponseSnapshot?.totals.get(instId);
+          const deltaDbTimeMicroseconds = Math.max(0, metrics.dbTimeMicroseconds - Number(previousMetrics?.dbTimeMicroseconds || 0));
+          const deltaUserCalls = Math.max(0, metrics.userCalls - Number(previousMetrics?.userCalls || 0));
+          const responseTimeMs = previousResponseSnapshot && deltaUserCalls > 0
+            ? deltaDbTimeMicroseconds / deltaUserCalls / 1000
+            : 0;
+
+          nextInstanceResponseTimes[instId] = Number(responseTimeMs.toFixed(2));
+          totalDeltaDbTimeMicroseconds += deltaDbTimeMicroseconds;
+          totalDeltaUserCalls += deltaUserCalls;
+        });
+
+        const totalResponseTime = previousResponseSnapshot && totalDeltaUserCalls > 0
+          ? Number((totalDeltaDbTimeMicroseconds / totalDeltaUserCalls / 1000).toFixed(2))
+          : 0;
+        previousResponseTimeSnapshotRef.current = {
+          timestamp: Number(responseTimeData.timestamp || Date.now()),
+          totals: responseSnapshot
+        };
+
+        setResponseTimeChartState((prev) => {
+          const nextLabels = [...prev.labels, label].slice(-40);
+          const nextInstances = {};
+          Object.entries(nextInstanceResponseTimes).forEach(([instId, responseTimeMs]) => {
+            const prior = prev.instances[instId] || [];
+            nextInstances[instId] = [...prior, responseTimeMs].slice(-40);
+          });
+          return {
+            labels: nextLabels,
+            total: [...prev.total, totalResponseTime].slice(-40),
+            instances: nextInstances
+          };
+        });
+        setCurrentResponseTime(totalResponseTime);
+        setResponseTimeSource(responseTimeData.source || '');
+        setResponseTimeError('');
+      } else {
+        setResponseTimeError(responseTimeResult.error || 'Failed to load response time metrics');
+      }
 
       setWaits(aggregated);
       setSource(data.source || '');
@@ -289,6 +317,8 @@ function MonitorPanel({ dbStatus }) {
     setTotalTransactions(0);
     setTransactionSource('');
     setResponseTimeSource('');
+    setTransactionError('');
+    setResponseTimeError('');
     setWaits([]);
   }, []);
 
@@ -613,6 +643,11 @@ function MonitorPanel({ dbStatus }) {
               </div>
             </div>
             <div className="panel-content">
+              {transactionError && (
+                <div className="alert alert-info" style={{ marginBottom: '0.75rem' }}>
+                  TPS unavailable: {transactionError}. Wait monitoring is still active, and the last TPS sample is kept when available.
+                </div>
+              )}
               <div style={{ height: '280px' }}>
                 <Line data={tpsChartData} options={tpsChartOptions} />
               </div>
@@ -627,6 +662,11 @@ function MonitorPanel({ dbStatus }) {
               </div>
             </div>
             <div className="panel-content">
+              {responseTimeError && (
+                <div className="alert alert-info" style={{ marginBottom: '0.75rem' }}>
+                  Response time unavailable: {responseTimeError}. Wait monitoring is still active, and the last response-time sample is kept when available.
+                </div>
+              )}
               <div style={{ height: '280px' }}>
                 <Line data={responseTimeChartData} options={responseTimeChartOptions} />
               </div>
