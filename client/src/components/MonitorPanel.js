@@ -42,8 +42,11 @@ function MonitorPanel({ dbStatus }) {
   const [error, setError] = useState('');
   const [chartState, setChartState] = useState({ labels: [], series: {} });
   const [tpsChartState, setTpsChartState] = useState({ labels: [], total: [], instances: {} });
+  const [responseTimeChartState, setResponseTimeChartState] = useState({ labels: [], total: [], instances: {} });
   const [transactionSource, setTransactionSource] = useState('');
+  const [responseTimeSource, setResponseTimeSource] = useState('');
   const [currentTps, setCurrentTps] = useState(0);
+  const [currentResponseTime, setCurrentResponseTime] = useState(0);
   const [totalTransactions, setTotalTransactions] = useState(0);
   const [filters, setFilters] = useState({
     scope: 'all',
@@ -112,13 +115,18 @@ function MonitorPanel({ dbStatus }) {
 
       const response = await fetch(`${API_BASE}/monitor/waits?${params.toString()}`);
       const transactionResponse = await fetch(`${API_BASE}/monitor/transactions`);
+      const responseTimeResponse = await fetch(`${API_BASE}/monitor/response-time`);
       const data = await response.json();
       const transactionData = await transactionResponse.json();
+      const responseTimeData = await responseTimeResponse.json();
       if (!response.ok || !data.success) {
         throw new Error(data.message || 'Failed to load waits');
       }
       if (!transactionResponse.ok || !transactionData.success) {
         throw new Error(transactionData.message || 'Failed to load transaction metrics');
+      }
+      if (!responseTimeResponse.ok || !responseTimeData.success) {
+        throw new Error(responseTimeData.message || 'Failed to load response time metrics');
       }
 
       const rows = data.waits || [];
@@ -206,6 +214,28 @@ function MonitorPanel({ dbStatus }) {
       setCurrentTps(roundedTotalTps);
       setTotalTransactions(Number(transactionData.totalTransactions || 0));
       setTransactionSource(transactionData.source || '');
+
+      const responseInstanceMetrics = {};
+      (responseTimeData.instances || []).forEach((row) => {
+        responseInstanceMetrics[String(row.instId || 1)] = Number(row.responseTimeMs || 0);
+      });
+      const totalResponseTime = Number(Number(responseTimeData.responseTimeMs || 0).toFixed(2));
+      setResponseTimeChartState((prev) => {
+        const nextLabels = [...prev.labels, label].slice(-40);
+        const nextInstances = {};
+        Object.entries(responseInstanceMetrics).forEach(([instId, responseTimeMs]) => {
+          const prior = prev.instances[instId] || [];
+          nextInstances[instId] = [...prior, responseTimeMs].slice(-40);
+        });
+        return {
+          labels: nextLabels,
+          total: [...prev.total, totalResponseTime].slice(-40),
+          instances: nextInstances
+        };
+      });
+      setCurrentResponseTime(totalResponseTime);
+      setResponseTimeSource(responseTimeData.source || '');
+
       setWaits(aggregated);
       setSource(data.source || '');
       setLastUpdated(data.timestamp || Date.now());
@@ -222,9 +252,12 @@ function MonitorPanel({ dbStatus }) {
     previousTransactionSnapshotRef.current = null;
     setChartState({ labels: [], series: {} });
     setTpsChartState({ labels: [], total: [], instances: {} });
+    setResponseTimeChartState({ labels: [], total: [], instances: {} });
     setCurrentTps(0);
+    setCurrentResponseTime(0);
     setTotalTransactions(0);
     setTransactionSource('');
+    setResponseTimeSource('');
     setWaits([]);
   }, []);
 
@@ -387,6 +420,58 @@ function MonitorPanel({ dbStatus }) {
     }
   };
 
+  const responseTimeInstanceIds = Object.keys(responseTimeChartState.instances).sort((a, b) => Number(a) - Number(b));
+  const responseTimeChartData = {
+    labels: responseTimeChartState.labels,
+    datasets: [
+      {
+        label: 'Avg Response Time',
+        data: responseTimeChartState.total,
+        borderColor: '#f59e0b',
+        backgroundColor: 'rgba(245, 158, 11, 0.16)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        pointHoverRadius: 4
+      },
+      ...responseTimeInstanceIds.map((instId, index) => ({
+        label: `INST ${instId}`,
+        data: responseTimeChartState.instances[instId] || [],
+        borderColor: SERIES_COLORS[(index + 1) % SERIES_COLORS.length],
+        backgroundColor: SERIES_COLORS[(index + 1) % SERIES_COLORS.length],
+        fill: false,
+        tension: 0.3,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        borderDash: [5, 5]
+      }))
+    ]
+  };
+
+  const responseTimeChartOptions = {
+    ...tpsChartOptions,
+    plugins: {
+      ...tpsChartOptions.plugins,
+      tooltip: {
+        ...tpsChartOptions.plugins.tooltip,
+        callbacks: {
+          label: (context) => `${context.dataset.label}: ${Number(context.raw || 0).toFixed(2)} ms`
+        }
+      }
+    },
+    scales: {
+      ...tpsChartOptions.scales,
+      y: {
+        ...tpsChartOptions.scales.y,
+        title: {
+          display: true,
+          text: 'Response Time (ms)',
+          color: '#6b6b80'
+        }
+      }
+    }
+  };
+
   if (!dbStatus.connected) {
     return (
       <div className="panel" style={{ minHeight: '100%' }}>
@@ -411,6 +496,7 @@ function MonitorPanel({ dbStatus }) {
             <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
               Source: {source}
               {transactionSource ? `, ${transactionSource}` : ''}
+              {responseTimeSource ? `, ${responseTimeSource}` : ''}
             </span>
           )}
           <button className="btn btn-success btn-sm" disabled={isRunning || isLoading} onClick={handleStart}>
@@ -470,6 +556,9 @@ function MonitorPanel({ dbStatus }) {
             TPS is calculated from deltas in Oracle user commits plus user rollbacks.
           </span>
           <span style={{ display: 'block', marginTop: '0.4rem' }}>
+            Response time uses Oracle SQL Service Response Time from the 60-second system metric window.
+          </span>
+          <span style={{ display: 'block', marginTop: '0.4rem' }}>
             Observation: Avg wait in this tab is cumulative since instance startup, so it is better for understanding overall database behavior than the immediate effect of one workload.
           </span>
           {lastUpdated && (
@@ -483,7 +572,7 @@ function MonitorPanel({ dbStatus }) {
           <div className="alert alert-danger">{error}</div>
         )}
 
-        <div className="grid-2" style={{ marginBottom: '1rem' }}>
+        <div className="grid-3" style={{ marginBottom: '1rem' }}>
           <div className="panel">
             <div className="panel-header">
               <h2>Transactions per Second</h2>
@@ -495,6 +584,20 @@ function MonitorPanel({ dbStatus }) {
             <div className="panel-content">
               <div style={{ height: '280px' }}>
                 <Line data={tpsChartData} options={tpsChartOptions} />
+              </div>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">
+              <h2>Response Time</h2>
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                Current: <strong style={{ color: '#f59e0b' }}>{Number(currentResponseTime || 0).toFixed(2)} ms</strong>
+              </div>
+            </div>
+            <div className="panel-content">
+              <div style={{ height: '280px' }}>
+                <Line data={responseTimeChartData} options={responseTimeChartOptions} />
               </div>
             </div>
           </div>
