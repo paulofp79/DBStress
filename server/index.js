@@ -361,47 +361,24 @@ app.get('/api/monitor/transactions', async (req, res) => {
 });
 
 app.get('/api/monitor/response-time', async (req, res) => {
-  const toMilliseconds = (value, unit) => {
-    const numericValue = Number(value || 0);
-    const normalizedUnit = String(unit || '').toLowerCase();
-
-    if (normalizedUnit.includes('centisecond')) {
-      return numericValue * 10;
-    }
-    if (normalizedUnit.includes('microsecond')) {
-      return numericValue / 1000;
-    }
-    if (normalizedUnit.includes('millisecond')) {
-      return numericValue;
-    }
-    if (normalizedUnit.includes('second')) {
-      return numericValue * 1000;
-    }
-
-    return numericValue;
-  };
-
   const buildResponse = (rows, sourceName) => {
-    const instances = (rows || []).map((row) => {
-      const metricUnit = row.METRIC_UNIT || '';
-      return {
-        instId: row.INST_ID || 1,
-        metricName: row.METRIC_NAME,
-        metricUnit,
-        value: Number(row.VALUE || 0),
-        responseTimeMs: toMilliseconds(row.VALUE, metricUnit)
-      };
-    });
+    const instances = (rows || []).map((row) => ({
+      instId: row.INST_ID || 1,
+      dbTimeMicroseconds: Number(row.DB_TIME_MICROSECONDS || 0),
+      userCalls: Number(row.USER_CALLS || 0)
+    }));
 
-    const totalResponseTimeMs = instances.length > 0
-      ? instances.reduce((sum, row) => sum + row.responseTimeMs, 0) / instances.length
-      : 0;
+    const totals = instances.reduce((sum, row) => ({
+      dbTimeMicroseconds: sum.dbTimeMicroseconds + row.dbTimeMicroseconds,
+      userCalls: sum.userCalls + row.userCalls
+    }), { dbTimeMicroseconds: 0, userCalls: 0 });
 
     return {
       success: true,
       source: sourceName,
       timestamp: Date.now(),
-      responseTimeMs: totalResponseTimeMs,
+      dbTimeMicroseconds: totals.dbTimeMicroseconds,
+      userCalls: totals.userCalls,
       instances
     };
   };
@@ -409,31 +386,32 @@ app.get('/api/monitor/response-time', async (req, res) => {
   try {
     const result = await oracleDb.execute(`
       SELECT
-        inst_id,
-        metric_name,
-        metric_unit,
-        value
-      FROM gv$sysmetric
-      WHERE metric_name = 'SQL Service Response Time'
-        AND group_id = 2
-      ORDER BY inst_id
+        tm.inst_id,
+        tm.value AS db_time_microseconds,
+        NVL(st.value, 0) AS user_calls
+      FROM gv$sys_time_model tm
+      LEFT JOIN gv$sysstat st
+        ON st.inst_id = tm.inst_id
+       AND st.name = 'user calls'
+      WHERE tm.stat_name = 'DB time'
+      ORDER BY tm.inst_id
     `);
 
-    res.json(buildResponse(result.rows, 'gv$sysmetric'));
+    res.json(buildResponse(result.rows, 'gv$sys_time_model/gv$sysstat'));
   } catch (error) {
     try {
       const fallback = await oracleDb.execute(`
         SELECT
           1 AS inst_id,
-          metric_name,
-          metric_unit,
-          value
-        FROM v$sysmetric
-        WHERE metric_name = 'SQL Service Response Time'
-          AND group_id = 2
+          tm.value AS db_time_microseconds,
+          NVL(st.value, 0) AS user_calls
+        FROM v$sys_time_model tm
+        LEFT JOIN v$sysstat st
+          ON st.name = 'user calls'
+        WHERE tm.stat_name = 'DB time'
       `);
 
-      res.json(buildResponse(fallback.rows, 'v$sysmetric'));
+      res.json(buildResponse(fallback.rows, 'v$sys_time_model/v$sysstat'));
     } catch (fallbackError) {
       res.status(500).json({
         success: false,

@@ -57,6 +57,7 @@ function MonitorPanel({ dbStatus }) {
   const intervalRef = useRef(null);
   const previousSnapshotRef = useRef(new Map());
   const previousTransactionSnapshotRef = useRef(null);
+  const previousResponseTimeSnapshotRef = useRef(null);
 
   const formatNumber = (num) => {
     const value = Number(num) || 0;
@@ -215,15 +216,44 @@ function MonitorPanel({ dbStatus }) {
       setTotalTransactions(Number(transactionData.totalTransactions || 0));
       setTransactionSource(transactionData.source || '');
 
-      const responseInstanceMetrics = {};
+      const responseSnapshot = new Map();
       (responseTimeData.instances || []).forEach((row) => {
-        responseInstanceMetrics[String(row.instId || 1)] = Number(row.responseTimeMs || 0);
+        responseSnapshot.set(String(row.instId || 1), {
+          dbTimeMicroseconds: Number(row.dbTimeMicroseconds || 0),
+          userCalls: Number(row.userCalls || 0)
+        });
       });
-      const totalResponseTime = Number(Number(responseTimeData.responseTimeMs || 0).toFixed(2));
+
+      const previousResponseSnapshot = previousResponseTimeSnapshotRef.current;
+      let totalDeltaDbTimeMicroseconds = 0;
+      let totalDeltaUserCalls = 0;
+      const nextInstanceResponseTimes = {};
+
+      responseSnapshot.forEach((metrics, instId) => {
+        const previousMetrics = previousResponseSnapshot?.totals.get(instId);
+        const deltaDbTimeMicroseconds = Math.max(0, metrics.dbTimeMicroseconds - Number(previousMetrics?.dbTimeMicroseconds || 0));
+        const deltaUserCalls = Math.max(0, metrics.userCalls - Number(previousMetrics?.userCalls || 0));
+        const responseTimeMs = previousResponseSnapshot && deltaUserCalls > 0
+          ? deltaDbTimeMicroseconds / deltaUserCalls / 1000
+          : 0;
+
+        nextInstanceResponseTimes[instId] = Number(responseTimeMs.toFixed(2));
+        totalDeltaDbTimeMicroseconds += deltaDbTimeMicroseconds;
+        totalDeltaUserCalls += deltaUserCalls;
+      });
+
+      const totalResponseTime = previousResponseSnapshot && totalDeltaUserCalls > 0
+        ? Number((totalDeltaDbTimeMicroseconds / totalDeltaUserCalls / 1000).toFixed(2))
+        : 0;
+      previousResponseTimeSnapshotRef.current = {
+        timestamp: Number(responseTimeData.timestamp || Date.now()),
+        totals: responseSnapshot
+      };
+
       setResponseTimeChartState((prev) => {
         const nextLabels = [...prev.labels, label].slice(-40);
         const nextInstances = {};
-        Object.entries(responseInstanceMetrics).forEach(([instId, responseTimeMs]) => {
+        Object.entries(nextInstanceResponseTimes).forEach(([instId, responseTimeMs]) => {
           const prior = prev.instances[instId] || [];
           nextInstances[instId] = [...prior, responseTimeMs].slice(-40);
         });
@@ -250,6 +280,7 @@ function MonitorPanel({ dbStatus }) {
   const resetMonitoringState = useCallback(() => {
     previousSnapshotRef.current = new Map();
     previousTransactionSnapshotRef.current = null;
+    previousResponseTimeSnapshotRef.current = null;
     setChartState({ labels: [], series: {} });
     setTpsChartState({ labels: [], total: [], instances: {} });
     setResponseTimeChartState({ labels: [], total: [], instances: {} });
@@ -556,7 +587,7 @@ function MonitorPanel({ dbStatus }) {
             TPS is calculated from deltas in Oracle user commits plus user rollbacks.
           </span>
           <span style={{ display: 'block', marginTop: '0.4rem' }}>
-            Response time uses Oracle SQL Service Response Time from the 60-second system metric window.
+            Response time is calculated from deltas in Oracle DB time divided by user calls.
           </span>
           <span style={{ display: 'block', marginTop: '0.4rem' }}>
             Observation: Avg wait in this tab is cumulative since instance startup, so it is better for understanding overall database behavior than the immediate effect of one workload.
