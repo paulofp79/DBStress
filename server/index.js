@@ -387,13 +387,20 @@ app.get('/api/monitor/response-time', async (req, res) => {
     const result = await oracleDb.execute(`
       SELECT
         tm.inst_id,
-        tm.value AS db_time_microseconds,
-        NVL(st.value, 0) AS user_calls
+        SUM(tm.value) AS db_time_microseconds,
+        NVL(MAX(st.user_calls), 0) AS user_calls
       FROM gv$sys_time_model tm
-      LEFT JOIN gv$sysstat st
+      LEFT JOIN (
+        SELECT
+          inst_id,
+          SUM(value) AS user_calls
+        FROM gv$sysstat
+        WHERE name = 'user calls'
+        GROUP BY inst_id
+      ) st
         ON st.inst_id = tm.inst_id
-       AND st.name = 'user calls'
       WHERE tm.stat_name = 'DB time'
+      GROUP BY tm.inst_id
       ORDER BY tm.inst_id
     `);
 
@@ -403,11 +410,15 @@ app.get('/api/monitor/response-time', async (req, res) => {
       const fallback = await oracleDb.execute(`
         SELECT
           1 AS inst_id,
-          tm.value AS db_time_microseconds,
-          NVL(st.value, 0) AS user_calls
+          SUM(tm.value) AS db_time_microseconds,
+          NVL(MAX(st.user_calls), 0) AS user_calls
         FROM v$sys_time_model tm
-        LEFT JOIN v$sysstat st
-          ON st.name = 'user calls'
+        LEFT JOIN (
+          SELECT SUM(value) AS user_calls
+          FROM v$sysstat
+          WHERE name = 'user calls'
+        ) st
+          ON 1 = 1
         WHERE tm.stat_name = 'DB time'
       `);
 
