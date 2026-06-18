@@ -185,7 +185,7 @@ class OracleDatabase {
       poolIncrement,
       poolTimeout: 60,
       queueTimeout,
-      poolAlias: `stress_pool_${Date.now()}`
+      poolAlias: `stress_pool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     });
   }
 }

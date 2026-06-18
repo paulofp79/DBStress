@@ -221,6 +221,263 @@ body {
   background: #303055;
 }
 
+.gc-ar-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 390px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.gc-ar-sidebar {
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.gc-ar-sidebar h2,
+.gc-ar-topline h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.gc-ar-warning,
+.gc-ar-help,
+.gc-ar-message {
+  border-radius: 6px;
+  padding: 0.7rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.gc-ar-warning {
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.gc-ar-help {
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.gc-ar-section {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.gc-ar-section-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 0.65rem;
+}
+
+.gc-ar-kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.gc-ar-kv div {
+  background: var(--bg-primary);
+  border-radius: 6px;
+  padding: 0.55rem;
+}
+
+.gc-ar-kv span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.gc-ar-kv strong {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.gc-ar-permissions {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+  font-size: 0.76rem;
+}
+
+.gc-ar-permissions div {
+  padding: 0.35rem 0.45rem;
+  border-radius: 4px;
+  background: var(--bg-primary);
+}
+
+.gc-ar-permissions .ok {
+  color: var(--accent-success);
+}
+
+.gc-ar-permissions .bad {
+  color: var(--accent-danger);
+}
+
+.gc-ar-segment {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  margin-bottom: 0.8rem;
+}
+
+.gc-ar-segment button {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.6rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+}
+
+.gc-ar-segment button.active {
+  color: #ffffff;
+  border-color: var(--accent-warning);
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.gc-ar-confirm {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.gc-ar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.gc-ar-message {
+  background: var(--bg-primary);
+  margin-top: 0.65rem;
+}
+
+.gc-ar-message.error {
+  color: var(--accent-danger);
+}
+
+.gc-ar-main {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.gc-ar-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+}
+
+.gc-ar-topline span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.gc-ar-panel {
+  border-radius: 8px;
+}
+
+.gc-ar-table-wrap {
+  overflow-x: auto;
+}
+
+.gc-ar-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 980px;
+  font-size: 0.78rem;
+}
+
+.gc-ar-table.compact {
+  min-width: 520px;
+}
+
+.gc-ar-table th,
+.gc-ar-table td {
+  border-bottom: 1px solid var(--border-color);
+  padding: 0.55rem 0.6rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.gc-ar-table th {
+  color: var(--text-muted);
+  font-weight: 700;
+  background: var(--bg-primary);
+}
+
+.gc-ar-table td {
+  color: var(--text-secondary);
+}
+
+.gc-ar-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.gc-ar-log {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 0.76rem;
+}
+
+.gc-ar-log div {
+  display: grid;
+  grid-template-columns: 75px 54px minmax(0, 1fr);
+  gap: 0.55rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  background: var(--bg-primary);
+}
+
+.gc-ar-log strong {
+  color: var(--accent-info);
+  text-transform: uppercase;
+  font-size: 0.7rem;
+}
+
+.gc-ar-log .error strong {
+  color: var(--accent-danger);
+}
+
+.gc-ar-log .warn strong {
+  color: var(--accent-warning);
+}
+
+.gc-ar-log span {
+  color: var(--text-muted);
+}
+
+.gc-ar-log em {
+  color: var(--text-secondary);
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .gc-ar-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 .btn-sm {
   padding: 0.5rem 1rem;
   font-size: 0.8125rem;

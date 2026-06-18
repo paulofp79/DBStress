@@ -21,6 +21,7 @@ const hwContentionEngine = require('./stress/hwContentionEngine');
 const skewDetectionEngine = require('./stress/skewDetectionEngine');
 const tdeComparisonEngine = require('./stress/tdeComparisonEngine');
 const gcCongestionEngine = require('./stress/gcCongestionEngine');
+const gcAcquireReleaseEngine = require('./stress/gcAcquireReleaseEngine');
 const metricsCollector = require('./metrics/collector');
 
 const app = express();
@@ -1318,6 +1319,68 @@ app.get('/api/gc-congestion/wait-events', async (req, res) => {
   try {
     const events = await gcCongestionEngine.listAvailableWaitEvents(oracleDb);
     res.json({ success: true, events });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
+// GC Buffer Busy Acquire/Release Lab API Routes
+// ============================================
+
+app.get('/api/gc-acquire-release/status', (req, res) => {
+  res.json(gcAcquireReleaseEngine.getStatus());
+});
+
+app.post('/api/gc-acquire-release/validate', async (req, res) => {
+  try {
+    const result = await gcAcquireReleaseEngine.validateConnection(oracleDb);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/gc-acquire-release/setup', async (req, res) => {
+  try {
+    const result = await gcAcquireReleaseEngine.setupLab(oracleDb, io, req.body || {});
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/gc-acquire-release/start', async (req, res) => {
+  try {
+    const result = await gcAcquireReleaseEngine.start(oracleDb, req.body || {}, io);
+    res.json({ success: true, message: 'GC acquire/release workload started', status: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/gc-acquire-release/stop', async (req, res) => {
+  try {
+    const stats = await gcAcquireReleaseEngine.stop(req.body || {});
+    res.json({ success: true, message: 'GC acquire/release workload stopped', stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/gc-acquire-release/monitor', async (req, res) => {
+  try {
+    const monitor = await gcAcquireReleaseEngine.refreshMonitor();
+    res.json({ success: true, monitor });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/gc-acquire-release/cleanup', async (req, res) => {
+  try {
+    const result = await gcAcquireReleaseEngine.cleanup(oracleDb, io);
+    res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

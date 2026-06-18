@@ -17,6 +17,7 @@ import HWContentionPanel from './components/HWContentionPanel';
 import SkewDetectionPanel from './components/SkewDetectionPanel';
 import TDEComparisonPanel from './components/TDEComparisonPanel';
 import GCCongestionPanel from './components/GCCongestionPanel';
+import GCAcquireReleasePanel from './components/GCAcquireReleasePanel';
 import GCBenchmarkPanel from './components/GCBenchmarkPanel';
 import HomePanel from './components/HomePanel';
 import MonitorPanel from './components/MonitorPanel';
@@ -597,6 +598,23 @@ function App() {
             GC Congestion Demo
           </button>
           <button
+            onClick={() => setActiveTab('gc-acquire-release')}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: activeTab === 'gc-acquire-release' ? 'var(--surface)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'gc-acquire-release' ? '2px solid #f59e0b' : '2px solid transparent',
+              marginBottom: '-2px',
+              color: activeTab === 'gc-acquire-release' ? '#f59e0b' : 'var(--text-muted)',
+              fontWeight: activeTab === 'gc-acquire-release' ? '600' : '400',
+              cursor: 'pointer',
+              fontSize: '0.95rem',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            GC Acquire/Release Lab
+          </button>
+          <button
             onClick={() => setActiveTab('gc-benchmark')}
             style={{
               padding: '0.75rem 1.5rem',
@@ -799,6 +817,13 @@ function App() {
 
         {activeTab === 'gc-congestion' && (
           <GCCongestionPanel
+            dbStatus={dbStatus}
+            socket={socket}
+          />
+        )}
+
+        {activeTab === 'gc-acquire-release' && (
+          <GCAcquireReleasePanel
             dbStatus={dbStatus}
             socket={socket}
           />
