@@ -267,15 +267,15 @@ class GcAcquireReleaseEngine {
           { moduleName: MODULE_NAME, actionName: action }
         );
 
-        const rowId = this.config.hotRowMin + Math.floor(Math.random() * (this.config.hotRowMax - this.config.hotRowMin + 1));
+        const targetId = this.config.hotRowMin + Math.floor(Math.random() * (this.config.hotRowMax - this.config.hotRowMin + 1));
         await connection.execute(
           `
             UPDATE ${LAB_TABLE}
             SET counter = counter + 1,
                 updated_at = SYSTIMESTAMP
-            WHERE id = :rowId
+            WHERE id = :targetId
           `,
-          { rowId },
+          { targetId },
           { autoCommit: false }
         );
 
