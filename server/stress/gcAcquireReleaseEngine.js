@@ -258,58 +258,67 @@ class GcAcquireReleaseEngine {
 
   async runWorker(pool, action, serviceLabel) {
     let completed = 0;
-    while (this.isRunning && completed < this.config.loopsPerWorker) {
-      let connection;
-      try {
-        connection = await pool.getConnection();
-        await connection.execute(
-          `BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, :actionName); END;`,
-          { moduleName: MODULE_NAME, actionName: action }
-        );
+    let connection;
 
-        const targetId = this.config.hotRowMin + Math.floor(Math.random() * (this.config.hotRowMax - this.config.hotRowMin + 1));
-        await connection.execute(
-          `
-            UPDATE ${LAB_TABLE}
-            SET counter = counter + 1,
-                updated_at = SYSTIMESTAMP
-            WHERE id = :targetId
-          `,
-          { targetId },
-          { autoCommit: false }
-        );
+    try {
+      connection = await pool.getConnection();
+      await connection.execute(
+        `BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, :actionName); END;`,
+        { moduleName: MODULE_NAME, actionName: action }
+      );
 
-        completed += 1;
-        this.stats.completedLoops += 1;
-        if (completed % this.config.commitEvery === 0) {
-          await connection.commit();
-          this.stats.commits += 1;
-        }
-      } catch (err) {
-        this.stats.errors += 1;
-        this.addLog(`${action} on ${serviceLabel} failed: ${err.message}`, 'error');
-        if (connection) {
+      while (this.isRunning && completed < this.config.loopsPerWorker) {
+        try {
+          const targetId = this.config.hotRowMin + Math.floor(Math.random() * (this.config.hotRowMax - this.config.hotRowMin + 1));
+          await connection.execute(
+            `
+              UPDATE ${LAB_TABLE}
+              SET counter = counter + 1,
+                  updated_at = SYSTIMESTAMP
+              WHERE id = :targetId
+            `,
+            { targetId },
+            { autoCommit: false }
+          );
+
+          completed += 1;
+          this.stats.completedLoops += 1;
+          if (completed % this.config.commitEvery === 0) {
+            await connection.commit();
+            this.stats.commits += 1;
+          }
+        } catch (err) {
+          this.stats.errors += 1;
+          this.addLog(`${action} on ${serviceLabel} failed: ${err.message}`, 'error');
           try {
             await connection.rollback();
           } catch (rollbackErr) {
             // Ignore rollback failures while stopping.
           }
+          await sleep(250);
         }
-        await sleep(250);
-      } finally {
-        if (connection) {
-          try {
-            if (completed % this.config.commitEvery !== 0) {
-              await connection.commit();
-              this.stats.commits += 1;
-            }
-            await connection.close();
-          } catch (closeErr) {
-            // Ignore close failures while stopping.
-          }
+      }
+
+      if (completed % this.config.commitEvery !== 0) {
+        await connection.commit();
+        this.stats.commits += 1;
+      }
+    } catch (err) {
+      this.stats.errors += 1;
+      this.addLog(`${action} on ${serviceLabel} failed: ${err.message}`, 'error');
+    } finally {
+      if (connection) {
+        try {
+          await connection.execute(
+            `BEGIN DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); END;`
+          );
+          await connection.close();
+        } catch (closeErr) {
+          // Ignore close failures while stopping.
         }
       }
     }
+
     this.addLog(`${action} finished after ${completed} loop(s)`);
   }
 
