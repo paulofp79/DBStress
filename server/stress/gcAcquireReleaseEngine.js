@@ -69,7 +69,8 @@ class GcAcquireReleaseEngine {
       rowCount,
       hotRowMin,
       hotRowMax,
-      monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000)
+      monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000),
+      killExistingSessions: incoming.killExistingSessions !== false
     };
 
     if (mode === 'two-instance') {
@@ -209,7 +210,6 @@ class GcAcquireReleaseEngine {
   }
 
   async start(db, incoming = {}, io = null) {
-    if (this.isRunning) throw new Error('Acquire/release workload already running');
     this.db = db;
     this.io = io;
     const config = this.normalizeWorkloadConfig(incoming);
@@ -219,6 +219,26 @@ class GcAcquireReleaseEngine {
     if (totalWorkers < 1) throw new Error('At least one worker is required');
 
     await db.execute(`SELECT COUNT(*) AS CNT FROM ${LAB_TABLE}`);
+
+    if (this.isRunning) {
+      if (!config.killExistingSessions) {
+        throw new Error('Acquire/release workload already running. Stop it first or enable existing-session cleanup.');
+      }
+      this.addLog('Stopping existing in-memory acquire/release workload before starting a new one', 'warn');
+      await this.stop({ kill: true, drainSeconds: 5 });
+    }
+
+    const existingSessions = await this.queryToolSessions();
+    if (existingSessions.length > 0) {
+      if (!config.killExistingSessions) {
+        throw new Error(`Found ${existingSessions.length} existing DBSTRESS_GC_AR session(s). Stop them first or enable existing-session cleanup.`);
+      }
+      this.addLog(`Killing ${existingSessions.length} existing DBSTRESS_GC_AR session(s) before starting`, 'warn');
+      const killResult = await this.killToolSessions(existingSessions);
+      const drainResult = await this.waitForToolSessionsToDrain(10);
+      this.addLog(`Existing session cleanup complete; killed ${killResult.killed}/${killResult.attempted}, remaining ${drainResult.remaining}`);
+    }
+
     this.config = config;
     this.mode = config.mode;
     this.isRunning = true;
@@ -231,29 +251,95 @@ class GcAcquireReleaseEngine {
       errors: 0
     };
 
-    this.addLog(`Starting ${config.mode} acquire/release workload with ${totalWorkers} worker(s)`);
+    try {
+      this.addLog(`Starting ${config.mode} acquire/release workload with ${totalWorkers} worker(s)`);
 
-    if (config.mode === 'two-instance') {
-      const pool1 = await this.createWorkerPool(Math.max(config.workersInstance1, 1), config.instance1ConnectionString);
-      const pool2 = await this.createWorkerPool(Math.max(config.workersInstance2, 1), config.instance2ConnectionString);
-      for (let i = 0; i < config.workersInstance1; i++) {
-        this.workers.push(this.runWorker(pool1, `inst1-worker-${i + 1}`, 'instance-1'));
+      if (config.mode === 'two-instance') {
+        const pool1 = await this.createWorkerPool(Math.max(config.workersInstance1, 1), config.instance1ConnectionString);
+        const pool2 = await this.createWorkerPool(Math.max(config.workersInstance2, 1), config.instance2ConnectionString);
+        for (let i = 0; i < config.workersInstance1; i++) {
+          this.workers.push(this.runWorker(pool1, `inst1-worker-${i + 1}`, 'instance-1'));
+        }
+        for (let i = 0; i < config.workersInstance2; i++) {
+          this.workers.push(this.runWorker(pool2, `inst2-worker-${i + 1}`, 'instance-2'));
+        }
+      } else {
+        const pool = await this.createWorkerPool(config.workers, config.instance2ConnectionString);
+        for (let i = 0; i < config.workers; i++) {
+          this.workers.push(this.runWorker(pool, `one-inst-worker-${i + 1}`, 'instance-2'));
+        }
       }
-      for (let i = 0; i < config.workersInstance2; i++) {
-        this.workers.push(this.runWorker(pool2, `inst2-worker-${i + 1}`, 'instance-2'));
-      }
-    } else {
-      const pool = await this.createWorkerPool(config.workers, config.instance2ConnectionString);
-      for (let i = 0; i < config.workers; i++) {
-        this.workers.push(this.runWorker(pool, `one-inst-worker-${i + 1}`, 'instance-2'));
+
+      this.monitorInterval = setInterval(() => this.safeRefreshMonitor(), config.monitorRefreshMs);
+      this.statsInterval = setInterval(() => this.emitStatus(), 1000);
+      await this.safeRefreshMonitor();
+      this.emitStatus();
+      return this.getStatus();
+    } catch (err) {
+      this.addLog(`Startup failed: ${err.message}`, 'error');
+      await this.stop({ kill: true, drainSeconds: 2 });
+      throw err;
+    }
+  }
+
+  async safeRefreshMonitor() {
+    try {
+      return await this.refreshMonitor();
+    } catch (err) {
+      this.addLog(`Monitor refresh failed: ${err.message}`, 'warn');
+      return this.lastMonitor;
+    }
+  }
+
+  async queryToolSessions() {
+    if (!this.db) return [];
+    const result = await this.db.execute(
+      `
+        SELECT inst_id, sid, serial#
+        FROM gv$session
+        WHERE module = :moduleName
+          AND type = 'USER'
+      `,
+      { moduleName: MODULE_NAME }
+    );
+
+    return result.rows || [];
+  }
+
+  async waitForToolSessionsToDrain(timeoutSeconds = 10) {
+    const timeoutMs = Math.max(0, Number(timeoutSeconds) || 0) * 1000;
+    const startedAt = Date.now();
+    let sessions = await this.queryToolSessions();
+
+    while (sessions.length > 0 && Date.now() - startedAt < timeoutMs) {
+      await sleep(1000);
+      sessions = await this.queryToolSessions();
+    }
+
+    return {
+      remaining: sessions.length,
+      waitedSeconds: Math.round((Date.now() - startedAt) / 1000)
+    };
+  }
+
+  async killToolSessions(sessions = null) {
+    const targetSessions = sessions || await this.queryToolSessions();
+    let killed = 0;
+
+    for (const row of targetSessions) {
+      const sessionId = `${row.SID},${row['SERIAL#']},@${row.INST_ID}`;
+      try {
+        await this.db.execute(`ALTER SYSTEM KILL SESSION '${sessionId}' IMMEDIATE`);
+        killed += 1;
+      } catch (err) {
+        const message = String(err.message || '');
+        if (!message.includes('ORA-00030') && !message.includes('ORA-00031')) {
+          this.addLog(`Could not kill session ${sessionId}: ${err.message}`, 'warn');
+        }
       }
     }
 
-    this.monitorInterval = setInterval(() => this.refreshMonitor(), config.monitorRefreshMs);
-    this.statsInterval = setInterval(() => this.emitStatus(), 1000);
-    await this.refreshMonitor();
-    this.emitStatus();
-    return this.getStatus();
+    return { attempted: targetSessions.length, killed };
   }
 
   async runWorker(pool, action, serviceLabel) {
@@ -478,33 +564,6 @@ class GcAcquireReleaseEngine {
     this.addLog(`Workload stopped${killResult ? `; killed ${killResult.killed}/${killResult.attempted} remaining session(s)` : ''}`);
     this.emitStatus();
     return { ...this.stats, killResult };
-  }
-
-  async killToolSessions() {
-    const result = await this.db.execute(
-      `
-        SELECT inst_id, sid, serial#
-        FROM gv$session
-        WHERE module = :moduleName
-          AND type = 'USER'
-      `,
-      { moduleName: MODULE_NAME }
-    );
-
-    let killed = 0;
-    for (const row of result.rows || []) {
-      const sessionId = `${row.SID},${row['SERIAL#']},@${row.INST_ID}`;
-      try {
-        await this.db.execute(`ALTER SYSTEM KILL SESSION '${sessionId}' IMMEDIATE`);
-        killed += 1;
-      } catch (err) {
-        if (!String(err.message).includes('ORA-00030')) {
-          this.addLog(`Could not kill session ${sessionId}: ${err.message}`, 'warn');
-        }
-      }
-    }
-
-    return { attempted: result.rows?.length || 0, killed };
   }
 
   async cleanup(db, io = null) {

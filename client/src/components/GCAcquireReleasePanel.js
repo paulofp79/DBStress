@@ -41,7 +41,8 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     rowCount: 16,
     hotRowMin: 1,
     hotRowMax: 16,
-    monitorRefreshMs: 2000
+    monitorRefreshMs: 2000,
+    killExistingSessions: true
   });
 
   useEffect(() => {
@@ -215,6 +216,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
 
   const monitorRows = monitor || emptyMonitor;
   const running = !!status.isRunning;
+  const hasVisibleLabSessions = (monitorRows.activeSessions || []).length > 0;
   const canRun = dbStatus.connected && !busy;
 
   const renderSessionTable = (rows, emptyText) => (
@@ -395,12 +397,20 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             <input type="checkbox" checked={confirmLaunch} onChange={(e) => setConfirmLaunch(e.target.checked)} />
             I confirm this will run only in an internal lab.
           </label>
+          <label className="gc-ar-confirm">
+            <input
+              type="checkbox"
+              checked={config.killExistingSessions}
+              onChange={(e) => updateConfig('killExistingSessions', e.target.checked)}
+            />
+            Stop existing DBSTRESS_GC_AR sessions before starting.
+          </label>
           <div className="gc-ar-actions">
             <button className="btn btn-success" disabled={!canRun || running || totalWorkers < 1} onClick={handleStart}>
               {config.mode === 'one-instance' ? 'Start One-Instance Workload' : 'Start Two-Instance Workload'}
             </button>
-            <button className="btn btn-danger" disabled={!running || !!busy} onClick={handleStop}>
-              Stop Workload
+            <button className="btn btn-danger" disabled={(!running && !hasVisibleLabSessions) || !!busy} onClick={handleStop}>
+              {running ? 'Stop Workload' : 'Stop Existing Sessions'}
             </button>
             <button className="btn btn-secondary" disabled={!canRun || running} onClick={handleCleanup}>
               Cleanup Lab
