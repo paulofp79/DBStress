@@ -823,10 +823,19 @@ function App() {
         )}
 
         {activeTab === 'gc-acquire-release' && (
-          <GCAcquireReleasePanel
-            dbStatus={dbStatus}
-            socket={socket}
-          />
+          <div className={dbStatus.connected ? '' : 'grid-2'}>
+            {!dbStatus.connected && (
+              <ConnectionPanel
+                dbStatus={dbStatus}
+                onConnect={handleConnect}
+                onDisconnect={handleDisconnect}
+              />
+            )}
+            <GCAcquireReleasePanel
+              dbStatus={dbStatus}
+              socket={socket}
+            />
+          </div>
         )}
 
         <div style={{ display: activeTab === 'gc-benchmark' ? 'block' : 'none' }}>
