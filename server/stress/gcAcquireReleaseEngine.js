@@ -315,10 +315,7 @@ class GcAcquireReleaseEngine {
 
   async refreshMonitor() {
     if (!this.db) return null;
-    const binds = {
-      moduleName: MODULE_NAME,
-      ashSeconds: 30
-    };
+    const moduleBind = { moduleName: MODULE_NAME };
 
     const activeResult = await this.db.execute(
       `
@@ -341,7 +338,7 @@ class GcAcquireReleaseEngine {
           AND type = 'USER'
         ORDER BY inst_id, sid
       `,
-      binds
+      moduleBind
     );
 
     const waitResult = await this.db.execute(
