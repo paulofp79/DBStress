@@ -1,4 +1,23 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Line } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Tooltip,
+  Legend
+} from 'chart.js';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Tooltip,
+  Legend
+);
 
 const getServerUrl = () => {
   if (window.location.hostname !== 'localhost') {
@@ -15,6 +34,23 @@ const emptyMonitor = {
   ashRows: []
 };
 
+const TRACKED_WAIT_EVENTS = [
+  'gc buffer busy acquire',
+  'gc buffer busy release',
+  'buffer busy waits',
+  'enq: TX - allocate ITL entry',
+  'enq: TX - row lock contention'
+];
+
+const WAIT_COLORS = [
+  '#f59e0b',
+  '#38bdf8',
+  '#22c55e',
+  '#ef4444',
+  '#a78bfa',
+  '#14b8a6'
+];
+
 function GCAcquireReleasePanel({ dbStatus, socket }) {
   const [validation, setValidation] = useState(null);
   const [setupRows, setSetupRows] = useState([]);
@@ -28,6 +64,12 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     monitor: emptyMonitor
   });
   const [monitor, setMonitor] = useState(emptyMonitor);
+  const [waitEventFilter, setWaitEventFilter] = useState('all');
+  const [waitChartHistory, setWaitChartHistory] = useState({
+    labels: [],
+    series: {},
+    lastTimestamp: null
+  });
   const [confirmLaunch, setConfirmLaunch] = useState(false);
   const [config, setConfig] = useState({
     mode: 'one-instance',
@@ -113,6 +155,46 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     }, config.monitorRefreshMs);
     return () => clearInterval(interval);
   }, [dbStatus.connected, status.isRunning, config.monitorRefreshMs]);
+
+  useEffect(() => {
+    if (!monitor?.timestamp) return;
+
+    const rows = monitor.waitRows || [];
+    const label = new Date(monitor.timestamp).toLocaleTimeString([], {
+      minute: '2-digit',
+      second: '2-digit'
+    });
+    const countByEvent = rows.reduce((acc, row) => {
+      const eventName = row.event || 'Unknown';
+      acc[eventName] = (acc[eventName] || 0) + 1;
+      return acc;
+    }, {});
+    const trackedEvents = Array.from(new Set([
+      ...TRACKED_WAIT_EVENTS,
+      ...Object.keys(countByEvent)
+    ]));
+
+    setWaitChartHistory(prev => {
+      if (prev.lastTimestamp === monitor.timestamp) {
+        return prev;
+      }
+
+      const nextLabels = [...prev.labels, label].slice(-60);
+      const nextSeries = {};
+      trackedEvents.forEach(eventName => {
+        nextSeries[eventName] = [
+          ...(prev.series[eventName] || []),
+          countByEvent[eventName] || 0
+        ].slice(-60);
+      });
+
+      return {
+        labels: nextLabels,
+        series: nextSeries,
+        lastTimestamp: monitor.timestamp
+      };
+    });
+  }, [monitor?.timestamp, monitor?.waitRows]);
 
   const updateConfig = (field, value) => {
     setConfig(prev => ({ ...prev, [field]: value }));
@@ -227,6 +309,73 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   const running = !!status.isRunning;
   const hasVisibleLabSessions = (monitorRows.activeSessions || []).length > 0;
   const canRun = dbStatus.connected && !busy;
+  const waitRows = useMemo(() => monitorRows.waitRows || [], [monitorRows.waitRows]);
+  const waitEventOptions = useMemo(() => (
+    Array.from(new Set([
+      ...TRACKED_WAIT_EVENTS,
+      ...waitRows.map(row => row.event).filter(Boolean),
+      ...Object.keys(waitChartHistory.series)
+    ]))
+  ), [waitRows, waitChartHistory.series]);
+  const filteredWaitRows = waitEventFilter === 'all'
+    ? waitRows
+    : waitRows.filter(row => row.event === waitEventFilter);
+  const chartEventNames = waitEventFilter === 'all'
+    ? waitEventOptions
+    : [waitEventFilter];
+  const waitChartData = {
+    labels: waitChartHistory.labels,
+    datasets: chartEventNames.map((eventName, index) => ({
+      label: eventName,
+      data: waitChartHistory.series[eventName] || [],
+      borderColor: WAIT_COLORS[index % WAIT_COLORS.length],
+      backgroundColor: `${WAIT_COLORS[index % WAIT_COLORS.length]}33`,
+      borderWidth: 2,
+      tension: 0.3,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      spanGaps: true
+    }))
+  };
+  const waitChartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 0 },
+    plugins: {
+      legend: {
+        position: 'top',
+        labels: {
+          color: '#a0a0b0',
+          boxWidth: 10,
+          usePointStyle: true
+        }
+      },
+      tooltip: {
+        backgroundColor: 'rgba(26, 26, 46, 0.95)',
+        titleColor: '#ffffff',
+        bodyColor: '#a0a0b0',
+        borderColor: '#2a2a45',
+        borderWidth: 1
+      }
+    },
+    scales: {
+      x: {
+        grid: { color: 'rgba(42, 42, 69, 0.45)' },
+        ticks: { color: '#6b6b80', maxTicksLimit: 10 }
+      },
+      y: {
+        beginAtZero: true,
+        precision: 0,
+        grid: { color: 'rgba(42, 42, 69, 0.45)' },
+        ticks: { color: '#6b6b80', stepSize: 1 },
+        title: {
+          display: true,
+          text: 'Current sessions waiting',
+          color: '#6b6b80'
+        }
+      }
+    }
+  };
 
   const renderSessionTable = (rows, emptyText) => (
     <div className="gc-ar-table-wrap">
@@ -508,9 +657,23 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         </div>
 
         <div className="panel gc-ar-panel">
-          <div className="panel-header"><h2>Current GC / Buffer Wait Rows</h2></div>
+          <div className="panel-header gc-ar-chart-header">
+            <h2>Current GC / Buffer Wait Rows</h2>
+            <div className="gc-ar-filter">
+              <label>Wait event</label>
+              <select value={waitEventFilter} onChange={(e) => setWaitEventFilter(e.target.value)}>
+                <option value="all">All wait events</option>
+                {waitEventOptions.map(eventName => (
+                  <option key={eventName} value={eventName}>{eventName}</option>
+                ))}
+              </select>
+            </div>
+          </div>
           <div className="panel-content">
-            {renderSessionTable(monitorRows.waitRows || [], 'No current gc buffer busy or buffer/TX waits for lab sessions.')}
+            <div className="gc-ar-chart">
+              <Line data={waitChartData} options={waitChartOptions} />
+            </div>
+            {renderSessionTable(filteredWaitRows, 'No current waits match the selected wait event.')}
           </div>
         </div>
 
