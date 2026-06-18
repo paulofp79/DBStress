@@ -37,10 +37,11 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     workersInstance1: 25,
     workersInstance2: 25,
     loopsPerWorker: 20000,
-    commitEvery: 50,
-    rowCount: 16,
+    commitEvery: 1,
+    rowCount: 128,
     hotRowMin: 1,
-    hotRowMax: 16,
+    hotRowMax: 128,
+    rowTargetMode: 'spread',
     monitorRefreshMs: 2000,
     killExistingSessions: true
   });
@@ -161,7 +162,15 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   const handleSetup = async () => {
     const result = await runAction('Setup Lab', '/gc-acquire-release/setup', { rowCount: config.rowCount });
     if (result) {
-      setSetupRows(result.distribution || []);
+      const distribution = result.distribution || [];
+      setSetupRows(distribution);
+      if (distribution.length > 0) {
+        setConfig(prev => ({
+          ...prev,
+          hotRowMin: distribution[0].minId || prev.hotRowMin,
+          hotRowMax: distribution[0].maxId || prev.hotRowMax
+        }));
+      }
     }
   };
 
@@ -343,9 +352,9 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                   <label>Worker sessions</label>
                   <input type="number" min="1" max="1000" value={config.workers} onChange={(e) => updateNumber('workers', e.target.value, 1, 1000)} />
                 </div>
-                <div className="form-group">
-                  <label>Commit every N loops</label>
-                  <input type="number" min="1" max="10000" value={config.commitEvery} onChange={(e) => updateNumber('commitEvery', e.target.value, 1, 10000)} />
+                <div className="form-group gc-ar-inline-note">
+                  <label>Target shape</label>
+                  <div>Use spread mode and commit every 1 to reduce row-lock masking.</div>
                 </div>
               </div>
             </>
@@ -380,6 +389,19 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             <div className="form-group">
               <label>Refresh ms</label>
               <input type="number" min="1000" max="30000" value={config.monitorRefreshMs} onChange={(e) => updateNumber('monitorRefreshMs', e.target.value, 1000, 30000)} />
+            </div>
+          </div>
+          <div className="form-row">
+            <div className="form-group">
+              <label>Row target mode</label>
+              <select value={config.rowTargetMode} onChange={(e) => updateConfig('rowTargetMode', e.target.value)}>
+                <option value="spread">Spread across hot rows</option>
+                <option value="random">Random hot rows</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Commit every N loops</label>
+              <input type="number" min="1" max="10000" value={config.commitEvery} onChange={(e) => updateNumber('commitEvery', e.target.value, 1, 10000)} />
             </div>
           </div>
           <div className="form-row">

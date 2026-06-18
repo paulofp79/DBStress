@@ -59,16 +59,17 @@ class GcAcquireReleaseEngine {
 
   normalizeWorkloadConfig(incoming = {}) {
     const mode = incoming.mode === 'two-instance' ? 'two-instance' : 'one-instance';
-    const rowCount = clamp(incoming.rowCount, 1, 1000, 16);
+    const rowCount = clamp(incoming.rowCount, 1, 1000, 128);
     const hotRowMin = clamp(incoming.hotRowMin, 1, rowCount, 1);
-    const hotRowMax = clamp(incoming.hotRowMax, hotRowMin, rowCount, Math.min(rowCount, 16));
+    const hotRowMax = clamp(incoming.hotRowMax, hotRowMin, rowCount, Math.min(rowCount, 128));
     const base = {
       mode,
       loopsPerWorker: clamp(incoming.loopsPerWorker, 1, 1000000, 20000),
-      commitEvery: clamp(incoming.commitEvery, 1, 10000, 50),
+      commitEvery: clamp(incoming.commitEvery, 1, 10000, 1),
       rowCount,
       hotRowMin,
       hotRowMax,
+      rowTargetMode: incoming.rowTargetMode === 'random' ? 'random' : 'spread',
       monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000),
       killExistingSessions: incoming.killExistingSessions !== false
     };
@@ -133,7 +134,7 @@ class GcAcquireReleaseEngine {
     if (this.isRunning) throw new Error('Stop the acquire/release workload before setup');
     if (this.isSettingUp) throw new Error('Setup is already running');
     this.isSettingUp = true;
-    const rowCount = clamp(options.rowCount, 1, 1000, 16);
+    const rowCount = clamp(options.rowCount, 1, 1000, 128);
 
     try {
       this.addLog(`Setting up ${LAB_TABLE} with ${rowCount} hot rows`);
@@ -258,15 +259,15 @@ class GcAcquireReleaseEngine {
         const pool1 = await this.createWorkerPool(Math.max(config.workersInstance1, 1), config.instance1ConnectionString);
         const pool2 = await this.createWorkerPool(Math.max(config.workersInstance2, 1), config.instance2ConnectionString);
         for (let i = 0; i < config.workersInstance1; i++) {
-          this.workers.push(this.runWorker(pool1, `inst1-worker-${i + 1}`, 'instance-1'));
+          this.workers.push(this.runWorker(pool1, `inst1-worker-${i + 1}`, 'instance-1', i));
         }
         for (let i = 0; i < config.workersInstance2; i++) {
-          this.workers.push(this.runWorker(pool2, `inst2-worker-${i + 1}`, 'instance-2'));
+          this.workers.push(this.runWorker(pool2, `inst2-worker-${i + 1}`, 'instance-2', config.workersInstance1 + i));
         }
       } else {
         const pool = await this.createWorkerPool(config.workers, config.instance2ConnectionString);
         for (let i = 0; i < config.workers; i++) {
-          this.workers.push(this.runWorker(pool, `one-inst-worker-${i + 1}`, 'instance-2'));
+          this.workers.push(this.runWorker(pool, `one-inst-worker-${i + 1}`, 'instance-2', i));
         }
       }
 
@@ -342,7 +343,15 @@ class GcAcquireReleaseEngine {
     return { attempted: targetSessions.length, killed };
   }
 
-  async runWorker(pool, action, serviceLabel) {
+  getTargetId(workerIndex, completed) {
+    const range = Math.max(1, this.config.hotRowMax - this.config.hotRowMin + 1);
+    if (this.config.rowTargetMode === 'random') {
+      return this.config.hotRowMin + Math.floor(Math.random() * range);
+    }
+    return this.config.hotRowMin + ((workerIndex + completed) % range);
+  }
+
+  async runWorker(pool, action, serviceLabel, workerIndex = 0) {
     let completed = 0;
     let connection;
 
@@ -355,7 +364,7 @@ class GcAcquireReleaseEngine {
 
       while (this.isRunning && completed < this.config.loopsPerWorker) {
         try {
-          const targetId = this.config.hotRowMin + Math.floor(Math.random() * (this.config.hotRowMax - this.config.hotRowMin + 1));
+          const targetId = this.getTargetId(workerIndex, completed);
           await connection.execute(
             `
               UPDATE ${LAB_TABLE}

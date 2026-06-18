@@ -367,6 +367,13 @@ body {
   color: var(--accent-danger);
 }
 
+.gc-ar-inline-note div {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  padding: 0.55rem 0;
+}
+
 .gc-ar-main {
   display: grid;
   gap: 1rem;
