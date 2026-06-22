@@ -389,16 +389,13 @@ class GcAcquireReleaseEngine {
       `
         INSERT INTO ${LAB_TABLE} (id, pad, counter, session_bucket, request_id, updated_at)
         SELECT
-          next_id,
+          ${LAB_SEQUENCE}.NEXTVAL,
           RPAD('X', 100, 'X'),
           :counterValue,
           :sessionBucket,
-          next_id,
+          ${LAB_SEQUENCE}.CURRVAL,
           SYSTIMESTAMP
-        FROM (
-          SELECT ${LAB_SEQUENCE}.NEXTVAL AS next_id
-          FROM dual
-        )
+        FROM dual
       `,
       {
         counterValue: completed,
