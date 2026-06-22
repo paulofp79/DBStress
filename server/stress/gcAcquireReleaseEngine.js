@@ -1,7 +1,6 @@
 const oracledb = require('oracledb');
 
 const LAB_TABLE = 'GC_AR_ROWS';
-const LAB_SEQUENCE = 'GC_AR_SEQ';
 const MODULE_NAME = 'DBSTRESS_GC_AR';
 const EVENTS = [
   'gc buffer busy acquire',
@@ -41,6 +40,7 @@ class GcAcquireReleaseEngine {
       commits: 0,
       errors: 0
     };
+    this.nextInsertId = 1000000;
   }
 
   addLog(message, level = 'info') {
@@ -146,12 +146,6 @@ class GcAcquireReleaseEngine {
     try {
       this.addLog(`Setting up ${LAB_TABLE} with ${rowCount} hot rows`);
       try {
-        await db.execute(`DROP SEQUENCE ${LAB_SEQUENCE}`);
-      } catch (err) {
-        if (!String(err.message).includes('ORA-02289')) throw err;
-      }
-
-      try {
         await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
       } catch (err) {
         if (!String(err.message).includes('ORA-00942')) throw err;
@@ -187,14 +181,6 @@ class GcAcquireReleaseEngine {
       await db.execute(`
         CREATE INDEX GC_AR_BUCKET_IX ON ${LAB_TABLE}(session_bucket)
         INITRANS 1 PCTFREE 0
-      `);
-
-      await db.execute(`
-        CREATE SEQUENCE ${LAB_SEQUENCE}
-        START WITH ${rowCount + 1}
-        INCREMENT BY 1
-        CACHE 20
-        NOORDER
       `);
 
       await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '${LAB_TABLE}'); END;`);
@@ -284,6 +270,10 @@ class GcAcquireReleaseEngine {
       commits: 0,
       errors: 0
     };
+    this.nextInsertId = Math.max(
+      config.rowCount + 1,
+      Math.floor(Date.now() / 1000) * 1000000
+    );
 
     try {
       this.addLog(`Starting ${config.mode} ${config.workloadShape} acquire/release workload with ${totalWorkers} worker(s)`);
@@ -384,9 +374,13 @@ class GcAcquireReleaseEngine {
     return this.config.hotRowMin + ((workerIndex + completed) % range);
   }
 
+  getNextInsertId() {
+    this.nextInsertId += 1;
+    return this.nextInsertId;
+  }
+
   async executeInsertHotIndex(connection, workerIndex, completed) {
-    const sequenceResult = await connection.execute(`SELECT ${LAB_SEQUENCE}.NEXTVAL FROM dual`);
-    const nextId = sequenceResult.rows?.[0]?.[0];
+    const nextId = this.getNextInsertId();
 
     await connection.execute(
       `
@@ -648,14 +642,6 @@ class GcAcquireReleaseEngine {
       await this.stop({ kill: true, drainSeconds: 5 });
     }
     try {
-      try {
-        await db.execute(`DROP SEQUENCE ${LAB_SEQUENCE}`);
-      } catch (err) {
-        if (!String(err.message).includes('ORA-02289')) {
-          throw err;
-        }
-      }
-
       await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
       this.addLog(`Dropped ${LAB_TABLE}`);
       return { dropped: true };
