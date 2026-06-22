@@ -385,19 +385,23 @@ class GcAcquireReleaseEngine {
   }
 
   async executeInsertHotIndex(connection, workerIndex, completed) {
+    const sequenceResult = await connection.execute(`SELECT ${LAB_SEQUENCE}.NEXTVAL FROM dual`);
+    const nextId = sequenceResult.rows?.[0]?.[0];
+
     await connection.execute(
       `
         INSERT INTO ${LAB_TABLE} (id, pad, counter, session_bucket, request_id, updated_at)
-        SELECT
-          ${LAB_SEQUENCE}.NEXTVAL,
+        VALUES (
+          :nextId,
           RPAD('X', 100, 'X'),
           :counterValue,
           :sessionBucket,
-          ${LAB_SEQUENCE}.CURRVAL,
+          :nextId,
           SYSTIMESTAMP
-        FROM dual
+        )
       `,
       {
+        nextId,
         counterValue: completed,
         sessionBucket: workerIndex % 100
       },
