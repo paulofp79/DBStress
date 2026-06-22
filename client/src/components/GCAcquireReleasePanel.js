@@ -87,6 +87,10 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     hotRowMax: 128,
     rowTargetMode: 'spread',
     workloadShape: 'insert-hot-index',
+    remotePrimerEnabled: false,
+    remotePrimerConnectionString: '',
+    remotePrimerSessions: 4,
+    remotePrimerThinkMs: 10,
     monitorRefreshMs: 2000,
     killExistingSessions: true
   });
@@ -96,7 +100,8 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
       setConfig(prev => ({
         ...prev,
         instance2ConnectionString: prev.instance2ConnectionString || dbStatus.config.connectionString,
-        instance1ConnectionString: prev.instance1ConnectionString || dbStatus.config.connectionString
+        instance1ConnectionString: prev.instance1ConnectionString || dbStatus.config.connectionString,
+        remotePrimerConnectionString: prev.remotePrimerConnectionString || ''
       }));
     }
   }, [dbStatus.config?.connectionString]);
@@ -266,7 +271,12 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     }
     const payload = { ...config };
     if (payload.mode === 'one-instance') {
-      delete payload.instance1ConnectionString;
+      if (payload.remotePrimerEnabled) {
+        payload.remotePrimerConnectionString = payload.remotePrimerConnectionString || payload.instance1ConnectionString;
+      } else {
+        delete payload.instance1ConnectionString;
+        delete payload.remotePrimerConnectionString;
+      }
       delete payload.workersInstance1;
       delete payload.workersInstance2;
     } else {
@@ -558,6 +568,39 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                 <label>Instance 2 service connect string</label>
                 <input value={config.instance2ConnectionString} onChange={(e) => updateConfig('instance2ConnectionString', e.target.value)} />
               </div>
+              <label className="gc-ar-confirm">
+                <input
+                  type="checkbox"
+                  checked={config.remotePrimerEnabled}
+                  onChange={(e) => updateConfig('remotePrimerEnabled', e.target.checked)}
+                />
+                Use remote GC primer sessions on another instance.
+              </label>
+              {config.remotePrimerEnabled && (
+                <>
+                  <div className="form-group">
+                    <label>Remote primer connect string</label>
+                    <input
+                      value={config.remotePrimerConnectionString}
+                      onChange={(e) => updateConfig('remotePrimerConnectionString', e.target.value)}
+                      placeholder="instance 1 service connect string"
+                    />
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Primer sessions</label>
+                      <input type="number" min="1" max="100" value={config.remotePrimerSessions} onChange={(e) => updateNumber('remotePrimerSessions', e.target.value, 1, 100)} />
+                    </div>
+                    <div className="form-group">
+                      <label>Primer think ms</label>
+                      <input type="number" min="0" max="5000" value={config.remotePrimerThinkMs} onChange={(e) => updateNumber('remotePrimerThinkMs', e.target.value, 0, 5000)} />
+                    </div>
+                  </div>
+                  <div className="gc-ar-inline-note">
+                    <div>Application workers stay on instance 2; primer sessions touch hot rows from another instance to create GC transfer pressure.</div>
+                  </div>
+                </>
+              )}
               <div className="form-row">
                 <div className="form-group">
                   <label>Worker sessions</label>

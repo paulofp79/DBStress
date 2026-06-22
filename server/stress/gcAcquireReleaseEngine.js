@@ -77,6 +77,10 @@ class GcAcquireReleaseEngine {
       hotRowMax,
       rowTargetMode: incoming.rowTargetMode === 'random' ? 'random' : 'spread',
       workloadShape,
+      remotePrimerEnabled: incoming.remotePrimerEnabled === true,
+      remotePrimerConnectionString: String(incoming.remotePrimerConnectionString || '').trim(),
+      remotePrimerSessions: clamp(incoming.remotePrimerSessions, 0, 100, 4),
+      remotePrimerThinkMs: clamp(incoming.remotePrimerThinkMs, 0, 5000, 10),
       monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000),
       killExistingSessions: incoming.killExistingSessions !== false
     };
@@ -292,6 +296,14 @@ class GcAcquireReleaseEngine {
         for (let i = 0; i < config.workers; i++) {
           this.workers.push(this.runWorker(pool, `one-inst-worker-${i + 1}`, 'instance-2', i));
         }
+
+        if (config.remotePrimerEnabled && config.remotePrimerConnectionString && config.remotePrimerSessions > 0) {
+          const primerPool = await this.createWorkerPool(config.remotePrimerSessions, config.remotePrimerConnectionString);
+          for (let i = 0; i < config.remotePrimerSessions; i++) {
+            this.workers.push(this.runRemotePrimer(primerPool, `remote-primer-${i + 1}`, i));
+          }
+          this.addLog(`Started ${config.remotePrimerSessions} remote GC primer session(s)`);
+        }
       }
 
       this.monitorInterval = setInterval(() => this.safeRefreshMonitor(), config.monitorRefreshMs);
@@ -475,6 +487,66 @@ class GcAcquireReleaseEngine {
     }
 
     this.addLog(`${action} finished after ${completed} loop(s)`);
+  }
+
+  async runRemotePrimer(pool, action, workerIndex = 0) {
+    let completed = 0;
+    let connection;
+
+    try {
+      connection = await pool.getConnection();
+      await connection.execute(
+        `BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, :actionName); END;`,
+        { moduleName: MODULE_NAME, actionName: action }
+      );
+
+      while (this.isRunning && completed < this.config.loopsPerWorker) {
+        try {
+          const targetId = this.getTargetId(workerIndex, completed);
+          await connection.execute(
+            `
+              UPDATE ${LAB_TABLE}
+              SET counter = counter + 1,
+                  updated_at = SYSTIMESTAMP
+              WHERE id = :targetId
+            `,
+            { targetId },
+            { autoCommit: false }
+          );
+          await connection.commit();
+          completed += 1;
+
+          if (this.config.remotePrimerThinkMs > 0) {
+            await sleep(this.config.remotePrimerThinkMs);
+          }
+        } catch (err) {
+          this.stats.errors += 1;
+          this.addLog(`${action} failed: ${err.message}`, 'warn');
+          try {
+            await connection.rollback();
+          } catch (rollbackErr) {
+            // Ignore rollback failures while stopping.
+          }
+          await sleep(250);
+        }
+      }
+    } catch (err) {
+      this.stats.errors += 1;
+      this.addLog(`${action} failed: ${err.message}`, 'warn');
+    } finally {
+      if (connection) {
+        try {
+          await connection.execute(
+            `BEGIN DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); END;`
+          );
+          await connection.close();
+        } catch (closeErr) {
+          // Ignore close failures while stopping.
+        }
+      }
+    }
+
+    this.addLog(`${action} finished after ${completed} primer loop(s)`);
   }
 
   async refreshMonitor() {
