@@ -313,6 +313,33 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   const hasVisibleLabSessions = (monitorRows.activeSessions || []).length > 0;
   const canRun = dbStatus.connected && !busy;
   const waitRows = useMemo(() => monitorRows.waitRows || [], [monitorRows.waitRows]);
+  const activeSessionSummary = useMemo(() => {
+    const summary = new Map();
+    (monitorRows.activeSessions || []).forEach(row => {
+      const instId = row.instId || '-';
+      const eventName = row.event || (row.state === 'WAITING' ? 'Unknown wait' : 'ON CPU / not waiting');
+      const key = `${instId}|${eventName}`;
+      const current = summary.get(key) || {
+        instId,
+        event: eventName,
+        sessionCount: 0,
+        waitingCount: 0,
+        maxWaitSeconds: 0
+      };
+      current.sessionCount += 1;
+      if (row.state === 'WAITING') {
+        current.waitingCount += 1;
+      }
+      current.maxWaitSeconds = Math.max(current.maxWaitSeconds, Number(row.waitSeconds || 0));
+      summary.set(key, current);
+    });
+
+    return Array.from(summary.values()).sort((a, b) => (
+      Number(a.instId) - Number(b.instId)
+      || b.sessionCount - a.sessionCount
+      || a.event.localeCompare(b.event)
+    ));
+  }, [monitorRows.activeSessions]);
   const waitEventOptions = useMemo(() => (
     Array.from(new Set([
       ...TRACKED_WAIT_EVENTS,
@@ -415,6 +442,38 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               <td>{row.module || '-'}</td>
               <td>{row.action || '-'}</td>
               <td>{row.sqlId || '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const renderActiveSessionSummary = (rows) => (
+    <div className="gc-ar-table-wrap">
+      <table className="gc-ar-table compact">
+        <thead>
+          <tr>
+            <th>INST_ID</th>
+            <th>EVENT</th>
+            <th>SESSION_COUNT</th>
+            <th>WAITING_COUNT</th>
+            <th>MAX_WIS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && (
+            <tr>
+              <td colSpan="5" className="gc-ar-empty">No DBSTRESS_GC_AR sessions are active.</td>
+            </tr>
+          )}
+          {rows.map(row => (
+            <tr key={`${row.instId}-${row.event}`}>
+              <td>{row.instId}</td>
+              <td>{row.event}</td>
+              <td>{row.sessionCount}</td>
+              <td>{row.waitingCount}</td>
+              <td>{Number(row.maxWaitSeconds || 0).toFixed(3)}</td>
             </tr>
           ))}
         </tbody>
@@ -668,7 +727,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         <div className="panel gc-ar-panel">
           <div className="panel-header"><h2>Active Lab Sessions by Instance</h2></div>
           <div className="panel-content">
-            {renderSessionTable(monitorRows.activeSessions || [], 'No DBSTRESS_GC_AR sessions are active.')}
+            {renderActiveSessionSummary(activeSessionSummary)}
           </div>
         </div>
 
