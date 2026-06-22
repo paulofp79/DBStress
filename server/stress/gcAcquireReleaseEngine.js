@@ -1,10 +1,13 @@
 const oracledb = require('oracledb');
 
 const LAB_TABLE = 'GC_AR_ROWS';
+const LAB_SEQUENCE = 'GC_AR_SEQ';
 const MODULE_NAME = 'DBSTRESS_GC_AR';
 const EVENTS = [
   'gc buffer busy acquire',
   'gc buffer busy release',
+  'gc current block busy',
+  'gc cr block busy',
   'buffer busy waits',
   'enq: TX - allocate ITL entry',
   'enq: TX - row lock contention'
@@ -62,6 +65,9 @@ class GcAcquireReleaseEngine {
     const rowCount = clamp(incoming.rowCount, 1, 1000, 128);
     const hotRowMin = clamp(incoming.hotRowMin, 1, rowCount, 1);
     const hotRowMax = clamp(incoming.hotRowMax, hotRowMin, rowCount, Math.min(rowCount, 128));
+    const workloadShape = incoming.workloadShape === 'update-hot-block'
+      ? 'update-hot-block'
+      : 'insert-hot-index';
     const base = {
       mode,
       loopsPerWorker: clamp(incoming.loopsPerWorker, 1, 1000000, 20000),
@@ -70,6 +76,7 @@ class GcAcquireReleaseEngine {
       hotRowMin,
       hotRowMax,
       rowTargetMode: incoming.rowTargetMode === 'random' ? 'random' : 'spread',
+      workloadShape,
       monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000),
       killExistingSessions: incoming.killExistingSessions !== false
     };
@@ -139,6 +146,12 @@ class GcAcquireReleaseEngine {
     try {
       this.addLog(`Setting up ${LAB_TABLE} with ${rowCount} hot rows`);
       try {
+        await db.execute(`DROP SEQUENCE ${LAB_SEQUENCE}`);
+      } catch (err) {
+        if (!String(err.message).includes('ORA-02289')) throw err;
+      }
+
+      try {
         await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
       } catch (err) {
         if (!String(err.message).includes('ORA-00942')) throw err;
@@ -149,6 +162,8 @@ class GcAcquireReleaseEngine {
           id NUMBER NOT NULL,
           pad VARCHAR2(100),
           counter NUMBER DEFAULT 0,
+          session_bucket NUMBER,
+          request_id NUMBER,
           updated_at TIMESTAMP DEFAULT SYSTIMESTAMP,
           CONSTRAINT GC_AR_ROWS_PK PRIMARY KEY (id)
         ) INITRANS 1 PCTFREE 0
@@ -156,13 +171,31 @@ class GcAcquireReleaseEngine {
 
       await db.execute(
         `
-          INSERT INTO ${LAB_TABLE} (id, pad, counter)
-          SELECT LEVEL, RPAD('X', 100, 'X'), 0
+          INSERT INTO ${LAB_TABLE} (id, pad, counter, session_bucket, request_id)
+          SELECT LEVEL, RPAD('X', 100, 'X'), 0, MOD(LEVEL, 100), LEVEL
           FROM dual
           CONNECT BY LEVEL <= :rowCount
         `,
         { rowCount }
       );
+
+      await db.execute(`
+        CREATE INDEX GC_AR_REQ_IX ON ${LAB_TABLE}(request_id)
+        INITRANS 1 PCTFREE 0
+      `);
+
+      await db.execute(`
+        CREATE INDEX GC_AR_BUCKET_IX ON ${LAB_TABLE}(session_bucket)
+        INITRANS 1 PCTFREE 0
+      `);
+
+      await db.execute(`
+        CREATE SEQUENCE ${LAB_SEQUENCE}
+        START WITH ${rowCount + 1}
+        INCREMENT BY 1
+        CACHE 20
+        NOORDER
+      `);
 
       await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '${LAB_TABLE}'); END;`);
       const distribution = await this.getBlockDistribution(db);
@@ -253,7 +286,7 @@ class GcAcquireReleaseEngine {
     };
 
     try {
-      this.addLog(`Starting ${config.mode} acquire/release workload with ${totalWorkers} worker(s)`);
+      this.addLog(`Starting ${config.mode} ${config.workloadShape} acquire/release workload with ${totalWorkers} worker(s)`);
 
       if (config.mode === 'two-instance') {
         const pool1 = await this.createWorkerPool(Math.max(config.workersInstance1, 1), config.instance1ConnectionString);
@@ -351,6 +384,44 @@ class GcAcquireReleaseEngine {
     return this.config.hotRowMin + ((workerIndex + completed) % range);
   }
 
+  async executeInsertHotIndex(connection, workerIndex, completed) {
+    await connection.execute(
+      `
+        INSERT INTO ${LAB_TABLE} (id, pad, counter, session_bucket, request_id, updated_at)
+        SELECT
+          next_id,
+          RPAD('X', 100, 'X'),
+          :counterValue,
+          :sessionBucket,
+          next_id,
+          SYSTIMESTAMP
+        FROM (
+          SELECT ${LAB_SEQUENCE}.NEXTVAL AS next_id
+          FROM dual
+        )
+      `,
+      {
+        counterValue: completed,
+        sessionBucket: workerIndex % 100
+      },
+      { autoCommit: false }
+    );
+  }
+
+  async executeUpdateHotBlock(connection, workerIndex, completed) {
+    const targetId = this.getTargetId(workerIndex, completed);
+    await connection.execute(
+      `
+        UPDATE ${LAB_TABLE}
+        SET counter = counter + 1,
+            updated_at = SYSTIMESTAMP
+        WHERE id = :targetId
+      `,
+      { targetId },
+      { autoCommit: false }
+    );
+  }
+
   async runWorker(pool, action, serviceLabel, workerIndex = 0) {
     let completed = 0;
     let connection;
@@ -364,17 +435,11 @@ class GcAcquireReleaseEngine {
 
       while (this.isRunning && completed < this.config.loopsPerWorker) {
         try {
-          const targetId = this.getTargetId(workerIndex, completed);
-          await connection.execute(
-            `
-              UPDATE ${LAB_TABLE}
-              SET counter = counter + 1,
-                  updated_at = SYSTIMESTAMP
-              WHERE id = :targetId
-            `,
-            { targetId },
-            { autoCommit: false }
-          );
+          if (this.config.workloadShape === 'insert-hot-index') {
+            await this.executeInsertHotIndex(connection, workerIndex, completed);
+          } else {
+            await this.executeUpdateHotBlock(connection, workerIndex, completed);
+          }
 
           completed += 1;
           this.stats.completedLoops += 1;
@@ -582,6 +647,14 @@ class GcAcquireReleaseEngine {
       await this.stop({ kill: true, drainSeconds: 5 });
     }
     try {
+      try {
+        await db.execute(`DROP SEQUENCE ${LAB_SEQUENCE}`);
+      } catch (err) {
+        if (!String(err.message).includes('ORA-02289')) {
+          throw err;
+        }
+      }
+
       await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
       this.addLog(`Dropped ${LAB_TABLE}`);
       return { dropped: true };

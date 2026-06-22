@@ -37,6 +37,8 @@ const emptyMonitor = {
 const TRACKED_WAIT_EVENTS = [
   'gc buffer busy acquire',
   'gc buffer busy release',
+  'gc current block busy',
+  'gc cr block busy',
   'buffer busy waits',
   'enq: TX - allocate ITL entry',
   'enq: TX - row lock contention'
@@ -84,6 +86,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     hotRowMin: 1,
     hotRowMax: 128,
     rowTargetMode: 'spread',
+    workloadShape: 'insert-hot-index',
     monitorRefreshMs: 2000,
     killExistingSessions: true
   });
@@ -442,7 +445,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         </div>
 
         <div className="gc-ar-help">
-          <strong>gc buffer busy acquire</strong> can happen even when all application workload runs on one RAC instance because the block is still RAC-managed. Other local sessions wait behind the local instance GC request. <strong>gc buffer busy release</strong> usually means the local session is waiting for a remote instance to release or complete the GC path.
+          <strong>Right-growing inserts</strong> model the RAC hot-index pattern from sequence keys and compact index leaf blocks. <strong>Hot-block updates</strong> model frequent updates to rows in the same block, but can be masked by row locks.
         </div>
 
         <div className="gc-ar-section">
@@ -542,15 +545,28 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
           </div>
           <div className="form-row">
             <div className="form-group">
+              <label>Workload shape</label>
+              <select value={config.workloadShape} onChange={(e) => updateConfig('workloadShape', e.target.value)}>
+                <option value="insert-hot-index">Right-growing inserts</option>
+                <option value="update-hot-block">Hot-block updates</option>
+              </select>
+            </div>
+            <div className="form-group">
               <label>Row target mode</label>
               <select value={config.rowTargetMode} onChange={(e) => updateConfig('rowTargetMode', e.target.value)}>
                 <option value="spread">Spread across hot rows</option>
                 <option value="random">Random hot rows</option>
               </select>
             </div>
+          </div>
+          <div className="form-row">
             <div className="form-group">
               <label>Commit every N loops</label>
               <input type="number" min="1" max="10000" value={config.commitEvery} onChange={(e) => updateNumber('commitEvery', e.target.value, 1, 10000)} />
+            </div>
+            <div className="form-group gc-ar-inline-note">
+              <label>GC wait tip</label>
+              <div>Use two-instance mode plus right-growing inserts for the strongest GC busy signal.</div>
             </div>
           </div>
           <div className="form-row">
