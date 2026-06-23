@@ -2,10 +2,13 @@ const oracledb = require('oracledb');
 
 const LAB_TABLE = 'GC_AR_ROWS';
 const CUSTOMER_TABLE = '"file_@443"';
+const NOTE_REPRO_TABLE = 'T_TEST';
 const MODULE_NAME = 'DBSTRESS_GC_AR';
 const EVENTS = [
   'gc buffer busy acquire',
   'gc buffer busy release',
+  'gc current request',
+  'log file sync',
   'gc current block busy',
   'gc cr block busy',
   'buffer busy waits',
@@ -72,8 +75,8 @@ class GcAcquireReleaseEngine {
     const rowCount = clamp(incoming.rowCount, 1, 1000, 128);
     const hotRowMin = clamp(incoming.hotRowMin, 1, rowCount, 1);
     const hotRowMax = clamp(incoming.hotRowMax, hotRowMin, rowCount, Math.min(rowCount, 128));
-    const workloadShape = incoming.workloadShape === 'update-hot-block'
-      ? 'update-hot-block'
+    const workloadShape = ['update-hot-block', 'manual-lgnn-hang'].includes(incoming.workloadShape)
+      ? incoming.workloadShape
       : 'insert-hot-index';
     const objectProfile = incoming.objectProfile === 'customer-file'
       ? 'customer-file'
@@ -93,6 +96,7 @@ class GcAcquireReleaseEngine {
       remotePrimerConnectionString: String(incoming.remotePrimerConnectionString || '').trim(),
       remotePrimerSessions: clamp(incoming.remotePrimerSessions, 0, 100, 4),
       remotePrimerThinkMs: clamp(incoming.remotePrimerThinkMs, 0, 5000, 10),
+      manualStepDelayMs: clamp(incoming.manualStepDelayMs, 500, 30000, 3000),
       monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000),
       killExistingSessions: incoming.killExistingSessions !== false
     };
@@ -158,12 +162,17 @@ class GcAcquireReleaseEngine {
     if (this.isSettingUp) throw new Error('Setup is already running');
     this.isSettingUp = true;
     const rowCount = clamp(options.rowCount, 1, 1000, 128);
-    const objectProfile = options.objectProfile === 'customer-file' ? 'customer-file' : 'standard';
+    const isNoteRepro = options.workloadShape === 'manual-lgnn-hang';
+    const objectProfile = isNoteRepro
+      ? 'note-repro'
+      : options.objectProfile === 'customer-file' ? 'customer-file' : 'standard';
 
     try {
-      this.addLog(`Setting up ${objectProfile === 'customer-file' ? CUSTOMER_TABLE : LAB_TABLE} with ${rowCount} seed rows`);
+      this.addLog(`Setting up ${this.getTableNameForProfile(objectProfile)} with ${isNoteRepro ? 300 : rowCount} seed rows`);
 
-      if (objectProfile === 'customer-file') {
+      if (objectProfile === 'note-repro') {
+        await this.setupNoteReproTable(db);
+      } else if (objectProfile === 'customer-file') {
         await this.setupCustomerFileTable(db, rowCount, options);
       } else {
         await this.setupStandardTable(db, rowCount);
@@ -172,9 +181,9 @@ class GcAcquireReleaseEngine {
       const distribution = await this.getBlockDistribution(db, objectProfile);
       this.addLog(`Setup complete; found ${distribution.length} file/block group(s)`);
       return {
-        tableName: objectProfile === 'customer-file' ? CUSTOMER_TABLE : LAB_TABLE,
+        tableName: this.getTableNameForProfile(objectProfile),
         objectProfile,
-        rowCount,
+        rowCount: isNoteRepro ? 300 : rowCount,
         distribution
       };
     } finally {
@@ -314,8 +323,58 @@ class GcAcquireReleaseEngine {
     await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, 'file_@443'); END;`);
   }
 
+  async setupNoteReproTable(db) {
+    try {
+      await db.execute(`DROP TABLE ${NOTE_REPRO_TABLE} PURGE`);
+    } catch (err) {
+      if (!String(err.message).includes('ORA-00942')) throw err;
+    }
+
+    await db.execute(`CREATE TABLE ${NOTE_REPRO_TABLE} (n1 NUMBER, v1 VARCHAR2(100))`);
+    await db.execute(`
+      INSERT INTO ${NOTE_REPRO_TABLE}
+      SELECT n1, LPAD(n1, 100, 'AAAAAAA')
+      FROM (SELECT LEVEL n1 FROM dual CONNECT BY LEVEL <= 300)
+    `);
+    await db.execute(`CREATE INDEX t_test_n1 ON ${NOTE_REPRO_TABLE} (n1)`);
+    await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '${NOTE_REPRO_TABLE}', CASCADE => TRUE); END;`);
+    await db.commit();
+  }
+
+  getTableNameForProfile(objectProfile) {
+    if (objectProfile === 'customer-file') return CUSTOMER_TABLE;
+    if (objectProfile === 'note-repro') return NOTE_REPRO_TABLE;
+    return LAB_TABLE;
+  }
+
   async getBlockDistribution(dbRef = null, objectProfile = this.config?.objectProfile || 'standard') {
     const db = dbRef || this.db;
+    if (objectProfile === 'note-repro') {
+      const result = await db.execute(`
+        SELECT
+          n1,
+          DBMS_ROWID.ROWID_RELATIVE_FNO(rowid) AS file_no,
+          DBMS_ROWID.ROWID_BLOCK_NUMBER(rowid) AS block_no,
+          DBMS_ROWID.ROWID_OBJECT(rowid) AS object_no,
+          LENGTH(v1) AS v1_length
+        FROM ${NOTE_REPRO_TABLE}
+        WHERE n1 IN (96, 97, 98, 99, 100)
+        ORDER BY n1
+      `);
+
+      return (result.rows || []).map(row => ({
+        fileNo: row.FILE_NO,
+        blockNo: row.BLOCK_NO,
+        objectNo: row.OBJECT_NO,
+        rowsInBlock: 1,
+        minId: row.N1,
+        maxId: row.N1,
+        n1: row.N1,
+        v1Length: row.V1_LENGTH,
+        resourceName: `[0x${Number(row.BLOCK_NO).toString(16)}][0x${Number(row.FILE_NO).toString(16)}],[BL]`
+      }));
+    }
+
     if (objectProfile === 'customer-file') {
       const result = await db.execute(`
         SELECT
@@ -379,9 +438,14 @@ class GcAcquireReleaseEngine {
     const totalWorkers = config.mode === 'two-instance'
       ? config.workersInstance1 + config.workersInstance2
       : config.workers;
-    if (totalWorkers < 1) throw new Error('At least one worker is required');
+    if (totalWorkers < 1 && config.workloadShape !== 'manual-lgnn-hang') {
+      throw new Error('At least one worker is required');
+    }
 
-    await db.execute(`SELECT COUNT(*) AS CNT FROM ${config.objectProfile === 'customer-file' ? CUSTOMER_TABLE : LAB_TABLE}`);
+    const targetTable = config.workloadShape === 'manual-lgnn-hang'
+      ? NOTE_REPRO_TABLE
+      : this.getTableNameForProfile(config.objectProfile);
+    await db.execute(`SELECT COUNT(*) AS CNT FROM ${targetTable}`);
 
     if (this.isRunning) {
       if (!config.killExistingSessions) {
@@ -419,9 +483,14 @@ class GcAcquireReleaseEngine {
     );
 
     try {
-      this.addLog(`Starting ${config.mode} ${config.workloadShape} acquire/release workload with ${totalWorkers} worker(s)`);
+      const runLabel = config.workloadShape === 'manual-lgnn-hang'
+        ? '4 staged note repro session(s)'
+        : `${totalWorkers} worker(s)`;
+      this.addLog(`Starting ${config.mode} ${config.workloadShape} acquire/release workload with ${runLabel}`);
 
-      if (config.mode === 'two-instance') {
+      if (config.workloadShape === 'manual-lgnn-hang') {
+        await this.startManualLgnnRepro(config);
+      } else if (config.mode === 'two-instance') {
         const pool1 = await this.createWorkerPool(Math.max(config.workersInstance1, 1), config.instance1ConnectionString);
         const pool2 = await this.createWorkerPool(Math.max(config.workersInstance2, 1), config.instance2ConnectionString);
         for (let i = 0; i < config.workersInstance1; i++) {
@@ -544,6 +613,78 @@ class GcAcquireReleaseEngine {
       recordValue,
       recordLength
     };
+  }
+
+  async startManualLgnnRepro(config) {
+    if (!config.instance1ConnectionString || !config.instance2ConnectionString) {
+      throw new Error('Manual LGNN hang repro requires instance 1/master and instance 2/non-master connection strings.');
+    }
+
+    const masterPool = await this.createWorkerPool(3, config.instance1ConnectionString);
+    const nonMasterPool = await this.createWorkerPool(2, config.instance2ConnectionString);
+    const delay = config.manualStepDelayMs;
+
+    this.addLog('Manual repro assumes instance-1 is the master/owner node and LGNN is already stopped there', 'warn');
+    this.workers.push(this.runManualNoteSession(masterPool, 'note-holder-log-file-sync-n100', 100, true));
+
+    this.workers.push((async () => {
+      await sleep(delay);
+      return this.runManualNoteSession(nonMasterPool, 'note-nonmaster-gc-current-n99', 99, false);
+    })());
+
+    this.workers.push((async () => {
+      await sleep(delay * 2);
+      return this.runManualNoteSession(masterPool, 'note-master-gc-buffer-busy-acquire-n98', 98, false);
+    })());
+
+    this.workers.push((async () => {
+      await sleep(delay * 3);
+      return this.runManualNoteSession(nonMasterPool, 'note-nonmaster-gc-buffer-busy-release-n97', 97, false);
+    })());
+  }
+
+  async runManualNoteSession(pool, action, n1, commitAfterUpdate) {
+    let connection;
+
+    try {
+      connection = await pool.getConnection();
+      await connection.execute(
+        `BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, :actionName); END;`,
+        { moduleName: MODULE_NAME, actionName: action }
+      );
+      this.addLog(`${action}: updating T_TEST n1=${n1}`);
+
+      await connection.execute(
+        `UPDATE ${NOTE_REPRO_TABLE} SET v1 = :value WHERE n1 = :n1`,
+        { value: `test_n1_${n1}`, n1 },
+        { autoCommit: false }
+      );
+      this.stats.completedLoops += 1;
+
+      if (commitAfterUpdate) {
+        this.addLog(`${action}: update complete; committing. If LGNN is stopped this session should wait on log file sync.`);
+        await connection.commit();
+        this.stats.commits += 1;
+      } else {
+        this.addLog(`${action}: update returned; holding transaction open for monitor visibility.`);
+        while (this.isRunning) {
+          await sleep(1000);
+        }
+      }
+    } catch (err) {
+      this.stats.errors += 1;
+      this.addLog(`${action} failed: ${err.message}`, 'error');
+    } finally {
+      if (connection) {
+        try {
+          await connection.rollback();
+          await connection.execute(`BEGIN DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); END;`);
+          await connection.close();
+        } catch (closeErr) {
+          // Stop may kill hung sessions before the client can close them cleanly.
+        }
+      }
+    }
   }
 
   async executeInsertHotIndex(connection, workerIndex, completed) {
@@ -896,7 +1037,7 @@ class GcAcquireReleaseEngine {
     if (this.isRunning) {
       await this.stop({ kill: true, drainSeconds: 5 });
     }
-    const tables = [CUSTOMER_TABLE, LAB_TABLE];
+    const tables = [NOTE_REPRO_TABLE, CUSTOMER_TABLE, LAB_TABLE];
     let dropped = false;
     try {
       for (const tableName of tables) {
@@ -913,7 +1054,7 @@ class GcAcquireReleaseEngine {
       throw err;
     } finally {
       if (!dropped) {
-        this.addLog(`${CUSTOMER_TABLE} and ${LAB_TABLE} were not present`);
+        this.addLog(`${NOTE_REPRO_TABLE}, ${CUSTOMER_TABLE}, and ${LAB_TABLE} were not present`);
       }
       this.emitStatus();
     }

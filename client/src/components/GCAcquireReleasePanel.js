@@ -93,6 +93,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     remotePrimerConnectionString: '',
     remotePrimerSessions: 4,
     remotePrimerThinkMs: 10,
+    manualStepDelayMs: 3000,
     monitorRefreshMs: 2000,
     killExistingSessions: true
   });
@@ -255,6 +256,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     const result = await runAction('Setup Lab', '/gc-acquire-release/setup', {
       rowCount: config.rowCount,
       objectProfile: config.objectProfile,
+      workloadShape: config.workloadShape,
       tablespaceName: config.tablespaceName
     });
     if (result) {
@@ -326,6 +328,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
 
   const monitorRows = monitor || emptyMonitor;
   const running = !!status.isRunning;
+  const isManualRepro = config.workloadShape === 'manual-lgnn-hang';
   const hasVisibleLabSessions = (monitorRows.activeSessions || []).length > 0;
   const canRun = dbStatus.connected && !busy;
   const waitRows = useMemo(() => monitorRows.waitRows || [], [monitorRows.waitRows]);
@@ -520,7 +523,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         </div>
 
         <div className="gc-ar-help">
-          <strong>Customer file_@443</strong> creates the RAW key, SecureFile BLOB, virtual key1 expression, and key1 indexes from the customer shape. <strong>Standard lab rows</strong> keeps the older synthetic table.
+          <strong>Customer file_@443</strong> creates the RAW key, SecureFile BLOB, virtual key1 expression, and key1 indexes from the customer shape. <strong>Manual LGNN hang repro</strong> follows the note-style T_TEST flow as a separate test.
         </div>
 
         <div className="gc-ar-section">
@@ -550,29 +553,39 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
 
         <div className="gc-ar-section">
           <div className="gc-ar-section-title">Lab Setup</div>
-          <div className="form-group">
-            <label>Object profile</label>
-            <select value={config.objectProfile} onChange={(e) => updateConfig('objectProfile', e.target.value)}>
-              <option value="customer-file">Customer file_@443</option>
-              <option value="standard">Standard lab rows</option>
-            </select>
-          </div>
-          {config.objectProfile === 'customer-file' && (
-            <div className="form-group">
-              <label>Tablespace override</label>
-              <input
-                value={config.tablespaceName}
-                onChange={(e) => updateConfig('tablespaceName', e.target.value.toUpperCase().replace(/[^A-Z0-9_$#]/g, ''))}
-                placeholder="leave blank to use default tablespace"
-              />
+          {isManualRepro ? (
+            <div className="gc-ar-inline-note">
+              <div>Setup creates T_TEST with 300 rows, index T_TEST_N1, statistics, and shows rows 96-100 for same-block verification.</div>
+            </div>
+          ) : (
+            <>
+              <div className="form-group">
+                <label>Object profile</label>
+                <select value={config.objectProfile} onChange={(e) => updateConfig('objectProfile', e.target.value)}>
+                  <option value="customer-file">Customer file_@443</option>
+                  <option value="standard">Standard lab rows</option>
+                </select>
+              </div>
+              {config.objectProfile === 'customer-file' && (
+                <div className="form-group">
+                  <label>Tablespace override</label>
+                  <input
+                    value={config.tablespaceName}
+                    onChange={(e) => updateConfig('tablespaceName', e.target.value.toUpperCase().replace(/[^A-Z0-9_$#]/g, ''))}
+                    placeholder="leave blank to use default tablespace"
+                  />
+                </div>
+              )}
+            </>
+          )}
+          {!isManualRepro && (
+            <div className="form-row">
+              <div className="form-group">
+                <label>Seed rows / hot range max</label>
+                <input type="number" min="1" max="1000" value={config.rowCount} onChange={(e) => updateNumber('rowCount', e.target.value, 1, 1000)} />
+              </div>
             </div>
           )}
-          <div className="form-row">
-            <div className="form-group">
-              <label>Seed rows / hot range max</label>
-              <input type="number" min="1" max="1000" value={config.rowCount} onChange={(e) => updateNumber('rowCount', e.target.value, 1, 1000)} />
-            </div>
-          </div>
           <button className="btn btn-primary" disabled={!canRun || running} onClick={handleSetup}>
             Setup Lab
           </button>
@@ -580,8 +593,32 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
 
         <div className="gc-ar-section">
           <div className="gc-ar-section-title">Workload Mode</div>
+          <div className="form-group">
+            <label>Workload shape</label>
+            <select
+              value={config.workloadShape}
+              onChange={(e) => {
+                const nextShape = e.target.value;
+                setConfig(prev => ({
+                  ...prev,
+                  workloadShape: nextShape,
+                  mode: nextShape === 'manual-lgnn-hang' ? 'two-instance' : prev.mode
+                }));
+              }}
+              disabled={running}
+            >
+              <option value="insert-hot-index">Right-growing inserts</option>
+              <option value="update-hot-block">Hot-block updates</option>
+              <option value="manual-lgnn-hang">Manual LGNN hang repro</option>
+            </select>
+          </div>
+          {isManualRepro && (
+            <div className="gc-ar-warning">
+              Stop LGNN/LG processes on the master node before Start, then continue them after collecting evidence. The app only opens the database sessions.
+            </div>
+          )}
           <div className="gc-ar-segment">
-            <button className={config.mode === 'one-instance' ? 'active' : ''} onClick={() => updateConfig('mode', 'one-instance')} disabled={running}>One Instance Only</button>
+            <button className={config.mode === 'one-instance' ? 'active' : ''} onClick={() => updateConfig('mode', 'one-instance')} disabled={running || isManualRepro}>One Instance Only</button>
             <button className={config.mode === 'two-instance' ? 'active' : ''} onClick={() => updateConfig('mode', 'two-instance')} disabled={running}>Acquire vs Release</button>
           </div>
 
@@ -638,72 +675,84 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
           ) : (
             <>
               <div className="form-group">
-                <label>Instance 1 service connect string</label>
+                <label>{isManualRepro ? 'Master / owner node service connect string' : 'Instance 1 service connect string'}</label>
                 <input value={config.instance1ConnectionString} onChange={(e) => updateConfig('instance1ConnectionString', e.target.value)} />
               </div>
               <div className="form-group">
-                <label>Instance 2 service connect string</label>
+                <label>{isManualRepro ? 'Non-master node service connect string' : 'Instance 2 service connect string'}</label>
                 <input value={config.instance2ConnectionString} onChange={(e) => updateConfig('instance2ConnectionString', e.target.value)} />
               </div>
-              <div className="form-row">
-                <div className="form-group">
-                  <label>Workers inst 1</label>
-                  <input type="number" min="0" max="1000" value={config.workersInstance1} onChange={(e) => updateNumber('workersInstance1', e.target.value, 0, 1000)} />
+              {isManualRepro ? (
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Step delay ms</label>
+                    <input type="number" min="500" max="30000" value={config.manualStepDelayMs} onChange={(e) => updateNumber('manualStepDelayMs', e.target.value, 500, 30000)} />
+                  </div>
+                  <div className="form-group gc-ar-inline-note">
+                    <label>Session sequence</label>
+                    <div>n1=100 commit, n1=99 remote update, n1=98 master update, n1=97 remote update.</div>
+                  </div>
                 </div>
-                <div className="form-group">
-                  <label>Workers inst 2</label>
-                  <input type="number" min="0" max="1000" value={config.workersInstance2} onChange={(e) => updateNumber('workersInstance2', e.target.value, 0, 1000)} />
+              ) : (
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Workers inst 1</label>
+                    <input type="number" min="0" max="1000" value={config.workersInstance1} onChange={(e) => updateNumber('workersInstance1', e.target.value, 0, 1000)} />
+                  </div>
+                  <div className="form-group">
+                    <label>Workers inst 2</label>
+                    <input type="number" min="0" max="1000" value={config.workersInstance2} onChange={(e) => updateNumber('workersInstance2', e.target.value, 0, 1000)} />
+                  </div>
                 </div>
-              </div>
+              )}
             </>
           )}
 
           <div className="form-row">
-            <div className="form-group">
-              <label>Loops per worker</label>
-              <input type="number" min="1" max="1000000" value={config.loopsPerWorker} onChange={(e) => updateNumber('loopsPerWorker', e.target.value, 1, 1000000)} />
-            </div>
+            {!isManualRepro && (
+              <div className="form-group">
+                <label>Loops per worker</label>
+                <input type="number" min="1" max="1000000" value={config.loopsPerWorker} onChange={(e) => updateNumber('loopsPerWorker', e.target.value, 1, 1000000)} />
+              </div>
+            )}
             <div className="form-group">
               <label>Refresh ms</label>
               <input type="number" min="1000" max="30000" value={config.monitorRefreshMs} onChange={(e) => updateNumber('monitorRefreshMs', e.target.value, 1000, 30000)} />
             </div>
           </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Workload shape</label>
-              <select value={config.workloadShape} onChange={(e) => updateConfig('workloadShape', e.target.value)}>
-                <option value="insert-hot-index">Right-growing inserts</option>
-                <option value="update-hot-block">Hot-block updates</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>Row target mode</label>
-              <select value={config.rowTargetMode} onChange={(e) => updateConfig('rowTargetMode', e.target.value)}>
-                <option value="spread">Spread across hot rows</option>
-                <option value="random">Random hot rows</option>
-              </select>
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Commit every N loops</label>
-              <input type="number" min="1" max="10000" value={config.commitEvery} onChange={(e) => updateNumber('commitEvery', e.target.value, 1, 10000)} />
-            </div>
-            <div className="form-group gc-ar-inline-note">
-              <label>GC wait tip</label>
-              <div>{config.objectProfile === 'customer-file' ? 'Use right-growing inserts to stress the customer RAW key and key1 index path.' : 'Use two-instance mode plus right-growing inserts for the strongest GC busy signal.'}</div>
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Hot row min</label>
-              <input type="number" min="1" max={config.rowCount} value={config.hotRowMin} onChange={(e) => updateNumber('hotRowMin', e.target.value, 1, config.rowCount)} />
-            </div>
-            <div className="form-group">
-              <label>Hot row max</label>
-              <input type="number" min={config.hotRowMin} max={config.rowCount} value={config.hotRowMax} onChange={(e) => updateNumber('hotRowMax', e.target.value, config.hotRowMin, config.rowCount)} />
-            </div>
-          </div>
+          {!isManualRepro && (
+            <>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Row target mode</label>
+                  <select value={config.rowTargetMode} onChange={(e) => updateConfig('rowTargetMode', e.target.value)}>
+                    <option value="spread">Spread across hot rows</option>
+                    <option value="random">Random hot rows</option>
+                  </select>
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Commit every N loops</label>
+                  <input type="number" min="1" max="10000" value={config.commitEvery} onChange={(e) => updateNumber('commitEvery', e.target.value, 1, 10000)} />
+                </div>
+                <div className="form-group gc-ar-inline-note">
+                  <label>GC wait tip</label>
+                  <div>{config.objectProfile === 'customer-file' ? 'Use right-growing inserts to stress the customer RAW key and key1 index path.' : 'Use two-instance mode plus right-growing inserts for the strongest GC busy signal.'}</div>
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Hot row min</label>
+                  <input type="number" min="1" max={config.rowCount} value={config.hotRowMin} onChange={(e) => updateNumber('hotRowMin', e.target.value, 1, config.rowCount)} />
+                </div>
+                <div className="form-group">
+                  <label>Hot row max</label>
+                  <input type="number" min={config.hotRowMin} max={config.rowCount} value={config.hotRowMax} onChange={(e) => updateNumber('hotRowMax', e.target.value, config.hotRowMin, config.rowCount)} />
+                </div>
+              </div>
+            </>
+          )}
 
           <label className="gc-ar-confirm">
             <input type="checkbox" checked={confirmLaunch} onChange={(e) => setConfirmLaunch(e.target.checked)} />
@@ -718,8 +767,8 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             Stop existing DBSTRESS_GC_AR sessions before starting.
           </label>
           <div className="gc-ar-actions">
-            <button className="btn btn-success" disabled={!canRun || running || totalWorkers < 1} onClick={handleStart}>
-              {config.mode === 'one-instance' ? 'Start One-Instance Workload' : 'Start Two-Instance Workload'}
+            <button className="btn btn-success" disabled={!canRun || running || (!isManualRepro && totalWorkers < 1)} onClick={handleStart}>
+              {isManualRepro ? 'Start Manual Repro Sessions' : config.mode === 'one-instance' ? 'Start One-Instance Workload' : 'Start Two-Instance Workload'}
             </button>
             <button className="btn btn-danger" disabled={(!running && !hasVisibleLabSessions) || !!busy} onClick={handleStop}>
               {running ? 'Stop Workload' : 'Stop Existing Sessions'}
@@ -766,8 +815,10 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                 <table className="gc-ar-table compact">
                   <thead>
                     <tr>
+                      {isManualRepro && <th>N1</th>}
                       <th>FILE#</th>
                       <th>BLOCK#</th>
+                      {isManualRepro && <th>RESOURCE</th>}
                       <th>ROWS</th>
                       <th>MIN_ID</th>
                       <th>MAX_ID</th>
@@ -775,9 +826,11 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                   </thead>
                   <tbody>
                     {setupRows.map(row => (
-                      <tr key={`${row.fileNo}-${row.blockNo}`}>
+                      <tr key={`${row.fileNo}-${row.blockNo}-${row.n1 || row.minId || row.maxId}`}>
+                        {isManualRepro && <td>{row.n1}</td>}
                         <td>{row.fileNo}</td>
                         <td>{row.blockNo}</td>
+                        {isManualRepro && <td>{row.resourceName || '-'}</td>}
                         <td>{row.rowsInBlock}</td>
                         <td>{row.minId}</td>
                         <td>{row.maxId}</td>
