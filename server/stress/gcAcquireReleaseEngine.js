@@ -620,27 +620,82 @@ class GcAcquireReleaseEngine {
       throw new Error('Manual LGNN hang repro requires instance 1/master and instance 2/non-master connection strings.');
     }
 
-    const masterPool = await this.createWorkerPool(3, config.instance1ConnectionString);
-    const nonMasterPool = await this.createWorkerPool(2, config.instance2ConnectionString);
+    const masterWaiters = clamp(config.workersInstance1, 0, 100, 1);
+    const nonMasterWaiters = clamp(config.workersInstance2, 0, 100, 1);
+    const targetRows = await this.getNoteReproSameBlockRows(100, 2 + masterWaiters + nonMasterWaiters);
+    const holderN1 = 100;
+    const currentN1 = targetRows.find(n1 => n1 !== holderN1) || 99;
+    const remainingRows = targetRows.filter(n1 => ![holderN1, currentN1].includes(n1));
+    const masterRows = remainingRows.slice(0, masterWaiters);
+    const nonMasterRows = remainingRows.slice(masterWaiters, masterWaiters + nonMasterWaiters);
+    const neededRows = 2 + masterWaiters + nonMasterWaiters;
+
+    if (targetRows.length < neededRows) {
+      this.addLog(`Manual repro found ${targetRows.length} same-block T_TEST rows for ${neededRows} requested sessions; reduce worker counts if row-lock waits appear`, 'warn');
+    }
+
+    const masterPool = await this.createWorkerPool(Math.max(1 + masterRows.length, 1), config.instance1ConnectionString);
+    const nonMasterPool = await this.createWorkerPool(Math.max(1 + nonMasterRows.length, 1), config.instance2ConnectionString);
     const delay = config.manualStepDelayMs;
 
     this.addLog('Manual repro assumes instance-1 is the master/owner node and LGNN is already stopped there', 'warn');
-    this.workers.push(this.runManualNoteSession(masterPool, 'note-holder-log-file-sync-n100', 100, true));
+    this.addLog(`Manual repro starting holder n1=${holderN1}, current-request n1=${currentN1}, master waiters=${masterRows.length}, non-master waiters=${nonMasterRows.length}`);
+    this.workers.push(this.runManualNoteSession(masterPool, `note-holder-log-file-sync-n${holderN1}`, holderN1, true));
 
     this.workers.push((async () => {
       await sleep(delay);
-      return this.runManualNoteSession(nonMasterPool, 'note-nonmaster-gc-current-n99', 99, false);
+      return this.runManualNoteSession(nonMasterPool, `note-nonmaster-gc-current-n${currentN1}`, currentN1, false);
     })());
 
-    this.workers.push((async () => {
-      await sleep(delay * 2);
-      return this.runManualNoteSession(masterPool, 'note-master-gc-buffer-busy-acquire-n98', 98, false);
-    })());
+    masterRows.forEach((n1, index) => {
+      this.workers.push((async () => {
+        await sleep(delay * (2 + index));
+        return this.runManualNoteSession(masterPool, `note-master-gc-buffer-busy-acquire-n${n1}`, n1, false);
+      })());
+    });
 
-    this.workers.push((async () => {
-      await sleep(delay * 3);
-      return this.runManualNoteSession(nonMasterPool, 'note-nonmaster-gc-buffer-busy-release-n97', 97, false);
-    })());
+    nonMasterRows.forEach((n1, index) => {
+      this.workers.push((async () => {
+        await sleep(delay * (2 + masterRows.length + index));
+        return this.runManualNoteSession(nonMasterPool, `note-nonmaster-gc-buffer-busy-release-n${n1}`, n1, false);
+      })());
+    });
+  }
+
+  async getNoteReproSameBlockRows(anchorN1 = 100, limit = 20) {
+    const result = await this.db.execute(
+      `
+        WITH anchor AS (
+          SELECT
+            DBMS_ROWID.ROWID_RELATIVE_FNO(rowid) AS file_no,
+            DBMS_ROWID.ROWID_BLOCK_NUMBER(rowid) AS block_no
+          FROM ${NOTE_REPRO_TABLE}
+          WHERE n1 = :anchorN1
+        )
+        SELECT n1
+        FROM (
+          SELECT t.n1
+          FROM ${NOTE_REPRO_TABLE} t
+          CROSS JOIN anchor a
+          WHERE DBMS_ROWID.ROWID_RELATIVE_FNO(t.rowid) = a.file_no
+            AND DBMS_ROWID.ROWID_BLOCK_NUMBER(t.rowid) = a.block_no
+          ORDER BY
+            CASE t.n1
+              WHEN 100 THEN 0
+              WHEN 99 THEN 1
+              WHEN 98 THEN 2
+              WHEN 97 THEN 3
+              WHEN 96 THEN 4
+              ELSE 5
+            END,
+            t.n1 DESC
+        )
+        WHERE ROWNUM <= :rowLimit
+      `,
+      { anchorN1, rowLimit: limit }
+    );
+
+    return (result.rows || []).map(row => row.N1);
   }
 
   async runManualNoteSession(pool, action, n1, commitAfterUpdate) {

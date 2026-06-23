@@ -602,7 +602,9 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                 setConfig(prev => ({
                   ...prev,
                   workloadShape: nextShape,
-                  mode: nextShape === 'manual-lgnn-hang' ? 'two-instance' : prev.mode
+                  mode: nextShape === 'manual-lgnn-hang' ? 'two-instance' : prev.mode,
+                  workersInstance1: nextShape === 'manual-lgnn-hang' ? 1 : prev.workersInstance1,
+                  workersInstance2: nextShape === 'manual-lgnn-hang' ? 1 : prev.workersInstance2
                 }));
               }}
               disabled={running}
@@ -683,16 +685,28 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                 <input value={config.instance2ConnectionString} onChange={(e) => updateConfig('instance2ConnectionString', e.target.value)} />
               </div>
               {isManualRepro ? (
-                <div className="form-row">
-                  <div className="form-group">
-                    <label>Step delay ms</label>
-                    <input type="number" min="500" max="30000" value={config.manualStepDelayMs} onChange={(e) => updateNumber('manualStepDelayMs', e.target.value, 500, 30000)} />
+                <>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Workers inst 1</label>
+                      <input type="number" min="0" max="100" value={config.workersInstance1} onChange={(e) => updateNumber('workersInstance1', e.target.value, 0, 100)} />
+                    </div>
+                    <div className="form-group">
+                      <label>Workers inst 2</label>
+                      <input type="number" min="0" max="100" value={config.workersInstance2} onChange={(e) => updateNumber('workersInstance2', e.target.value, 0, 100)} />
+                    </div>
                   </div>
-                  <div className="form-group gc-ar-inline-note">
-                    <label>Session sequence</label>
-                    <div>n1=100 commit, n1=99 remote update, n1=98 master update, n1=97 remote update.</div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Step delay ms</label>
+                      <input type="number" min="500" max="30000" value={config.manualStepDelayMs} onChange={(e) => updateNumber('manualStepDelayMs', e.target.value, 500, 30000)} />
+                    </div>
+                    <div className="form-group gc-ar-inline-note">
+                      <label>Session sequence</label>
+                      <div>One holder plus one current-request session; worker counts add acquire/release waiters on same-block rows.</div>
+                    </div>
                   </div>
-                </div>
+                </>
               ) : (
                 <div className="form-row">
                   <div className="form-group">
