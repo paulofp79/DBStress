@@ -82,6 +82,8 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     workersInstance2: 25,
     loopsPerWorker: 20000,
     commitEvery: 1,
+    objectProfile: 'customer-file',
+    tablespaceName: '',
     rowCount: 128,
     hotRowMin: 1,
     hotRowMax: 128,
@@ -250,7 +252,11 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   };
 
   const handleSetup = async () => {
-    const result = await runAction('Setup Lab', '/gc-acquire-release/setup', { rowCount: config.rowCount });
+    const result = await runAction('Setup Lab', '/gc-acquire-release/setup', {
+      rowCount: config.rowCount,
+      objectProfile: config.objectProfile,
+      tablespaceName: config.tablespaceName
+    });
     if (result) {
       const distribution = result.distribution || [];
       setSetupRows(distribution);
@@ -514,7 +520,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         </div>
 
         <div className="gc-ar-help">
-          <strong>Right-growing inserts</strong> model the RAC hot-index pattern from sequence keys and compact index leaf blocks. <strong>Hot-block updates</strong> model frequent updates to rows in the same block, but can be masked by row locks.
+          <strong>Customer file_@443</strong> creates the RAW key, SecureFile BLOB, virtual key1 expression, and key1 indexes from the customer shape. <strong>Standard lab rows</strong> keeps the older synthetic table.
         </div>
 
         <div className="gc-ar-section">
@@ -544,9 +550,26 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
 
         <div className="gc-ar-section">
           <div className="gc-ar-section-title">Lab Setup</div>
+          <div className="form-group">
+            <label>Object profile</label>
+            <select value={config.objectProfile} onChange={(e) => updateConfig('objectProfile', e.target.value)}>
+              <option value="customer-file">Customer file_@443</option>
+              <option value="standard">Standard lab rows</option>
+            </select>
+          </div>
+          {config.objectProfile === 'customer-file' && (
+            <div className="form-group">
+              <label>Tablespace override</label>
+              <input
+                value={config.tablespaceName}
+                onChange={(e) => updateConfig('tablespaceName', e.target.value.toUpperCase().replace(/[^A-Z0-9_$#]/g, ''))}
+                placeholder="leave blank to use default tablespace"
+              />
+            </div>
+          )}
           <div className="form-row">
             <div className="form-group">
-              <label>Row count / hot range max</label>
+              <label>Seed rows / hot range max</label>
               <input type="number" min="1" max="1000" value={config.rowCount} onChange={(e) => updateNumber('rowCount', e.target.value, 1, 1000)} />
             </div>
           </div>
@@ -608,7 +631,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                 </div>
                 <div className="form-group gc-ar-inline-note">
                   <label>Target shape</label>
-                  <div>Use spread mode and commit every 1 to reduce row-lock masking.</div>
+                  <div>{config.objectProfile === 'customer-file' ? 'Customer mode inserts RAW keys and SecureFile BLOB records.' : 'Use spread mode and commit every 1 to reduce row-lock masking.'}</div>
                 </div>
               </div>
             </>
@@ -668,7 +691,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             </div>
             <div className="form-group gc-ar-inline-note">
               <label>GC wait tip</label>
-              <div>Use two-instance mode plus right-growing inserts for the strongest GC busy signal.</div>
+              <div>{config.objectProfile === 'customer-file' ? 'Use right-growing inserts to stress the customer RAW key and key1 index path.' : 'Use two-instance mode plus right-growing inserts for the strongest GC busy signal.'}</div>
             </div>
           </div>
           <div className="form-row">

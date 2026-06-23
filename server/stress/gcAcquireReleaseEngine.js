@@ -1,6 +1,7 @@
 const oracledb = require('oracledb');
 
 const LAB_TABLE = 'GC_AR_ROWS';
+const CUSTOMER_TABLE = '"file_@443"';
 const MODULE_NAME = 'DBSTRESS_GC_AR';
 const EVENTS = [
   'gc buffer busy acquire',
@@ -19,6 +20,12 @@ const clamp = (value, min, max, fallback) => {
 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const sanitizeTablespace = (value = '') => String(value || '')
+  .trim()
+  .toUpperCase()
+  .replace(/[^A-Z0-9_$#]/g, '')
+  .slice(0, 128);
 
 class GcAcquireReleaseEngine {
   constructor() {
@@ -68,6 +75,9 @@ class GcAcquireReleaseEngine {
     const workloadShape = incoming.workloadShape === 'update-hot-block'
       ? 'update-hot-block'
       : 'insert-hot-index';
+    const objectProfile = incoming.objectProfile === 'customer-file'
+      ? 'customer-file'
+      : 'standard';
     const base = {
       mode,
       loopsPerWorker: clamp(incoming.loopsPerWorker, 1, 1000000, 20000),
@@ -77,6 +87,8 @@ class GcAcquireReleaseEngine {
       hotRowMax,
       rowTargetMode: incoming.rowTargetMode === 'random' ? 'random' : 'spread',
       workloadShape,
+      objectProfile,
+      tablespaceName: sanitizeTablespace(incoming.tablespaceName),
       remotePrimerEnabled: incoming.remotePrimerEnabled === true,
       remotePrimerConnectionString: String(incoming.remotePrimerConnectionString || '').trim(),
       remotePrimerSessions: clamp(incoming.remotePrimerSessions, 0, 100, 4),
@@ -146,59 +158,186 @@ class GcAcquireReleaseEngine {
     if (this.isSettingUp) throw new Error('Setup is already running');
     this.isSettingUp = true;
     const rowCount = clamp(options.rowCount, 1, 1000, 128);
+    const objectProfile = options.objectProfile === 'customer-file' ? 'customer-file' : 'standard';
 
     try {
-      this.addLog(`Setting up ${LAB_TABLE} with ${rowCount} hot rows`);
-      try {
-        await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
-      } catch (err) {
-        if (!String(err.message).includes('ORA-00942')) throw err;
+      this.addLog(`Setting up ${objectProfile === 'customer-file' ? CUSTOMER_TABLE : LAB_TABLE} with ${rowCount} seed rows`);
+
+      if (objectProfile === 'customer-file') {
+        await this.setupCustomerFileTable(db, rowCount, options);
+      } else {
+        await this.setupStandardTable(db, rowCount);
       }
 
-      await db.execute(`
-        CREATE TABLE ${LAB_TABLE} (
-          id NUMBER NOT NULL,
-          pad VARCHAR2(100),
-          counter NUMBER DEFAULT 0,
-          session_bucket NUMBER,
-          request_id NUMBER,
-          updated_at TIMESTAMP DEFAULT SYSTIMESTAMP,
-          CONSTRAINT GC_AR_ROWS_PK PRIMARY KEY (id)
-        ) INITRANS 1 PCTFREE 0
-      `);
-
-      await db.execute(
-        `
-          INSERT INTO ${LAB_TABLE} (id, pad, counter, session_bucket, request_id)
-          SELECT LEVEL, RPAD('X', 100, 'X'), 0, MOD(LEVEL, 100), LEVEL
-          FROM dual
-          CONNECT BY LEVEL <= :rowCount
-        `,
-        { rowCount }
-      );
-
-      await db.execute(`
-        CREATE INDEX GC_AR_REQ_IX ON ${LAB_TABLE}(request_id)
-        INITRANS 1 PCTFREE 0
-      `);
-
-      await db.execute(`
-        CREATE INDEX GC_AR_BUCKET_IX ON ${LAB_TABLE}(session_bucket)
-        INITRANS 1 PCTFREE 0
-      `);
-
-      await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '${LAB_TABLE}'); END;`);
-      const distribution = await this.getBlockDistribution(db);
+      const distribution = await this.getBlockDistribution(db, objectProfile);
       this.addLog(`Setup complete; found ${distribution.length} file/block group(s)`);
-      return { tableName: LAB_TABLE, rowCount, distribution };
+      return {
+        tableName: objectProfile === 'customer-file' ? CUSTOMER_TABLE : LAB_TABLE,
+        objectProfile,
+        rowCount,
+        distribution
+      };
     } finally {
       this.isSettingUp = false;
       this.emitStatus();
     }
   }
 
-  async getBlockDistribution(dbRef = null) {
+  async setupStandardTable(db, rowCount) {
+    try {
+      await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
+    } catch (err) {
+      if (!String(err.message).includes('ORA-00942')) throw err;
+    }
+
+    await db.execute(`
+      CREATE TABLE ${LAB_TABLE} (
+        id NUMBER NOT NULL,
+        pad VARCHAR2(100),
+        counter NUMBER DEFAULT 0,
+        session_bucket NUMBER,
+        request_id NUMBER,
+        updated_at TIMESTAMP DEFAULT SYSTIMESTAMP,
+        CONSTRAINT GC_AR_ROWS_PK PRIMARY KEY (id)
+      ) INITRANS 1 PCTFREE 0
+    `);
+
+    await db.execute(
+      `
+        INSERT INTO ${LAB_TABLE} (id, pad, counter, session_bucket, request_id)
+        SELECT LEVEL, RPAD('X', 100, 'X'), 0, MOD(LEVEL, 100), LEVEL
+        FROM dual
+        CONNECT BY LEVEL <= :rowCount
+      `,
+      { rowCount }
+    );
+
+    await db.execute(`
+      CREATE INDEX GC_AR_REQ_IX ON ${LAB_TABLE}(request_id)
+      INITRANS 1 PCTFREE 0
+    `);
+
+    await db.execute(`
+      CREATE INDEX GC_AR_BUCKET_IX ON ${LAB_TABLE}(session_bucket)
+      INITRANS 1 PCTFREE 0
+    `);
+
+    await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '${LAB_TABLE}'); END;`);
+  }
+
+  async setupCustomerFileTable(db, rowCount, options = {}) {
+    const tablespace = sanitizeTablespace(options.tablespaceName);
+    const tableTablespace = tablespace ? ` TABLESPACE "${tablespace}"` : '';
+    const lobTablespace = tablespace ? ` TABLESPACE "${tablespace}"` : '';
+
+    try {
+      await db.execute(`DROP TABLE ${CUSTOMER_TABLE} PURGE`);
+    } catch (err) {
+      if (!String(err.message).includes('ORA-00942')) throw err;
+    }
+
+    await db.execute(`
+      CREATE TABLE ${CUSTOMER_TABLE}
+      (
+        "Key" RAW(52),
+        "Record" BLOB,
+        "RecordLength" NUMBER(10,0),
+        "key1" RAW(260) GENERATED ALWAYS AS
+          (CAST("SYS"."DBMS_LOB"."SUBSTR"("Record",260,53) AS RAW(260))) VIRTUAL
+      )
+      SEGMENT CREATION IMMEDIATE
+      PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255
+      NOCOMPRESS LOGGING${tableTablespace}
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      LOB ("Record") STORE AS SECUREFILE (
+        ${lobTablespace} ENABLE STORAGE IN ROW CHUNK 8192
+        NOCACHE LOGGING NOCOMPRESS KEEP_DUPLICATES
+        STORAGE(INITIAL 106496 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+          PCTINCREASE 0
+          BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      )
+    `);
+
+    await db.execute(`
+      CREATE UNIQUE INDEX "SYS_C0010790" ON ${CUSTOMER_TABLE} ("Key")
+      PCTFREE 10 INITRANS 2 MAXTRANS 255${tableTablespace}
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+    `);
+
+    await db.execute(`
+      CREATE INDEX "file_@443_key1_Key_IDX" ON ${CUSTOMER_TABLE} ("key1", "Key")
+      PCTFREE 10 INITRANS 2 MAXTRANS 255${tableTablespace}
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+    `);
+
+    await db.execute(`
+      CREATE INDEX "file_@443_key1_IDX" ON ${CUSTOMER_TABLE} ("key1")
+      PCTFREE 10 INITRANS 2 MAXTRANS 255${tableTablespace}
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+    `);
+
+    await db.execute(`
+      ALTER TABLE ${CUSTOMER_TABLE}
+      ADD PRIMARY KEY ("Key")
+      USING INDEX "SYS_C0010790"
+      ENABLE
+    `);
+
+    const rows = [];
+    for (let i = 1; i <= rowCount; i++) {
+      rows.push(this.buildCustomerBind(i, i % 100, 512));
+    }
+
+    await db.executeMany(
+      `
+        INSERT INTO ${CUSTOMER_TABLE} ("Key", "Record", "RecordLength")
+        VALUES (:keyValue, :recordValue, :recordLength)
+      `,
+      rows,
+      {
+        bindDefs: {
+          keyValue: { type: oracledb.BUFFER, maxSize: 52 },
+          recordValue: { type: oracledb.BUFFER, maxSize: 512 },
+          recordLength: { type: oracledb.NUMBER }
+        }
+      }
+    );
+
+    await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, 'file_@443'); END;`);
+  }
+
+  async getBlockDistribution(dbRef = null, objectProfile = this.config?.objectProfile || 'standard') {
     const db = dbRef || this.db;
+    if (objectProfile === 'customer-file') {
+      const result = await db.execute(`
+        SELECT
+          DBMS_ROWID.ROWID_RELATIVE_FNO(rowid) AS file_no,
+          DBMS_ROWID.ROWID_BLOCK_NUMBER(rowid) AS block_no,
+          COUNT(*) AS rows_in_block
+        FROM ${CUSTOMER_TABLE}
+        GROUP BY
+          DBMS_ROWID.ROWID_RELATIVE_FNO(rowid),
+          DBMS_ROWID.ROWID_BLOCK_NUMBER(rowid)
+        ORDER BY rows_in_block DESC, file_no, block_no
+      `);
+
+      return (result.rows || []).map(row => ({
+        fileNo: row.FILE_NO,
+        blockNo: row.BLOCK_NO,
+        rowsInBlock: row.ROWS_IN_BLOCK,
+        minId: null,
+        maxId: null
+      }));
+    }
+
     const result = await db.execute(`
       SELECT
         DBMS_ROWID.ROWID_RELATIVE_FNO(rowid) AS file_no,
@@ -242,7 +381,7 @@ class GcAcquireReleaseEngine {
       : config.workers;
     if (totalWorkers < 1) throw new Error('At least one worker is required');
 
-    await db.execute(`SELECT COUNT(*) AS CNT FROM ${LAB_TABLE}`);
+    await db.execute(`SELECT COUNT(*) AS CNT FROM ${config.objectProfile === 'customer-file' ? CUSTOMER_TABLE : LAB_TABLE}`);
 
     if (this.isRunning) {
       if (!config.killExistingSessions) {
@@ -391,8 +530,36 @@ class GcAcquireReleaseEngine {
     return this.nextInsertId;
   }
 
+  buildCustomerBind(id, bucket = 0, recordLength = 512) {
+    const keyValue = Buffer.alloc(52);
+    keyValue.writeBigUInt64BE(BigInt(id), 44);
+
+    const recordValue = Buffer.alloc(recordLength, 0);
+    const key1 = Buffer.alloc(260, bucket % 256);
+    key1.copy(recordValue, 52);
+    recordValue.writeUInt32BE(id >>> 0, 0);
+
+    return {
+      keyValue,
+      recordValue,
+      recordLength
+    };
+  }
+
   async executeInsertHotIndex(connection, workerIndex, completed) {
     const nextId = this.getNextInsertId();
+    if (this.config.objectProfile === 'customer-file') {
+      const bind = this.buildCustomerBind(nextId, workerIndex % 8, 512);
+      await connection.execute(
+        `
+          INSERT INTO ${CUSTOMER_TABLE} ("Key", "Record", "RecordLength")
+          VALUES (:keyValue, :recordValue, :recordLength)
+        `,
+        bind,
+        { autoCommit: false }
+      );
+      return;
+    }
 
     await connection.execute(
       `
@@ -416,6 +583,22 @@ class GcAcquireReleaseEngine {
   }
 
   async executeUpdateHotBlock(connection, workerIndex, completed) {
+    if (this.config.objectProfile === 'customer-file') {
+      const targetId = this.getTargetId(workerIndex, completed);
+      const bind = this.buildCustomerBind(targetId, workerIndex % 8, 512);
+      await connection.execute(
+        `
+          UPDATE ${CUSTOMER_TABLE}
+          SET "Record" = :recordValue,
+              "RecordLength" = :recordLength
+          WHERE "Key" = :keyValue
+        `,
+        bind,
+        { autoCommit: false }
+      );
+      return;
+    }
+
     const targetId = this.getTargetId(workerIndex, completed);
     await connection.execute(
       `
@@ -713,16 +896,25 @@ class GcAcquireReleaseEngine {
     if (this.isRunning) {
       await this.stop({ kill: true, drainSeconds: 5 });
     }
+    const tables = [CUSTOMER_TABLE, LAB_TABLE];
+    let dropped = false;
     try {
-      await db.execute(`DROP TABLE ${LAB_TABLE} PURGE`);
-      this.addLog(`Dropped ${LAB_TABLE}`);
-      return { dropped: true };
-    } catch (err) {
-      if (String(err.message).includes('ORA-00942')) {
-        return { dropped: false, message: `${LAB_TABLE} did not exist` };
+      for (const tableName of tables) {
+        try {
+          await db.execute(`DROP TABLE ${tableName} PURGE`);
+          this.addLog(`Dropped ${tableName}`);
+          dropped = true;
+        } catch (err) {
+          if (!String(err.message).includes('ORA-00942')) throw err;
+        }
       }
+      return { dropped };
+    } catch (err) {
       throw err;
     } finally {
+      if (!dropped) {
+        this.addLog(`${CUSTOMER_TABLE} and ${LAB_TABLE} were not present`);
+      }
       this.emitStatus();
     }
   }
