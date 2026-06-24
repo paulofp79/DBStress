@@ -1,113 +1,100 @@
 # DBStress
 
-DBStress is an Oracle workload lab with two web applications in the same repository:
+DBStress is an Oracle workload lab for creating repeatable database pressure, watching the database while it is under load, and comparing behavior across schema, storage, optimizer, and RAC global-cache choices.
 
-- `DBStress` on port `3001`: the main React/Node.js application and launcher
-- `GC Benchmark` on port `8000`: the FastAPI-based Oracle RAC GC wait benchmark tool
+The repository contains two web applications:
 
-The repository also includes helper scripts to start and stop both services together and shell tooling for direct database-side GC wait observation.
+- **DBStress** on `http://localhost:3001`: the main React and Node.js application.
+- **GC Benchmark** on `http://localhost:8000`: a standalone FastAPI application focused on Oracle RAC Global Cache wait experiments.
 
-## What Is In This Repo
+The main application can also launch or embed the GC Benchmark tool, so the usual workflow is to start both services together from the repository root.
 
-### Main Applications
+## What This Tool Does
 
-#### 1. DBStress
+Use DBStress when you need to:
 
-`DBStress` is the original multi-tool Oracle stress testing application.
+- connect to an Oracle database and create/drop repeatable test schemas
+- run configurable mixed DML/SELECT stress workloads
+- drive multiple schemas at the same time for comparison runs
+- observe TPS, operation rates, sessions, top waits, and GC waits through the UI
+- reproduce specific contention patterns such as index hot blocks, library cache locks, high-water-mark contention, and GC congestion
+- compare optimizer statistics, skew, TDE encryption overhead, and datafile growth behavior
+- create and run Swingbench SOE-style schemas/workloads from the browser
+- generate wide-table insert/select storms with optional per-table BIGFILE tablespaces
+- run a separate RAC GC benchmark with stored results and comparisons
 
-Main UI tabs:
+This is a lab tool. It creates objects, opens concurrent sessions, can allocate storage, and can intentionally generate contention. Run it against disposable schemas or test databases unless you are deliberately diagnosing a controlled non-production environment.
 
-- `Home`
-- `Monitor`
-- `Stress Test`
-- `Index Contention Demo`
-- `Library Cache Lock Demo`
-- `HW Contention Demo`
-- `Stats Comparison`
-- `Skew Detection`
-- `Metric Explorer`
-- `TDE Comparison`
-- `GC Congestion Demo`
-- `GC Benchmark`
-
-#### 2. GC Benchmark
-
-`GC Benchmark` is the newer workload tool focused on Oracle RAC global cache waits.
-
-Main GC Benchmark tabs:
-
-- `Connection`
-- `Schema Setup`
-- `Run Workload`
-- `Results & Comparison`
-
-This is the tool used to:
-
-- create many benchmark tables
-- create indexed schemas for block and index hot-spot tests
-- compare partitioned and non-partitioned index behavior
-- run large concurrent workloads
-- observe GC waits in real time
-- compare completed runs across schema and workload variations
-
-## Repository Structure
+## Repository Layout
 
 ```text
 client/                         React frontend for DBStress
-server/                         Node.js backend for DBStress
-gc_benchmark/gc_benchmark/      FastAPI GC Benchmark application
-scripts/start-all.sh            Start DBStress and GC Benchmark
-scripts/status-all.sh           Show current service state and ports
-scripts/stop-all.sh             Stop DBStress and GC Benchmark
-scripts/gc-wait-live.sh         Shell tool to watch live GC wait avg ms from SQL*Plus
+server/                         Node.js/Express backend and Socket.IO server
+server/db/                      Oracle connection and schema/workload managers
+server/stress/                  Workload engines for the DBStress labs
+server/metrics/                 Oracle metric collection
+gc_benchmark/gc_benchmark/      FastAPI RAC GC Benchmark application
+swingbench/                     SOE DDL, package, Java, and workload assets
+scripts/start-all.sh            Build and start DBStress plus GC Benchmark
+scripts/status-all.sh           Show service status, ports, PIDs, and logs
+scripts/stop-all.sh             Stop both services
+scripts/gc-wait-live.sh         SQL*Plus live GC wait delta sampler
+scripts/datafile-growth.sh      Datafile growth helper
+scripts/insert-blast.sh         Insert Blast helper
 startall.sh                     Root wrapper for npm run start-all
 stopall.sh                      Root wrapper for npm run stop-all
-DATA/                           Local data samples and analysis artifacts
+DATA/                           Local analysis samples and artifacts
 ```
+
+Main entry points:
+
+- `server/index.js`
+- `client/src/App.js`
+- `gc_benchmark/gc_benchmark/main.py`
 
 ## Requirements
 
-### DBStress
+### Main DBStress App
 
-- Node.js `18+`
+- Node.js 18 or newer
+- npm
 - Oracle Database
-- Oracle Instant Client for the Node.js `oracledb` driver
+- Oracle Instant Client or another valid setup for the Node.js `oracledb` driver
+- an Oracle user that can create/drop the lab objects you choose to use
 
-### GC Benchmark
+Useful database privileges depend on the panel. The monitor and RAC-oriented panels query views such as `GV$SYSTEM_EVENT`, `GV$SESSION`, `GV$SYSSTAT`, `V$SEGMENT_STATISTICS`, and related dynamic performance views.
 
-- Python `3.10+`
+### GC Benchmark App
+
+- Python 3.10 or newer
 - `python-oracledb`
-- Oracle RAC recommended for meaningful GC waits
+- Oracle RAC for meaningful GC wait results
+- SELECT access to the dynamic performance views used by the benchmark
 
-If your machine does not have `python3` but does have `python3.12`, use `python3.12` explicitly.
+The bundled start script prefers `python3.12`, then `python3`, then `python`.
 
 ## Installation
 
-### DBStress dependencies
+From this repository root:
 
 ```bash
-cd /home/paportug/DBStress
 npm run install-all
 ```
 
-### GC Benchmark dependencies
+This installs the root backend dependencies and the React frontend dependencies.
 
-If you use the bundled start scripts, the GC Benchmark virtual environment is created automatically when needed.
-
-If you want to run GC Benchmark manually:
+The GC Benchmark virtual environment is created automatically by `npm run start-all` if it does not already exist. To prepare it manually:
 
 ```bash
-cd /home/paportug/DBStress/gc_benchmark/gc_benchmark
-python3.12 -m venv .venv
+cd /Users/pporacle/Documents/GitHub/DBStress/gc_benchmark/gc_benchmark
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Start And Stop
+## Start, Stop, And Status
 
-### Recommended: start both applications together
-
-From the repository root:
+Recommended startup:
 
 ```bash
 npm run start-all
@@ -115,500 +102,280 @@ npm run status-all
 npm run stop-all
 ```
 
-What they do:
+`npm run start-all` does the following:
 
-- `npm run start-all`
-  - builds the React frontend
-  - starts `DBStress` on `http://localhost:3001`
-  - starts `GC Benchmark` on `http://localhost:8000`
-- `npm run status-all`
-  - shows whether each service is running and its port
-- `npm run stop-all`
-  - stops both services
+- builds the React frontend
+- starts DBStress on `http://localhost:3001`
+- creates or refreshes the GC Benchmark virtual environment when needed
+- starts GC Benchmark on `http://localhost:8000`
+- writes PID files and logs under `.run/`
 
-### Root wrapper scripts
+Logs:
 
-You also have two short wrapper scripts in the repository root:
+```text
+.run/logs/dbstress.log
+.run/logs/gc-benchmark.log
+```
+
+Short wrappers are also available:
 
 ```bash
 ./startall.sh
 ./stopall.sh
 ```
 
-They simply run:
+### Run DBStress Only
 
-```bash
-npm run start-all
-npm run stop-all
-```
-
-Use them from `/home/paportug/DBStress` if you want shorter commands.
-
-### Run DBStress only
-
-Development mode:
+Development mode with backend and React dev server:
 
 ```bash
 npm run dev
 ```
 
-Or separately:
-
-```bash
-npm run server
-npm run client
-```
-
-Production-style start:
+Production-style local start:
 
 ```bash
 npm run build
 npm start
 ```
 
-Access DBStress at:
+The backend serves the built React app on port `3001`.
 
-```text
-http://localhost:3001
-```
-
-### Run GC Benchmark only
+### Run GC Benchmark Only
 
 ```bash
-cd /home/paportug/DBStress/gc_benchmark/gc_benchmark
+cd /Users/pporacle/Documents/GitHub/DBStress/gc_benchmark/gc_benchmark
 source .venv/bin/activate
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Access GC Benchmark at:
+Open `http://localhost:8000`.
 
-```text
-http://localhost:8000
-```
-
-## DBStress Tools
+## DBStress UI
 
 ### Home
 
-Acts as the launcher page for the full toolset and provides navigation to the DBStress tools and GC Benchmark.
+Launcher for the full toolset. It checks whether the main DBStress app and standalone GC Benchmark service are reachable and provides shortcuts into common tabs.
 
 ### Monitor
 
-Real-time environment monitoring from Oracle `GV$` views.
+Live database observation panel. It has its own connection panel and explicit start/stop controls. It can show:
 
-Current behavior:
+- transaction rate
+- response time
+- wait trends
+- top wait events
+- GC-only scoped waits
+- wait-class and event-name filters
 
-- starts and stops explicitly with buttons
-- keeps running even if you leave the tab until you click `Stop`
-- shows top wait events in real time
-- chart Y-axis is average wait in milliseconds
-- note: this tab shows cumulative avg wait since instance startup, so it is better for overall environment observation than for measuring one specific workload run
+The average wait shown here is cumulative since instance startup, so it is best for environment observation rather than measuring only one workload run.
 
 ### Stress Test
 
-The original general-purpose stress engine.
+The original general-purpose workload runner. It supports:
 
-Main functions:
-
-- connect to Oracle
-- create the online sales schema
-- run mixed DML stress tests
-- track TPS and DML rates
-- view wait events and GC waits while the test is active
-- save and reuse recent connection definitions
+- Oracle connection management
+- schema creation and drop
+- multiple schemas in a single run
+- configurable concurrent sessions per schema
+- configurable INSERT/UPDATE/DELETE/SELECT rates
+- think time
+- RAC hot-table mode
+- index-contention mode
+- live TPS, operation, wait-event, and GC-wait charts
 
 ### Index Contention Demo
 
-Tool for generating index hot-block behavior and observing index-related contention effects.
+Lab for generating index hot-block behavior. It can start and stop index contention workloads, change index strategy, change sequence cache behavior, and run sequence-cache A/B tests.
 
-### Library Cache Lock Demo
+### Library Cache Lock
 
-Tool for library cache lock contention experiments.
+Lab for library cache lock experiments. It can install a procedure, start/stop the contention workload, and test AWR snapshot creation from the UI.
 
 ### HW Contention Demo
 
-Tool focused on high-water-mark and segment extension style contention experiments.
+Lab for high-water-mark and segment-extension style insert contention. It supports multiple test modes, configurable concurrent sessions, extent pre-allocation, partition count controls, wait-event charts, segment statistics, and statistics gathering.
 
 ### Stats Comparison
 
-Tool for comparing optimizer statistics strategies and related performance effects.
+Tool for comparing optimizer statistics behavior and performance effects. It can start/stop comparison workloads, gather stats, and inspect histogram information.
 
 ### Skew Detection
 
-Tool to create test tables, detect skew, inspect histograms, and compare distribution behavior across columns and tables.
+Creates test tables with skewed distributions, analyzes skew, gathers statistics with configurable `METHOD_OPT`, and displays histogram/table-stat information.
 
 ### Metric Explorer
 
-Utility tab for exploring and charting metrics from parsed input data.
+General metric exploration panel for inspecting database metrics outside the fixed workload views.
+
+### Swingbench SOE
+
+Browser-driven Swingbench Order Entry schema and workload tooling. It uses the assets under `swingbench/` and includes:
+
+- default SOE settings
+- schema preview
+- schema create/drop
+- workload default settings
+- workload start/stop
+- live status through the backend
+
+### Insert Blast
+
+Wide-table insert/select storm tool. It can:
+
+- create many wide tables with a configurable prefix
+- optionally create one BIGFILE tablespace per table
+- configure datafile location, initial size, autoextend size, and TDE tablespace encryption
+- run one or more independent workloads
+- choose insert or select workload type
+- choose connect/disconnect or persistent-session mode
+- configure sessions, duration, tables used, and commit frequency
+- optionally pre-allocate and periodically add extents to reduce `enq: HW - contention`
+- monitor workload breakdown, sessions per instance, top waits, and LMS process memory
+
+### Datafile Growth
+
+Tool for inspecting tablespaces/datafiles and scheduling datafile growth operations through the backend.
 
 ### TDE Comparison
 
-Compares encrypted and non-encrypted table behavior using equivalent workloads.
+Compares AES-256 encrypted tables against plain tables. It can create encrypted/plain test tables, run selectable SELECT/INSERT/UPDATE phases, gather stats after load, and report comparative timings.
 
 ### GC Congestion Demo
 
-A dedicated RAC demo focused on creating many tables, loading larger data sets, and generating GC congestion scenarios.
+RAC-focused lab for preparing, running, stopping, and dropping a GC congestion workload. It also exposes wait-event data for the relevant GC events.
 
-### DBStress Schema
+### GC Acquire/Release Lab
 
-The online sales schema in DBStress includes tables such as:
+RAC global-cache acquire/release lab with validation, setup, workload start/stop, live monitor, and cleanup operations.
 
-- `regions`
-- `countries`
-- `warehouses`
-- `categories`
-- `products`
-- `inventory`
-- `customers`
-- `orders`
-- `order_items`
-- `payments`
-- `order_history`
-- `product_reviews`
+### GC Benchmark
 
-## GC Benchmark
+Embedded view of the standalone FastAPI GC Benchmark tool. Open it from the DBStress tab or directly at `http://localhost:8000`.
 
-GC Benchmark is the main Oracle RAC contention tool in this repository.
+## Standalone GC Benchmark
 
-Tracked GC events include:
+The GC Benchmark app is a full-stack FastAPI tool for simulating and measuring Oracle RAC Global Cache waits. It drives concurrent DML against a configurable multi-table schema and stores completed run results in SQLite.
+
+Main tabs:
+
+- **Connection**: enter host, port, service, username, password, test the connection, and check privileges. Passwords are not saved to disk.
+- **Schema Setup**: configure table count, partitioning, and compression; preview DDL; create/drop the benchmark schema.
+- **Run Workload**: configure threads, duration, seed rows, and hot-row percentage; watch live counters and GC wait deltas.
+- **Results & Comparison**: review saved runs, compare selected runs with charts, and export CSV.
+
+Tracked GC wait events include:
 
 - `gc current block congested`
-- `gc current block 2-way`
 - `gc current block 3-way`
-- `gc cr block congested`
 - `gc cr grant congested`
+- `gc current block 2-way`
+- `gc cr block congested`
 - `gc cr grant 2-way`
 
-### GC Benchmark Tab: Connection
+HCC compression choices generate valid Oracle DDL but require Exadata, ZFS Storage, or compatible storage. On unsupported storage, Oracle can reject the DDL with `ORA-64307`.
 
-Purpose:
+## Backend API Families
 
-- connect to the benchmark target database
-- save and reuse recent connections
-- configure a separate CDB connection when required for CDB-only views
+The Node backend exposes REST endpoints under `/api` and streams live events with Socket.IO.
 
-Current features:
+Major API groups:
 
-- test Oracle connection
-- save recent benchmark connections without passwords
-- reuse recent connections
-- choose `thin` or `thick` mode
-- configure and test `CDB Connection`
-- save and reuse recent CDB connections
+- `/api/health`
+- `/api/db/*`
+- `/api/schema/*`
+- `/api/schemas/list`
+- `/api/monitor/*`
+- `/api/stress/*`
+- `/api/metrics/reset-gc-baseline`
+- `/api/swingbench/soe/*`
+- `/api/insert-blast/*`
+- `/api/datafiles/*`
+- `/api/index-contention/*`
+- `/api/library-cache-lock/*`
+- `/api/stats-comparison/*`
+- `/api/hw-contention/*`
+- `/api/skew-detection/*`
+- `/api/tde-comparison/*`
+- `/api/gc-congestion/*`
+- `/api/gc-acquire-release/*`
+- `/api/gc-benchmark/status`
 
-Notes:
+The backend also serves the React production build from `client/build`.
 
-- passwords are session-only
-- CDB Connection is used for operations such as connection pool stats and PDB restart
+## Helper Scripts
 
-### GC Benchmark Tab: Schema Setup
-
-Purpose:
-
-- create and manage the benchmark schema used by the workload engine
-
-Current features:
-
-- choose benchmark table prefix
-- choose number of tables
-- choose rows per table scale
-- create very large schemas, including multi-TB targets depending on chosen size
-- create indexed benchmark tables
-- compare non-partitioned versus hash-partitioned index designs
-- preview DDL
-- create tables in parallel using one session per table
-- drop current benchmark schema
-- drop matching tables by prefix
-- kill sessions by user before retrying cleanup or starting a new run
-- show the exact kill command in the log area
-- use parallel killer sessions when many sessions must be removed
-
-Live operational panels in this tab:
-
-- database activity from `GV$` views
-  - sessions
-  - processes
-  - transactions
-- connection pool stats from `GV$CPOOL_STATS`
-  - using the configured CDB connection when required
-
-### GC Benchmark Tab: Run Workload
-
-Purpose:
-
-- run Oracle RAC workloads against a selected benchmark schema
-- observe live workload progress and GC waits
-- compare requested concurrency versus actual active workers
-
-Current workload controls:
-
-- choose an existing schema from Oracle
-- choose contention mode
-- set custom Normal-mode mix for `INSERT`, `UPDATE`, `DELETE`, and `SELECT`
-- set lock hold time for Hammer mode
-- set concurrent threads
-- type or slide the thread count directly
-- set duration
-- set workload seed rows
-- set hot row percentage
-- restart a PDB as a separate action using the configured CDB connection
-
-Current contention modes:
-
-- `NORMAL`
-- `HAMMER`
-- `LMS_STRESS`
-- `EXTREME_LMS`
-
-Current live behavior:
-
-- shows active schema
-- shows running workload banner
-- shows requested threads and physical workers or sessions
-- shows current phase
-  - `PREPARING`
-  - `WARMING`
-  - `RUNNING`
-- preparation happens before the timed run starts
-- worker sessions are warmed before the timed run starts
-- the UI now shows preparation status instead of pretending the workload has already started
-- the timed workload window starts only after preparation is complete
-- stop works during preparation and during the run
-
-Current live dashboard:
-
-- inserts, updates, deletes, selects, errors
-- per-second operation rates
-- workload progress bar
-- `GC Wait Events (live avg ms)` chart
-- live database activity panel with username filter
-- live connection pool stats panel
-
-Important note about `Concurrent Threads`:
-
-- the UI accepts values up to `10000`
-- the backend currently still has an internal physical worker cap, so requested threads and actual physical workers may differ
-- the current UI shows both values explicitly
-
-Important note about `GC Wait Events (live avg ms)`:
-
-- this chart uses delta average wait since workload start
-- it is better for seeing what the current run is doing in real time
-- it is not the same as Oracle cumulative startup average
-
-### GC Benchmark Tab: Results & Comparison
-
-Purpose:
-
-- store completed workload runs
-- compare runs across schema and workload changes
-
-Current stored run data includes:
-
-- run id
-- date
-- schema selected in `Run Workload`
-- table count
-- partition information
-- compression
-- thread count
-- duration
-- GC event deltas
-
-Current results view includes:
-
-- benchmark results table
-- schema column from the selected workload schema dropdown
-- comparison of primary GC metrics
-- compare all runs or selected runs
-- CSV export
-
-## Direct Shell Tools
-
-### `scripts/gc-wait-live.sh`
-
-This helper script lets you query Oracle directly from the shell and print the same style of delta avg-ms metric used by the GC Benchmark chart.
-
-It uses `sqlplus` and `gv$system_event`.
-
-Usage:
+### Service Management
 
 ```bash
-./scripts/gc-wait-live.sh '<user/password@host:port/service>' [interval_seconds] [event_filter] [min_avg_wait_ms]
+npm run start-all
+npm run status-all
+npm run stop-all
 ```
 
-Examples:
+These scripts manage the two local services and their `.run/` PID/log files.
+
+### Live GC Wait Sampler
+
+Use `scripts/gc-wait-live.sh` for a terminal-side RAC GC wait delta sampler through SQL*Plus:
 
 ```bash
-./scripts/gc-wait-live.sh 'pp/pp123@host:1521/service'
-./scripts/gc-wait-live.sh 'pp/pp123@host:1521/service' 5
-./scripts/gc-wait-live.sh 'pp/pp123@host:1521/service' 5 'gc current block congested'
-./scripts/gc-wait-live.sh 'pp/pp123@host:1521/service' 5 'gc current block congested' 2
+scripts/gc-wait-live.sh 'user/password@host:1521/service' 5
+scripts/gc-wait-live.sh 'user/password@host:1521/service' 5 'gc current block congested' 1
 ```
 
-Current behavior:
-
-- loops continuously until `Ctrl+C`
-- shows output per `inst_id`
-- supports filtering by event name
-- supports filtering by minimum `avg_wait_ms`
-- now works in `since-start` mode so it matches the GC Benchmark chart more closely
-
-### `scripts/insert-blast.sh`
-
-This helper runs the Insert Blast tool directly from a Linux shell on an Oracle database host. It uses `sqlplus`, so it does not require the DBStress web server to be running.
-
-Typical flow:
-
-```bash
-export ORACLE_CONNECT_STRING='app_user/app_password@host:1521/service'
-
-./scripts/insert-blast.sh create \
-  --prefix IBLAST \
-  --tables 8 \
-  --columns 24
-
-./scripts/insert-blast.sh run \
-  --prefix IBLAST \
-  --tables 8 \
-  --columns 24 \
-  --workload Workload_1:8:8:60:50:reuse
-```
-
-Run the monitor in a second terminal while the workload is active:
-
-```bash
-./scripts/insert-blast.sh monitor --interval 5
-```
-
-Create one BIGFILE tablespace per Insert Blast table:
-
-```bash
-./scripts/insert-blast.sh create \
-  --prefix IBLAST \
-  --tables 8 \
-  --columns 24 \
-  --create-tablespaces true \
-  --tablespace-prefix IBLAST_TS \
-  --tablespace-initial-mb 1024 \
-  --tablespace-next-mb 1024 \
-  --tablespace-datafile-location /u02/oradata
-```
-
-Run multiple workloads and optional extent allocation:
-
-```bash
-./scripts/insert-blast.sh run \
-  --prefix IBLAST \
-  --tables 16 \
-  --columns 24 \
-  --workload OLTP_A:8:16:300:50:reuse \
-  --workload OLTP_B:16:8:300:100:reuse \
-  --hw-mitigation true \
-  --preallocate-on-start true \
-  --extent-size-mb 128 \
-  --allocate-every-inserts 100000
-```
-
-Other useful commands:
-
-```bash
-./scripts/insert-blast.sh status --prefix IBLAST --tables 8
-./scripts/insert-blast.sh drop --prefix IBLAST --tables 8
-./scripts/insert-blast.sh --help
-```
-
-The workload spec is:
+Arguments:
 
 ```text
-NAME:TABLES:SESSIONS:DURATION_SECONDS:COMMIT_EVERY:MODE
+scripts/gc-wait-live.sh <user/password@host:port/service> [interval_seconds] [event_filter] [min_avg_wait_ms]
 ```
 
-`MODE` can be `reuse` or `reconnect`. Worker logs are written to `./insert-blast-logs` by default.
+The script samples `GV$SYSTEM_EVENT`, keeps a baseline from script start, and prints per-instance delta waits plus average wait milliseconds.
 
-## API Highlights
+## Development
 
-### DBStress backend
+Useful commands:
 
-Examples:
+```bash
+npm run server
+npm run client
+npm run dev
+npm run build
+node --check server/index.js
+```
 
-- `POST /api/db/test-connection`
-- `POST /api/db/connect`
-- `POST /api/db/disconnect`
-- `GET /api/db/status`
-- `POST /api/schema/create`
-- `POST /api/schema/drop`
-- `GET /api/schemas/list`
-- `POST /api/stress/start`
-- `POST /api/stress/stop`
-- `GET /api/stress/status`
-- `PUT /api/stress/config`
+Frontend-only build:
 
-### GC Benchmark backend
+```bash
+cd client
+npm run build
+```
 
-Examples:
+Backend source is CommonJS JavaScript. Frontend source is React 18 with Chart.js and Socket.IO client.
 
-- `POST /api/connect/test`
-- `POST /api/connect/save`
-- `GET /api/connect/recent`
-- `POST /api/db/cpool-connection/test`
-- `GET /api/cpool-connections/recent`
-- `POST /api/db/pdb-restart`
-- `POST /api/schema/create`
-- `POST /api/schema/drop`
-- `DELETE /api/schema/drop-prefix`
-- `POST /api/schema/kill-sessions`
-- `GET /api/schema/list`
-- `GET /api/schema/state`
-- `POST /api/workload/start`
-- `POST /api/workload/stop`
-- `GET /api/workload/status`
-- `GET /api/db/activity`
-- `GET /api/db/cpool-stats`
-- `GET /api/results`
-- `GET /api/results/compare`
-- `GET /api/results/export/csv`
+## Validation Checklist
 
-## Troubleshooting
+After backend JavaScript edits:
 
-### GC Benchmark starts but sessions appear late
+```bash
+node --check server/index.js
+```
 
-The workload now has explicit startup phases:
+After frontend edits:
 
-- schema preparation
-- worker session warm-up
-- timed run
+```bash
+cd client
+npm run build
+```
 
-So sessions should begin appearing much earlier and the UI should show what phase is in progress.
+For README-only edits, no application build is required, but running a build is still useful if the documentation change was made alongside UI work.
 
-### GC Benchmark requested threads do not match database sessions exactly
+## Operational Notes
 
-This can happen because:
-
-- the current backend still distinguishes requested threads from physical workers
-- Oracle services may be pooled depending on your service configuration
-- resource limits on the database may prevent the requested concurrency from being realized
-
-### Monitor and GC Benchmark show different avg wait values
-
-That is expected:
-
-- `Monitor` shows cumulative startup-based avg wait from Oracle views
-- `GC Benchmark` shows delta avg wait since the workload started
-
-### Connection pool stats show no rows
-
-Check:
-
-- whether you are using a pooled or DRCP service
-- whether the stats must be queried from CDB in your environment
-- whether the configured CDB connection is correct
-
-### Drop tables fails
-
-Common causes:
-
-- sessions are still connected to the target tables
-- workload owner sessions are still alive
-
-Use `Kill Sessions by User`, then retry the drop.
+- Use dedicated test schemas. Many panels create and drop objects.
+- Verify privileges before running monitor or RAC labs.
+- RAC and GC labs are meaningful only when connected to a multi-instance database.
+- Insert Blast and Datafile Growth can allocate significant storage.
+- TDE tests require a database wallet/keystore configured for encrypted tablespaces or encrypted objects.
+- HCC options require compatible storage.
+- Some monitor values are cumulative database counters rather than workload-window-only measurements.
