@@ -1379,7 +1379,7 @@ app.get('/api/gc-acquire-release/monitor', async (req, res) => {
 
 app.post('/api/gc-acquire-release/cleanup', async (req, res) => {
   try {
-    const result = await gcAcquireReleaseEngine.cleanup(oracleDb, io);
+    const result = await gcAcquireReleaseEngine.cleanup(oracleDb, io, req.body || {});
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

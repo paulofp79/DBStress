@@ -27,6 +27,7 @@ const getServerUrl = () => {
 };
 
 const API_BASE = `${getServerUrl()}/api`;
+const FILE443_WORKLOAD = 'file443-paced-insert';
 
 const emptyMonitor = {
   activeSessions: [],
@@ -89,6 +90,14 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
     hotRowMax: 128,
     rowTargetMode: 'spread',
     workloadShape: 'insert-hot-index',
+    file443TargetOwner: dbStatus.config?.user?.toUpperCase() || '',
+    file443TargetTable: 'file_@443',
+    file443ReverseTable: 'file_@443_RK',
+    file443Variant: 'normal',
+    file443ServiceConnectionString: dbStatus.config?.connectionString || '',
+    file443Workers: 8,
+    file443TargetInsertsPerSec: 50,
+    file443DurationSeconds: 60,
     remotePrimerEnabled: false,
     remotePrimerConnectionString: '',
     remotePrimerSessions: 4,
@@ -104,10 +113,12 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         ...prev,
         instance2ConnectionString: prev.instance2ConnectionString || dbStatus.config.connectionString,
         instance1ConnectionString: prev.instance1ConnectionString || dbStatus.config.connectionString,
-        remotePrimerConnectionString: prev.remotePrimerConnectionString || ''
+        remotePrimerConnectionString: prev.remotePrimerConnectionString || '',
+        file443ServiceConnectionString: prev.file443ServiceConnectionString || dbStatus.config.connectionString,
+        file443TargetOwner: prev.file443TargetOwner || dbStatus.config.user?.toUpperCase() || ''
       }));
     }
-  }, [dbStatus.config?.connectionString]);
+  }, [dbStatus.config?.connectionString, dbStatus.config?.user]);
 
   const fetchStatus = async () => {
     try {
@@ -253,12 +264,23 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   };
 
   const handleSetup = async () => {
-    const result = await runAction('Setup Lab', '/gc-acquire-release/setup', {
-      rowCount: config.rowCount,
-      objectProfile: config.objectProfile,
-      workloadShape: config.workloadShape,
-      tablespaceName: config.tablespaceName
-    });
+    const setupPayload = config.workloadShape === FILE443_WORKLOAD
+      ? {
+          workloadShape: FILE443_WORKLOAD,
+          file443TargetOwner: config.file443TargetOwner,
+          file443TargetTable: config.file443TargetTable,
+          file443ReverseTable: config.file443ReverseTable,
+          file443Variant: config.file443Variant,
+          file443ServiceConnectionString: config.file443ServiceConnectionString,
+          monitorRefreshMs: config.monitorRefreshMs
+        }
+      : {
+          rowCount: config.rowCount,
+          objectProfile: config.objectProfile,
+          workloadShape: config.workloadShape,
+          tablespaceName: config.tablespaceName
+        };
+    const result = await runAction(config.workloadShape === FILE443_WORKLOAD ? 'Prepare file_@443 Test' : 'Setup Lab', '/gc-acquire-release/setup', setupPayload);
     if (result) {
       const distribution = result.distribution || [];
       setSetupRows(distribution);
@@ -278,7 +300,17 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
       return;
     }
     const payload = { ...config };
-    if (payload.mode === 'one-instance') {
+    if (payload.workloadShape === FILE443_WORKLOAD) {
+      payload.mode = 'one-instance';
+      payload.workers = payload.file443Workers;
+      payload.instance2ConnectionString = payload.file443ServiceConnectionString || payload.instance2ConnectionString;
+      payload.file443ServiceConnectionString = payload.file443ServiceConnectionString || payload.instance2ConnectionString;
+      payload.commitEvery = 1;
+      delete payload.instance1ConnectionString;
+      delete payload.workersInstance1;
+      delete payload.workersInstance2;
+      delete payload.remotePrimerConnectionString;
+    } else if (payload.mode === 'one-instance') {
       if (payload.remotePrimerEnabled) {
         payload.remotePrimerConnectionString = payload.remotePrimerConnectionString || payload.instance1ConnectionString;
       } else {
@@ -298,7 +330,15 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   };
 
   const handleCleanup = async () => {
-    const result = await runAction('Cleanup Lab', '/gc-acquire-release/cleanup');
+    const cleanupPayload = config.workloadShape === FILE443_WORKLOAD
+      ? {
+          workloadShape: FILE443_WORKLOAD,
+          file443TargetOwner: config.file443TargetOwner,
+          file443TargetTable: config.file443TargetTable,
+          file443ReverseTable: config.file443ReverseTable
+        }
+      : {};
+    const result = await runAction(config.workloadShape === FILE443_WORKLOAD ? 'Drop Reverse Clone' : 'Cleanup Lab', '/gc-acquire-release/cleanup', cleanupPayload);
     if (result) setSetupRows([]);
   };
 
@@ -320,6 +360,9 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   };
 
   const totalWorkers = useMemo(() => {
+    if (config.workloadShape === FILE443_WORKLOAD) {
+      return Number(config.file443Workers || 0);
+    }
     if (config.mode === 'two-instance') {
       return Number(config.workersInstance1 || 0) + Number(config.workersInstance2 || 0);
     }
@@ -329,9 +372,15 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
   const monitorRows = monitor || emptyMonitor;
   const running = !!status.isRunning;
   const isManualRepro = config.workloadShape === 'manual-lgnn-hang';
+  const isFile443PacedInsert = config.workloadShape === FILE443_WORKLOAD;
+  const statusIsFile443 = status.config?.workloadShape === FILE443_WORKLOAD || isFile443PacedInsert;
   const hasVisibleLabSessions = (monitorRows.activeSessions || []).length > 0;
   const canRun = dbStatus.connected && !busy;
   const waitRows = useMemo(() => monitorRows.waitRows || [], [monitorRows.waitRows]);
+  const file443Monitor = monitorRows.file443 || status.monitor?.file443 || null;
+  const file443Runs = status.lastFile443Runs || file443Monitor?.lastRuns || { normal: null, reverse: null };
+  const file443WaitDeltas = file443Monitor?.waitDeltas || [];
+  const gcBufferBusyAcquireDelta = file443WaitDeltas.find(row => row.event === 'gc buffer busy acquire');
   const activeSessionSummary = useMemo(() => {
     const summary = new Map();
     (monitorRows.activeSessions || []).forEach(row => {
@@ -483,7 +532,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         <tbody>
           {rows.length === 0 && (
             <tr>
-              <td colSpan="5" className="gc-ar-empty">No DBSTRESS_GC_AR sessions are active.</td>
+              <td colSpan="5" className="gc-ar-empty">No {isFile443PacedInsert ? 'DBSTRESS_FILE443_INSERT' : 'DBSTRESS_GC_AR'} sessions are active.</td>
             </tr>
           )}
           {rows.map(row => (
@@ -498,6 +547,27 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         </tbody>
       </table>
     </div>
+  );
+
+  const formatRunValue = (value, digits = 0) => {
+    const numberValue = Number(value || 0);
+    return numberValue.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits
+    });
+  };
+
+  const renderFile443RunRow = (label, run) => (
+    <tr>
+      <td>{label}</td>
+      <td>{run ? formatRunValue(run.targetInsertsPerSec, 0) : '-'}</td>
+      <td>{run ? formatRunValue(run.achievedInsertsPerSec, 2) : '-'}</td>
+      <td>{run ? formatRunValue(run.totalInserts, 0) : '-'}</td>
+      <td>{run ? formatRunValue(run.commits, 0) : '-'}</td>
+      <td>{run ? formatRunValue(run.errors, 0) : '-'}</td>
+      <td>{run ? formatRunValue(run.gcBufferBusyAcquire?.deltaWaits, 0) : '-'}</td>
+      <td>{run ? `${formatRunValue(run.activeWaitPercent, 2)}%` : '-'}</td>
+    </tr>
   );
 
   if (!dbStatus.connected) {
@@ -523,7 +593,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
         </div>
 
         <div className="gc-ar-help">
-          <strong>Customer file_@443</strong> creates the RAW key, SecureFile BLOB, virtual key1 expression, and key1 indexes from the customer shape. <strong>Manual LGNN hang repro</strong> follows the note-style T_TEST flow as a separate test.
+          <strong>Customer file_@443</strong> creates the RAW key, SecureFile BLOB, virtual key1 expression, and key1 indexes from the customer shape. <strong>Paced file_@443 inserts</strong> preserves the existing table and can compare against a reverse-key clone.
         </div>
 
         <div className="gc-ar-section">
@@ -553,7 +623,11 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
 
         <div className="gc-ar-section">
           <div className="gc-ar-section-title">Lab Setup</div>
-          {isManualRepro ? (
+          {isFile443PacedInsert ? (
+            <div className="gc-ar-inline-note">
+              <div>Setup validates the existing target. In reverse-key mode it drops and recreates only the DBStress reverse clone.</div>
+            </div>
+          ) : isManualRepro ? (
             <div className="gc-ar-inline-note">
               <div>Setup creates T_TEST with 300 rows, index T_TEST_N1, statistics, and shows rows 96-100 for same-block verification.</div>
             </div>
@@ -578,7 +652,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               )}
             </>
           )}
-          {!isManualRepro && (
+          {!isManualRepro && !isFile443PacedInsert && (
             <div className="form-row">
               <div className="form-group">
                 <label>Seed rows / hot range max</label>
@@ -587,7 +661,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             </div>
           )}
           <button className="btn btn-primary" disabled={!canRun || running} onClick={handleSetup}>
-            Setup Lab
+            {isFile443PacedInsert ? 'Prepare file_@443 Test' : 'Setup Lab'}
           </button>
         </div>
 
@@ -599,10 +673,16 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               value={config.workloadShape}
               onChange={(e) => {
                 const nextShape = e.target.value;
+                if (nextShape === FILE443_WORKLOAD) {
+                  setWaitEventFilter('gc buffer busy acquire');
+                }
                 setConfig(prev => ({
                   ...prev,
                   workloadShape: nextShape,
-                  mode: nextShape === 'manual-lgnn-hang' ? 'two-instance' : prev.mode,
+                  mode: nextShape === FILE443_WORKLOAD ? 'one-instance' : nextShape === 'manual-lgnn-hang' ? 'two-instance' : prev.mode,
+                  objectProfile: nextShape === FILE443_WORKLOAD ? 'customer-file' : prev.objectProfile,
+                  workers: nextShape === FILE443_WORKLOAD ? prev.file443Workers : prev.workers,
+                  commitEvery: nextShape === FILE443_WORKLOAD ? 1 : prev.commitEvery,
                   workersInstance1: nextShape === 'manual-lgnn-hang' ? 1 : prev.workersInstance1,
                   workersInstance2: nextShape === 'manual-lgnn-hang' ? 1 : prev.workersInstance2
                 }));
@@ -611,6 +691,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             >
               <option value="insert-hot-index">Right-growing inserts</option>
               <option value="update-hot-block">Hot-block updates</option>
+              <option value={FILE443_WORKLOAD}>Paced file_@443 inserts</option>
               <option value="manual-lgnn-hang">Manual LGNN hang repro</option>
             </select>
           </div>
@@ -619,6 +700,106 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               Stop LGNN/LG processes on the master node before Start, then continue them after collecting evidence. The app only opens the database sessions.
             </div>
           )}
+          {isFile443PacedInsert ? (
+            <>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Target owner</label>
+                  <input
+                    value={config.file443TargetOwner}
+                    onChange={(e) => updateConfig('file443TargetOwner', e.target.value)}
+                    disabled={running}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Target table</label>
+                  <input
+                    value={config.file443TargetTable}
+                    onChange={(e) => updateConfig('file443TargetTable', e.target.value)}
+                    disabled={running}
+                  />
+                </div>
+              </div>
+              <div className="form-group">
+                <label>Service connect string</label>
+                <input
+                  value={config.file443ServiceConnectionString}
+                  onChange={(e) => updateConfig('file443ServiceConnectionString', e.target.value)}
+                  disabled={running}
+                />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Variant</label>
+                  <select
+                    value={config.file443Variant}
+                    onChange={(e) => updateConfig('file443Variant', e.target.value)}
+                    disabled={running}
+                  >
+                    <option value="normal">Existing normal table</option>
+                    <option value="reverse-key">Reverse-key clone</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Reverse clone table</label>
+                  <input
+                    value={config.file443ReverseTable}
+                    onChange={(e) => updateConfig('file443ReverseTable', e.target.value)}
+                    disabled={running || config.file443Variant !== 'reverse-key'}
+                  />
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Worker sessions</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="1000"
+                    value={config.file443Workers}
+                    onChange={(e) => updateNumber('file443Workers', e.target.value, 1, 1000)}
+                    disabled={running}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Target inserts/sec</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="100000"
+                    value={config.file443TargetInsertsPerSec}
+                    onChange={(e) => updateNumber('file443TargetInsertsPerSec', e.target.value, 1, 100000)}
+                    disabled={running}
+                  />
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Duration seconds</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="86400"
+                    value={config.file443DurationSeconds || ''}
+                    placeholder="0 = stop manually"
+                    onChange={(e) => {
+                      if (e.target.value === '') {
+                        updateConfig('file443DurationSeconds', 0);
+                      } else {
+                        updateNumber('file443DurationSeconds', e.target.value, 0, 86400);
+                      }
+                    }}
+                    disabled={running}
+                  />
+                </div>
+                <div className="form-group gc-ar-inline-note">
+                  <label>Insert shape</label>
+                  <div>Each worker inserts one RAW/BLOB row, commits, then waits for the shared global rate slot.</div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
           <div className="gc-ar-segment">
             <button className={config.mode === 'one-instance' ? 'active' : ''} onClick={() => updateConfig('mode', 'one-instance')} disabled={running || isManualRepro}>One Instance Only</button>
             <button className={config.mode === 'two-instance' ? 'active' : ''} onClick={() => updateConfig('mode', 'two-instance')} disabled={running}>Acquire vs Release</button>
@@ -721,9 +902,11 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               )}
             </>
           )}
+            </>
+          )}
 
           <div className="form-row">
-            {!isManualRepro && (
+            {!isManualRepro && !isFile443PacedInsert && (
               <div className="form-group">
                 <label>Loops per worker</label>
                 <input type="number" min="1" max="1000000" value={config.loopsPerWorker} onChange={(e) => updateNumber('loopsPerWorker', e.target.value, 1, 1000000)} />
@@ -734,7 +917,7 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               <input type="number" min="1000" max="30000" value={config.monitorRefreshMs} onChange={(e) => updateNumber('monitorRefreshMs', e.target.value, 1000, 30000)} />
             </div>
           </div>
-          {!isManualRepro && (
+          {!isManualRepro && !isFile443PacedInsert && (
             <>
               <div className="form-row">
                 <div className="form-group">
@@ -778,17 +961,17 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
               checked={config.killExistingSessions}
               onChange={(e) => updateConfig('killExistingSessions', e.target.checked)}
             />
-            Stop existing DBSTRESS_GC_AR sessions before starting.
+            Stop existing {isFile443PacedInsert ? 'DBSTRESS_FILE443_INSERT' : 'DBSTRESS_GC_AR'} sessions before starting.
           </label>
           <div className="gc-ar-actions">
             <button className="btn btn-success" disabled={!canRun || running || (!isManualRepro && totalWorkers < 1)} onClick={handleStart}>
-              {isManualRepro ? 'Start Manual Repro Sessions' : config.mode === 'one-instance' ? 'Start One-Instance Workload' : 'Start Two-Instance Workload'}
+              {isFile443PacedInsert ? 'Start Paced Inserts' : isManualRepro ? 'Start Manual Repro Sessions' : config.mode === 'one-instance' ? 'Start One-Instance Workload' : 'Start Two-Instance Workload'}
             </button>
             <button className="btn btn-danger" disabled={(!running && !hasVisibleLabSessions) || !!busy} onClick={handleStop}>
               {running ? 'Stop Workload' : 'Stop Existing Sessions'}
             </button>
             <button className="btn btn-secondary" disabled={!canRun || running} onClick={handleCleanup}>
-              Cleanup Lab
+              {isFile443PacedInsert ? 'Drop Reverse Clone' : 'Cleanup Lab'}
             </button>
           </div>
         </div>
@@ -801,6 +984,13 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
             <div><span>Loops</span><strong>{status.stats?.completedLoops || 0}</strong></div>
             <div><span>Commits</span><strong>{status.stats?.commits || 0}</strong></div>
             <div><span>Errors</span><strong>{status.stats?.errors || 0}</strong></div>
+            {statusIsFile443 && (
+              <>
+                <div><span>Target IPS</span><strong>{status.stats?.targetInsertsPerSec || config.file443TargetInsertsPerSec}</strong></div>
+                <div><span>Achieved IPS</span><strong>{Number(status.stats?.achievedInsertsPerSec || file443Monitor?.achievedInsertsPerSec || 0).toFixed(2)}</strong></div>
+                <div><span>GC Busy %</span><strong>{Number(file443Monitor?.targetWaitPercent || 0).toFixed(2)}%</strong></div>
+              </>
+            )}
           </div>
           {message && (
             <div className={message.startsWith('Error') ? 'gc-ar-message error' : 'gc-ar-message'}>
@@ -850,6 +1040,42 @@ function GCAcquireReleasePanel({ dbStatus, socket }) {
                         <td>{row.maxId}</td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {(isFile443PacedInsert || statusIsFile443 || file443Runs.normal || file443Runs.reverse) && (
+          <div className="panel gc-ar-panel">
+            <div className="panel-header"><h2>file_@443 Paced Insert Comparison</h2></div>
+            <div className="panel-content">
+              <div className="gc-ar-kv">
+                <div><span>Run table</span><strong>{file443Monitor?.tableName || config.file443TargetTable}</strong></div>
+                <div><span>Variant</span><strong>{file443Monitor?.variant || config.file443Variant}</strong></div>
+                <div><span>Target IPS</span><strong>{file443Monitor?.targetInsertsPerSec || config.file443TargetInsertsPerSec}</strong></div>
+                <div><span>Achieved IPS</span><strong>{Number(file443Monitor?.achievedInsertsPerSec || status.stats?.achievedInsertsPerSec || 0).toFixed(2)}</strong></div>
+                <div><span>GC busy waits</span><strong>{Number(gcBufferBusyAcquireDelta?.deltaWaits || 0).toLocaleString()}</strong></div>
+                <div><span>GC busy %</span><strong>{Number(file443Monitor?.targetWaitPercent || 0).toFixed(2)}%</strong></div>
+              </div>
+              <div className="gc-ar-table-wrap" style={{ marginTop: '0.85rem' }}>
+                <table className="gc-ar-table compact">
+                  <thead>
+                    <tr>
+                      <th>VARIANT</th>
+                      <th>TARGET_IPS</th>
+                      <th>ACHIEVED_IPS</th>
+                      <th>INSERTS</th>
+                      <th>COMMITS</th>
+                      <th>ERRORS</th>
+                      <th>GC_BUSY_WAITS</th>
+                      <th>ACTIVE_WAIT_%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {renderFile443RunRow('Normal', file443Runs.normal)}
+                    {renderFile443RunRow('Reverse key', file443Runs.reverse)}
                   </tbody>
                 </table>
               </div>

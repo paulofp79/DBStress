@@ -247,7 +247,14 @@ RAC-focused lab for preparing, running, stopping, and dropping a GC congestion w
 
 ### GC Acquire/Release Lab
 
-RAC global-cache acquire/release lab with validation, setup, workload start/stop, live monitor, and cleanup operations.
+RAC global-cache acquire/release lab with validation, setup, workload start/stop, live monitor, and cleanup operations. It includes the standard hot-index/hot-block paths, the manual LGNN repro, and a paced `file_@443` singleton insert test that:
+
+- runs against a chosen service with a global inserts/sec target
+- preserves the existing normal table
+- commits every inserted row
+- monitors `gc buffer busy acquire` and related wait rows in the existing live chart
+- can create a DBStress-managed reverse-key clone for normal vs reverse-key comparison
+- stops and kills only DBStress-tagged insert-test sessions
 
 ### GC Benchmark
 

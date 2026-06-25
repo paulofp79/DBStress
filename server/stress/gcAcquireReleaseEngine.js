@@ -4,6 +4,10 @@ const LAB_TABLE = 'GC_AR_ROWS';
 const CUSTOMER_TABLE = '"file_@443"';
 const NOTE_REPRO_TABLE = 'T_TEST';
 const MODULE_NAME = 'DBSTRESS_GC_AR';
+const FILE443_WORKLOAD = 'file443-paced-insert';
+const FILE443_MODULE_NAME = 'DBSTRESS_FILE443_INSERT';
+const FILE443_DEFAULT_TABLE = 'file_@443';
+const FILE443_DEFAULT_REVERSE_TABLE = 'file_@443_RK';
 const EVENTS = [
   'gc buffer busy acquire',
   'gc buffer busy release',
@@ -30,6 +34,27 @@ const sanitizeTablespace = (value = '') => String(value || '')
   .replace(/[^A-Z0-9_$#]/g, '')
   .slice(0, 128);
 
+const sanitizeObjectStem = (value = 'OBJ') => {
+  const sanitized = String(value || 'OBJ')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_$#]/g, '');
+  const withLeadingLetter = /^[A-Z]/.test(sanitized) ? sanitized : `T${sanitized}`;
+  return (withLeadingLetter || 'OBJ').slice(0, 18);
+};
+
+const quoteIdentifier = (value) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) throw new Error('Oracle object name is required');
+  return `"${trimmed.replace(/"/g, '""')}"`;
+};
+
+const clampNumber = (value, min, max, fallback) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+};
+
 class GcAcquireReleaseEngine {
   constructor() {
     this.db = null;
@@ -51,6 +76,14 @@ class GcAcquireReleaseEngine {
       errors: 0
     };
     this.nextInsertId = 1000000;
+    this.file443RunId = null;
+    this.file443NextSlotAt = 0;
+    this.file443StopTimer = null;
+    this.file443WaitBaseline = new Map();
+    this.lastFile443Runs = {
+      normal: null,
+      reverse: null
+    };
   }
 
   addLog(message, level = 'info') {
@@ -70,7 +103,55 @@ class GcAcquireReleaseEngine {
     this.io.emit('gc-ar-status', this.getStatus(extra));
   }
 
+  getConnectedUsername() {
+    return String(this.db?.getStatus?.()?.config?.user || '').trim().toUpperCase();
+  }
+
+  normalizeFile443Config(incoming = {}) {
+    const targetOwner = String(incoming.file443TargetOwner || incoming.targetOwner || '').trim();
+    const targetTable = String(incoming.file443TargetTable || incoming.targetTable || FILE443_DEFAULT_TABLE).trim();
+    const reverseTable = String(incoming.file443ReverseTable || incoming.reverseTable || FILE443_DEFAULT_REVERSE_TABLE).trim();
+    const variant = incoming.file443Variant === 'reverse-key' ? 'reverse-key' : 'normal';
+    const targetInsertsPerSec = clampNumber(incoming.file443TargetInsertsPerSec, 1, 100000, 50);
+    const durationSeconds = clamp(incoming.file443DurationSeconds, 0, 86400, 0);
+    const workers = clamp(incoming.file443Workers ?? incoming.workers, 1, 1000, 8);
+
+    return {
+      mode: 'one-instance',
+      loopsPerWorker: 1000000,
+      commitEvery: 1,
+      rowCount: 0,
+      hotRowMin: 1,
+      hotRowMax: 1,
+      rowTargetMode: 'spread',
+      workloadShape: FILE443_WORKLOAD,
+      objectProfile: 'customer-file',
+      tablespaceName: sanitizeTablespace(incoming.tablespaceName),
+      remotePrimerEnabled: false,
+      remotePrimerConnectionString: '',
+      remotePrimerSessions: 0,
+      remotePrimerThinkMs: 0,
+      manualStepDelayMs: 3000,
+      monitorRefreshMs: clamp(incoming.monitorRefreshMs, 1000, 30000, 2000),
+      killExistingSessions: incoming.killExistingSessions !== false,
+      instance2ConnectionString: String(incoming.file443ServiceConnectionString || incoming.instance2ConnectionString || '').trim(),
+      workers,
+      file443TargetOwner: targetOwner,
+      file443TargetTable: targetTable || FILE443_DEFAULT_TABLE,
+      file443ReverseTable: reverseTable || FILE443_DEFAULT_REVERSE_TABLE,
+      file443Variant: variant,
+      file443Workers: workers,
+      file443TargetInsertsPerSec: targetInsertsPerSec,
+      file443DurationSeconds: durationSeconds,
+      file443ServiceConnectionString: String(incoming.file443ServiceConnectionString || incoming.instance2ConnectionString || '').trim()
+    };
+  }
+
   normalizeWorkloadConfig(incoming = {}) {
+    if (incoming.workloadShape === FILE443_WORKLOAD) {
+      return this.normalizeFile443Config(incoming);
+    }
+
     const mode = incoming.mode === 'two-instance' ? 'two-instance' : 'one-instance';
     const rowCount = clamp(incoming.rowCount, 1, 1000, 128);
     const hotRowMin = clamp(incoming.hotRowMin, 1, rowCount, 1);
@@ -161,6 +242,15 @@ class GcAcquireReleaseEngine {
     if (this.isRunning) throw new Error('Stop the acquire/release workload before setup');
     if (this.isSettingUp) throw new Error('Setup is already running');
     this.isSettingUp = true;
+    if (options.workloadShape === FILE443_WORKLOAD) {
+      try {
+        return await this.setupFile443PacedInsert(db, options);
+      } finally {
+        this.isSettingUp = false;
+        this.emitStatus();
+      }
+    }
+
     const rowCount = clamp(options.rowCount, 1, 1000, 128);
     const isNoteRepro = options.workloadShape === 'manual-lgnn-hang';
     const objectProfile = isNoteRepro
@@ -323,6 +413,172 @@ class GcAcquireReleaseEngine {
     await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, 'file_@443'); END;`);
   }
 
+  quoteQualifiedName(owner, name) {
+    return owner
+      ? `${quoteIdentifier(owner)}.${quoteIdentifier(name)}`
+      : quoteIdentifier(name);
+  }
+
+  resolveFile443Config(config = {}) {
+    const owner = String(config.file443TargetOwner || this.getConnectedUsername()).trim();
+    if (!owner) {
+      throw new Error('Target owner is required for file_@443 paced inserts');
+    }
+
+    return {
+      ...config,
+      file443TargetOwner: owner,
+      file443TargetTable: String(config.file443TargetTable || FILE443_DEFAULT_TABLE).trim(),
+      file443ReverseTable: String(config.file443ReverseTable || FILE443_DEFAULT_REVERSE_TABLE).trim()
+    };
+  }
+
+  getFile443RunTableName(config = this.config) {
+    if (config?.file443Variant === 'reverse-key') {
+      return config.file443ReverseTable || FILE443_DEFAULT_REVERSE_TABLE;
+    }
+    return config?.file443TargetTable || FILE443_DEFAULT_TABLE;
+  }
+
+  getFile443RunTableRef(config = this.config) {
+    const resolved = this.resolveFile443Config(config);
+    return this.quoteQualifiedName(resolved.file443TargetOwner, this.getFile443RunTableName(resolved));
+  }
+
+  getFile443TargetTableRef(config = this.config) {
+    const resolved = this.resolveFile443Config(config);
+    return this.quoteQualifiedName(resolved.file443TargetOwner, resolved.file443TargetTable);
+  }
+
+  getFile443ReverseTableRef(config = this.config) {
+    const resolved = this.resolveFile443Config(config);
+    return this.quoteQualifiedName(resolved.file443TargetOwner, resolved.file443ReverseTable);
+  }
+
+  buildFile443ObjectName(tableName, suffix) {
+    const stem = sanitizeObjectStem(tableName);
+    return `${stem}_${suffix}`.slice(0, 30);
+  }
+
+  async validateFile443Table(db, config = this.config) {
+    const tableRef = this.getFile443RunTableRef(config);
+    await db.execute(`SELECT "Key", "Record", "RecordLength", "key1" FROM ${tableRef} WHERE 1 = 0`);
+    return {
+      tableName: this.getFile443RunTableName(config),
+      tableRef,
+      owner: this.resolveFile443Config(config).file443TargetOwner
+    };
+  }
+
+  async setupFile443PacedInsert(db, options = {}) {
+    const config = this.resolveFile443Config(this.normalizeFile443Config(options));
+    const targetRef = this.getFile443TargetTableRef(config);
+    this.addLog(`Validating existing file_@443 target ${targetRef}`);
+    await db.execute(`SELECT "Key", "Record", "RecordLength", "key1" FROM ${targetRef} WHERE 1 = 0`);
+
+    let createdReverseClone = false;
+    if (config.file443Variant === 'reverse-key') {
+      await this.setupFile443ReverseClone(db, config);
+      createdReverseClone = true;
+    }
+
+    const validated = await this.validateFile443Table(db, config);
+    this.addLog(`${createdReverseClone ? 'Reverse-key clone created' : 'Existing target validated'} for file_@443 paced insert test`);
+    return {
+      tableName: validated.tableName,
+      owner: validated.owner,
+      tableRef: validated.tableRef,
+      objectProfile: FILE443_WORKLOAD,
+      workloadShape: FILE443_WORKLOAD,
+      variant: config.file443Variant,
+      reverseCloneCreated: createdReverseClone,
+      distribution: []
+    };
+  }
+
+  async setupFile443ReverseClone(db, config = this.config) {
+    const resolved = this.resolveFile443Config(config);
+    const cloneRef = this.getFile443ReverseTableRef(resolved);
+    const pkIndexName = this.buildFile443ObjectName(resolved.file443ReverseTable, 'PK_RK');
+    const key1KeyIndexName = this.buildFile443ObjectName(resolved.file443ReverseTable, 'K1K_RK');
+    const key1IndexName = this.buildFile443ObjectName(resolved.file443ReverseTable, 'K1_RK');
+    const pkConstraintName = this.buildFile443ObjectName(resolved.file443ReverseTable, 'PK');
+    const pkIndexRef = this.quoteQualifiedName(resolved.file443TargetOwner, pkIndexName);
+    const key1KeyIndexRef = this.quoteQualifiedName(resolved.file443TargetOwner, key1KeyIndexName);
+    const key1IndexRef = this.quoteQualifiedName(resolved.file443TargetOwner, key1IndexName);
+
+    try {
+      await db.execute(`DROP TABLE ${cloneRef} PURGE`);
+      this.addLog(`Dropped existing reverse-key clone ${cloneRef}`);
+    } catch (err) {
+      if (!String(err.message).includes('ORA-00942')) throw err;
+    }
+
+    await db.execute(`
+      CREATE TABLE ${cloneRef}
+      (
+        "Key" RAW(52),
+        "Record" BLOB,
+        "RecordLength" NUMBER(10,0),
+        "key1" RAW(260) GENERATED ALWAYS AS
+          (CAST("SYS"."DBMS_LOB"."SUBSTR"("Record",260,53) AS RAW(260))) VIRTUAL
+      )
+      SEGMENT CREATION IMMEDIATE
+      PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255
+      NOCOMPRESS LOGGING
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      LOB ("Record") STORE AS SECUREFILE (
+        ENABLE STORAGE IN ROW CHUNK 8192
+        NOCACHE LOGGING NOCOMPRESS KEEP_DUPLICATES
+        STORAGE(INITIAL 106496 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+          PCTINCREASE 0
+          BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      )
+    `);
+
+    await db.execute(`
+      CREATE UNIQUE INDEX ${pkIndexRef} ON ${cloneRef} ("Key")
+      PCTFREE 10 INITRANS 2 MAXTRANS 255
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      REVERSE
+    `);
+
+    await db.execute(`
+      CREATE INDEX ${key1KeyIndexRef} ON ${cloneRef} ("key1", "Key")
+      PCTFREE 10 INITRANS 2 MAXTRANS 255
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      REVERSE
+    `);
+
+    await db.execute(`
+      CREATE INDEX ${key1IndexRef} ON ${cloneRef} ("key1")
+      PCTFREE 10 INITRANS 2 MAXTRANS 255
+      STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+        PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+        BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+      REVERSE
+    `);
+
+    await db.execute(`
+      ALTER TABLE ${cloneRef}
+      ADD CONSTRAINT ${quoteIdentifier(pkConstraintName)}
+      PRIMARY KEY ("Key")
+      USING INDEX ${pkIndexRef}
+      ENABLE
+    `);
+
+    await db.execute(`BEGIN DBMS_STATS.GATHER_TABLE_STATS(:ownerName, :tableName, CASCADE => TRUE); END;`, {
+      ownerName: resolved.file443TargetOwner,
+      tableName: resolved.file443ReverseTable
+    });
+  }
+
   async setupNoteReproTable(db) {
     try {
       await db.execute(`DROP TABLE ${NOTE_REPRO_TABLE} PURGE`);
@@ -431,6 +687,102 @@ class GcAcquireReleaseEngine {
     return pool;
   }
 
+  getModuleNameForWorkload(workloadShape = this.config?.workloadShape) {
+    return workloadShape === FILE443_WORKLOAD ? FILE443_MODULE_NAME : MODULE_NAME;
+  }
+
+  async validateFile443Service(config = this.config) {
+    const connectionString = String(config?.file443ServiceConnectionString || config?.instance2ConnectionString || '').trim();
+    if (!connectionString) {
+      throw new Error('Service connect string is required for file_@443 paced inserts');
+    }
+
+    let connection;
+    try {
+      connection = await this.db.createDirectConnection({ connectionString });
+      await connection.execute(`SELECT 1 FROM dual`);
+    } finally {
+      if (connection) {
+        await connection.close();
+      }
+    }
+  }
+
+  async queryWaitEventTotals() {
+    const binds = EVENTS.reduce((acc, eventName, index) => {
+      acc[`event${index}`] = eventName;
+      return acc;
+    }, {});
+    const eventList = EVENTS.map((_, index) => `:event${index}`).join(', ');
+
+    try {
+      const result = await this.db.execute(
+        `
+          SELECT
+            event,
+            SUM(total_waits) AS total_waits,
+            SUM(total_timeouts) AS total_timeouts,
+            SUM(time_waited_micro) / 1000 AS time_waited_ms
+          FROM gv$system_event
+          WHERE event IN (${eventList})
+          GROUP BY event
+        `,
+        binds
+      );
+      return result.rows || [];
+    } catch (err) {
+      const result = await this.db.execute(
+        `
+          SELECT
+            event,
+            total_waits,
+            total_timeouts,
+            time_waited_micro / 1000 AS time_waited_ms
+          FROM v$system_event
+          WHERE event IN (${eventList})
+        `,
+        binds
+      );
+      return result.rows || [];
+    }
+  }
+
+  async captureFile443WaitBaseline() {
+    const rows = await this.queryWaitEventTotals();
+    this.file443WaitBaseline = new Map((rows || []).map(row => [row.EVENT, {
+      totalWaits: Number(row.TOTAL_WAITS || 0),
+      totalTimeouts: Number(row.TOTAL_TIMEOUTS || 0),
+      timeWaitedMs: Number(row.TIME_WAITED_MS || 0)
+    }]));
+  }
+
+  async buildFile443WaitDeltas() {
+    const rows = await this.queryWaitEventTotals();
+    return (rows || []).map(row => {
+      const baseline = this.file443WaitBaseline.get(row.EVENT) || {
+        totalWaits: 0,
+        totalTimeouts: 0,
+        timeWaitedMs: 0
+      };
+      const totalWaits = Number(row.TOTAL_WAITS || 0);
+      const totalTimeouts = Number(row.TOTAL_TIMEOUTS || 0);
+      const timeWaitedMs = Number(row.TIME_WAITED_MS || 0);
+      const deltaWaits = Math.max(0, totalWaits - baseline.totalWaits);
+      const deltaTimeMs = Math.max(0, timeWaitedMs - baseline.timeWaitedMs);
+
+      return {
+        event: row.EVENT,
+        totalWaits,
+        totalTimeouts,
+        timeWaitedMs: Number(timeWaitedMs.toFixed(2)),
+        deltaWaits,
+        deltaTimeouts: Math.max(0, totalTimeouts - baseline.totalTimeouts),
+        deltaTimeMs: Number(deltaTimeMs.toFixed(2)),
+        avgWaitMs: deltaWaits > 0 ? Number((deltaTimeMs / deltaWaits).toFixed(3)) : 0
+      };
+    });
+  }
+
   async start(db, incoming = {}, io = null) {
     this.db = db;
     this.io = io;
@@ -442,10 +794,17 @@ class GcAcquireReleaseEngine {
       throw new Error('At least one worker is required');
     }
 
-    const targetTable = config.workloadShape === 'manual-lgnn-hang'
+    const sessionModuleName = this.getModuleNameForWorkload(config.workloadShape);
+    if (config.workloadShape === FILE443_WORKLOAD) {
+      Object.assign(config, this.resolveFile443Config(config));
+      await this.validateFile443Service(config);
+      await this.validateFile443Table(db, config);
+    } else {
+      const targetTable = config.workloadShape === 'manual-lgnn-hang'
       ? NOTE_REPRO_TABLE
       : this.getTableNameForProfile(config.objectProfile);
-    await db.execute(`SELECT COUNT(*) AS CNT FROM ${targetTable}`);
+      await db.execute(`SELECT COUNT(*) AS CNT FROM ${targetTable}`);
+    }
 
     if (this.isRunning) {
       if (!config.killExistingSessions) {
@@ -455,14 +814,14 @@ class GcAcquireReleaseEngine {
       await this.stop({ kill: true, drainSeconds: 5 });
     }
 
-    const existingSessions = await this.queryToolSessions();
+    const existingSessions = await this.queryToolSessions(sessionModuleName);
     if (existingSessions.length > 0) {
       if (!config.killExistingSessions) {
-        throw new Error(`Found ${existingSessions.length} existing DBSTRESS_GC_AR session(s). Stop them first or enable existing-session cleanup.`);
+        throw new Error(`Found ${existingSessions.length} existing ${sessionModuleName} session(s). Stop them first or enable existing-session cleanup.`);
       }
-      this.addLog(`Killing ${existingSessions.length} existing DBSTRESS_GC_AR session(s) before starting`, 'warn');
+      this.addLog(`Killing ${existingSessions.length} existing ${sessionModuleName} session(s) before starting`, 'warn');
       const killResult = await this.killToolSessions(existingSessions);
-      const drainResult = await this.waitForToolSessionsToDrain(10);
+      const drainResult = await this.waitForToolSessionsToDrain(10, sessionModuleName);
       this.addLog(`Existing session cleanup complete; killed ${killResult.killed}/${killResult.attempted}, remaining ${drainResult.remaining}`);
     }
 
@@ -475,12 +834,18 @@ class GcAcquireReleaseEngine {
       startedAt: Date.now(),
       completedLoops: 0,
       commits: 0,
-      errors: 0
+      errors: 0,
+      targetInsertsPerSec: config.workloadShape === FILE443_WORKLOAD ? config.file443TargetInsertsPerSec : null,
+      achievedInsertsPerSec: 0
     };
     this.nextInsertId = Math.max(
       config.rowCount + 1,
-      Math.floor(Date.now() / 1000) * 1000000
+      (Date.now() * 1000) + Math.floor(Math.random() * 1000)
     );
+    this.file443RunId = config.workloadShape === FILE443_WORKLOAD
+      ? `F443_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+      : null;
+    this.file443NextSlotAt = Date.now();
 
     try {
       const runLabel = config.workloadShape === 'manual-lgnn-hang'
@@ -488,7 +853,9 @@ class GcAcquireReleaseEngine {
         : `${totalWorkers} worker(s)`;
       this.addLog(`Starting ${config.mode} ${config.workloadShape} acquire/release workload with ${runLabel}`);
 
-      if (config.workloadShape === 'manual-lgnn-hang') {
+      if (config.workloadShape === FILE443_WORKLOAD) {
+        await this.startFile443PacedInsert(config);
+      } else if (config.workloadShape === 'manual-lgnn-hang') {
         await this.startManualLgnnRepro(config);
       } else if (config.mode === 'two-instance') {
         const pool1 = await this.createWorkerPool(Math.max(config.workersInstance1, 1), config.instance1ConnectionString);
@@ -535,7 +902,7 @@ class GcAcquireReleaseEngine {
     }
   }
 
-  async queryToolSessions() {
+  async queryToolSessions(moduleName = this.getModuleNameForWorkload()) {
     if (!this.db) return [];
     const result = await this.db.execute(
       `
@@ -544,20 +911,20 @@ class GcAcquireReleaseEngine {
         WHERE module = :moduleName
           AND type = 'USER'
       `,
-      { moduleName: MODULE_NAME }
+      { moduleName }
     );
 
     return result.rows || [];
   }
 
-  async waitForToolSessionsToDrain(timeoutSeconds = 10) {
+  async waitForToolSessionsToDrain(timeoutSeconds = 10, moduleName = this.getModuleNameForWorkload()) {
     const timeoutMs = Math.max(0, Number(timeoutSeconds) || 0) * 1000;
     const startedAt = Date.now();
-    let sessions = await this.queryToolSessions();
+    let sessions = await this.queryToolSessions(moduleName);
 
     while (sessions.length > 0 && Date.now() - startedAt < timeoutMs) {
       await sleep(1000);
-      sessions = await this.queryToolSessions();
+      sessions = await this.queryToolSessions(moduleName);
     }
 
     return {
@@ -566,8 +933,8 @@ class GcAcquireReleaseEngine {
     };
   }
 
-  async killToolSessions(sessions = null) {
-    const targetSessions = sessions || await this.queryToolSessions();
+  async killToolSessions(sessions = null, moduleName = this.getModuleNameForWorkload()) {
+    const targetSessions = sessions || await this.queryToolSessions(moduleName);
     let killed = 0;
 
     for (const row of targetSessions) {
@@ -613,6 +980,139 @@ class GcAcquireReleaseEngine {
       recordValue,
       recordLength
     };
+  }
+
+  async startFile443PacedInsert(config) {
+    await this.captureFile443WaitBaseline();
+    const tableRef = this.getFile443RunTableRef(config);
+    this.stats.tableName = this.getFile443RunTableName(config);
+    this.stats.tableOwner = config.file443TargetOwner;
+    this.stats.tableRef = tableRef;
+    this.stats.variant = config.file443Variant;
+    this.stats.durationSeconds = config.file443DurationSeconds;
+    this.stats.targetInsertsPerSec = config.file443TargetInsertsPerSec;
+    this.stats.workerSessions = config.file443Workers;
+    this.stats.totalInserts = 0;
+
+    const pool = await this.createWorkerPool(config.file443Workers, config.file443ServiceConnectionString);
+    for (let i = 0; i < config.file443Workers; i++) {
+      this.workers.push(this.runFile443Worker(pool, `file443-${config.file443Variant}-worker-${i + 1}`, i));
+    }
+
+    if (config.file443DurationSeconds > 0) {
+      this.file443StopTimer = setTimeout(() => {
+        this.addLog(`file_@443 paced insert duration reached ${config.file443DurationSeconds}s; stopping workload`);
+        this.stop({ kill: true, drainSeconds: 10 }).catch(err => {
+          this.addLog(`Duration stop failed: ${err.message}`, 'error');
+        });
+      }, config.file443DurationSeconds * 1000);
+    }
+
+    this.addLog(`file_@443 paced insert target ${config.file443TargetInsertsPerSec}/sec across ${config.file443Workers} session(s) on ${tableRef}`);
+  }
+
+  reserveFile443Slot() {
+    const now = Date.now();
+    const intervalMs = 1000 / Math.max(1, Number(this.config?.file443TargetInsertsPerSec || 50));
+    const scheduledAt = Math.max(now, this.file443NextSlotAt || now);
+    this.file443NextSlotAt = scheduledAt + intervalMs;
+    return scheduledAt;
+  }
+
+  isFile443WorkloadActive() {
+    if (!this.isRunning || this.config?.workloadShape !== FILE443_WORKLOAD) {
+      return false;
+    }
+    const durationSeconds = Number(this.config.file443DurationSeconds || 0);
+    if (durationSeconds <= 0) {
+      return true;
+    }
+    return Date.now() - this.stats.startedAt < durationSeconds * 1000;
+  }
+
+  async executeFile443Insert(connection, workerIndex = 0) {
+    const nextId = this.getNextInsertId();
+    const bind = this.buildCustomerBind(nextId, workerIndex % 32, 512);
+    await connection.execute(
+      `
+        INSERT INTO ${this.getFile443RunTableRef(this.config)} ("Key", "Record", "RecordLength")
+        VALUES (:keyValue, :recordValue, :recordLength)
+      `,
+      bind,
+      { autoCommit: false }
+    );
+  }
+
+  async runFile443Worker(pool, action, workerIndex = 0) {
+    let completed = 0;
+    let connection;
+
+    try {
+      connection = await pool.getConnection();
+      await connection.execute(
+        `
+          BEGIN
+            DBMS_APPLICATION_INFO.SET_MODULE(:moduleName, :actionName);
+            DBMS_SESSION.SET_IDENTIFIER(:clientId);
+          END;
+        `,
+        {
+          moduleName: FILE443_MODULE_NAME,
+          actionName: action.slice(0, 32),
+          clientId: `${this.file443RunId || 'FILE443'}:W${workerIndex + 1}`.slice(0, 64)
+        }
+      );
+
+      while (this.isFile443WorkloadActive()) {
+        const scheduledAt = this.reserveFile443Slot();
+        const waitMs = scheduledAt - Date.now();
+        if (waitMs > 0) {
+          await sleep(waitMs);
+        }
+        if (!this.isFile443WorkloadActive()) {
+          break;
+        }
+
+        try {
+          await this.executeFile443Insert(connection, workerIndex);
+          await connection.commit();
+          completed += 1;
+          this.stats.completedLoops += 1;
+          this.stats.totalInserts = this.stats.completedLoops;
+          this.stats.commits += 1;
+        } catch (err) {
+          this.stats.errors += 1;
+          this.addLog(`${action} insert failed: ${err.message}`, 'error');
+          try {
+            await connection.rollback();
+          } catch (rollbackErr) {
+            // Ignore rollback failures while stopping.
+          }
+          await sleep(250);
+        }
+      }
+    } catch (err) {
+      this.stats.errors += 1;
+      this.addLog(`${action} failed: ${err.message}`, 'error');
+    } finally {
+      if (connection) {
+        try {
+          await connection.execute(
+            `
+              BEGIN
+                DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL);
+                DBMS_SESSION.CLEAR_IDENTIFIER;
+              END;
+            `
+          );
+          await connection.close();
+        } catch (closeErr) {
+          // Stop may kill sessions before the client can close them cleanly.
+        }
+      }
+    }
+
+    this.addLog(`${action} finished after ${completed} insert(s)`);
   }
 
   async startManualLgnnRepro(config) {
@@ -930,7 +1430,9 @@ class GcAcquireReleaseEngine {
 
   async refreshMonitor() {
     if (!this.db) return null;
-    const moduleBind = { moduleName: MODULE_NAME };
+    const moduleName = this.getModuleNameForWorkload();
+    const moduleBind = { moduleName };
+    const eventBinds = EVENTS.reduce((acc, eventName, i) => ({ ...acc, [`event${i}`]: eventName, moduleName }), {});
 
     const activeResult = await this.db.execute(
       `
@@ -961,6 +1463,7 @@ class GcAcquireReleaseEngine {
         SELECT
           inst_id,
           sid,
+          serial#,
           username,
           event,
           state,
@@ -976,7 +1479,7 @@ class GcAcquireReleaseEngine {
           AND event IN (${EVENTS.map((_, i) => `:event${i}`).join(', ')})
         ORDER BY inst_id, event, sid
       `,
-      EVENTS.reduce((acc, eventName, i) => ({ ...acc, [`event${i}`]: eventName, moduleName: MODULE_NAME }), {})
+      eventBinds
     );
 
     const ashResult = await this.db.execute(
@@ -1000,7 +1503,7 @@ class GcAcquireReleaseEngine {
         ORDER BY sample_count DESC
         FETCH FIRST 50 ROWS ONLY
       `,
-      EVENTS.reduce((acc, eventName, i) => ({ ...acc, [`event${i}`]: eventName, moduleName: MODULE_NAME, ashSeconds: 30 }), {})
+      { ...eventBinds, ashSeconds: 30 }
     );
 
     const mapSession = row => ({
@@ -1020,10 +1523,42 @@ class GcAcquireReleaseEngine {
       sqlId: row.SQL_ID
     });
 
+    const activeSessions = (activeResult.rows || []).map(mapSession);
+    const waitRows = (waitResult.rows || []).map(mapSession);
+    let file443 = null;
+    if (this.config?.workloadShape === FILE443_WORKLOAD) {
+      const elapsedSeconds = this.stats.startedAt ? Math.max(0, (Date.now() - this.stats.startedAt) / 1000) : 0;
+      const achievedInsertsPerSec = elapsedSeconds > 0
+        ? Number((Number(this.stats.completedLoops || 0) / elapsedSeconds).toFixed(2))
+        : 0;
+      const targetWaitRows = activeSessions.filter(row => row.event === 'gc buffer busy acquire');
+      const activeSessionCount = activeSessions.length;
+      const targetWaitPercent = activeSessionCount > 0
+        ? Number(((targetWaitRows.length / activeSessionCount) * 100).toFixed(2))
+        : 0;
+
+      this.stats.achievedInsertsPerSec = achievedInsertsPerSec;
+      file443 = {
+        moduleName: FILE443_MODULE_NAME,
+        runId: this.file443RunId,
+        variant: this.config.file443Variant,
+        tableOwner: this.config.file443TargetOwner,
+        tableName: this.getFile443RunTableName(this.config),
+        targetInsertsPerSec: this.config.file443TargetInsertsPerSec,
+        achievedInsertsPerSec,
+        activeSessionCount,
+        targetWaitEvent: 'gc buffer busy acquire',
+        targetWaitSessionCount: targetWaitRows.length,
+        targetWaitPercent,
+        waitDeltas: await this.buildFile443WaitDeltas(),
+        lastRuns: this.lastFile443Runs
+      };
+    }
+
     this.lastMonitor = {
       timestamp: Date.now(),
-      activeSessions: (activeResult.rows || []).map(mapSession),
-      waitRows: (waitResult.rows || []).map(mapSession),
+      activeSessions,
+      waitRows,
       ashRows: (ashResult.rows || []).map(row => ({
         instId: row.INST_ID,
         event: row.EVENT,
@@ -1036,7 +1571,8 @@ class GcAcquireReleaseEngine {
         pText: this.formatPText(row.FILE_NO, row.BLOCK_NO, row.CLASS_NO),
         sampleCount: Number(row.SAMPLE_COUNT || 0),
         sessionCount: Number(row.SESSION_COUNT || 0)
-      }))
+      })),
+      file443
     };
 
     if (this.io) {
@@ -1050,8 +1586,56 @@ class GcAcquireReleaseEngine {
     return `file# ${fileNo}-block# ${blockNo}-class# ${classNo}`;
   }
 
+  async buildFile443RunSummary(killResult = null) {
+    if (this.config?.workloadShape !== FILE443_WORKLOAD) {
+      return null;
+    }
+
+    let waitDeltas = this.lastMonitor?.file443?.waitDeltas || [];
+    if (waitDeltas.length === 0 && this.db) {
+      try {
+        waitDeltas = await this.buildFile443WaitDeltas();
+      } catch (err) {
+        waitDeltas = [];
+      }
+    }
+
+    const elapsedSeconds = this.stats.startedAt
+      ? Math.max(0, (Date.now() - this.stats.startedAt) / 1000)
+      : 0;
+    const achievedInsertsPerSec = elapsedSeconds > 0
+      ? Number((Number(this.stats.completedLoops || 0) / elapsedSeconds).toFixed(2))
+      : 0;
+    const gcBufferBusyAcquire = waitDeltas.find(row => row.event === 'gc buffer busy acquire') || {
+      deltaWaits: 0,
+      deltaTimeMs: 0,
+      avgWaitMs: 0
+    };
+
+    return {
+      completedAt: Date.now(),
+      variant: this.config.file443Variant,
+      tableOwner: this.config.file443TargetOwner,
+      tableName: this.getFile443RunTableName(this.config),
+      targetInsertsPerSec: this.config.file443TargetInsertsPerSec,
+      achievedInsertsPerSec,
+      totalInserts: Number(this.stats.completedLoops || 0),
+      commits: Number(this.stats.commits || 0),
+      errors: Number(this.stats.errors || 0),
+      elapsedSeconds: Number(elapsedSeconds.toFixed(1)),
+      activeWaitPercent: Number(this.lastMonitor?.file443?.targetWaitPercent || 0),
+      gcBufferBusyAcquire,
+      killResult
+    };
+  }
+
   async stop(options = {}) {
+    const moduleName = this.getModuleNameForWorkload();
     this.isRunning = false;
+    if (this.file443StopTimer) {
+      clearTimeout(this.file443StopTimer);
+      this.file443StopTimer = null;
+    }
     if (this.monitorInterval) {
       clearInterval(this.monitorInterval);
       this.monitorInterval = null;
@@ -1080,18 +1664,60 @@ class GcAcquireReleaseEngine {
     this.pools = [];
     this.workers = [];
 
-    const killResult = options.kill === false ? null : await this.killToolSessions();
+    const killResult = options.kill === false ? null : await this.killToolSessions(null, moduleName);
+    const file443Summary = await this.buildFile443RunSummary(killResult);
+    if (file443Summary) {
+      const key = file443Summary.variant === 'reverse-key' ? 'reverse' : 'normal';
+      this.lastFile443Runs = {
+        ...this.lastFile443Runs,
+        [key]: file443Summary
+      };
+      if (this.lastMonitor?.file443) {
+        this.lastMonitor.file443.lastRuns = this.lastFile443Runs;
+      }
+    }
     this.addLog(`Workload stopped${killResult ? `; killed ${killResult.killed}/${killResult.attempted} remaining session(s)` : ''}`);
     this.emitStatus();
-    return { ...this.stats, killResult };
+    return { ...this.stats, killResult, file443Summary, lastFile443Runs: this.lastFile443Runs };
   }
 
-  async cleanup(db, io = null) {
+  async cleanupFile443Clone(db, options = {}) {
+    const config = this.resolveFile443Config(this.normalizeFile443Config({
+      ...this.config,
+      ...(options || {}),
+      workloadShape: FILE443_WORKLOAD,
+      file443Variant: 'reverse-key'
+    }));
+    const cloneRef = this.getFile443ReverseTableRef(config);
+    let dropped = false;
+
+    try {
+      await db.execute(`DROP TABLE ${cloneRef} PURGE`);
+      this.addLog(`Dropped reverse-key clone ${cloneRef}`);
+      dropped = true;
+    } catch (err) {
+      if (!String(err.message).includes('ORA-00942')) throw err;
+      this.addLog(`Reverse-key clone ${cloneRef} was not present`);
+    }
+
+    return { dropped, tableName: config.file443ReverseTable, owner: config.file443TargetOwner };
+  }
+
+  async cleanup(db, io = null, options = {}) {
     this.db = db;
     this.io = io;
     if (this.isRunning) {
       await this.stop({ kill: true, drainSeconds: 5 });
     }
+
+    if (options.workloadShape === FILE443_WORKLOAD || this.config?.workloadShape === FILE443_WORKLOAD) {
+      try {
+        return await this.cleanupFile443Clone(db, options);
+      } finally {
+        this.emitStatus();
+      }
+    }
+
     const tables = [NOTE_REPRO_TABLE, CUSTOMER_TABLE, LAB_TABLE];
     let dropped = false;
     try {
@@ -1116,6 +1742,11 @@ class GcAcquireReleaseEngine {
   }
 
   getStatus(extra = {}) {
+    const elapsedSeconds = this.stats.startedAt ? Math.max(0, (Date.now() - this.stats.startedAt) / 1000) : 0;
+    const achievedInsertsPerSec = this.config?.workloadShape === FILE443_WORKLOAD && elapsedSeconds > 0
+      ? Number((Number(this.stats.completedLoops || 0) / elapsedSeconds).toFixed(2))
+      : this.stats.achievedInsertsPerSec;
+
     return {
       isSettingUp: this.isSettingUp,
       isRunning: this.isRunning,
@@ -1124,10 +1755,12 @@ class GcAcquireReleaseEngine {
       workerCount: this.workers.length,
       stats: {
         ...this.stats,
+        achievedInsertsPerSec,
         uptimeSeconds: this.stats.startedAt ? Math.floor((Date.now() - this.stats.startedAt) / 1000) : 0
       },
       logs: this.logs,
       monitor: this.lastMonitor,
+      lastFile443Runs: this.lastFile443Runs,
       ...extra
     };
   }
