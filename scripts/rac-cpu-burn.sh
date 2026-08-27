@@ -135,7 +135,7 @@ run_worker() {
   sqlplus -s /nolog >"$log_file" 2>&1 <<SQL
 whenever oserror exit failure rollback
 whenever sqlerror exit failure rollback
-connect "${ORACLE_USER}"/"${ORACLE_PASSWORD}"@${connect_identifier}
+connect ${ORACLE_USER}/"${ORACLE_PASSWORD}"@${connect_identifier}
 set feedback off heading off pagesize 0 verify off serveroutput on
 declare
   l_stop_at timestamp with time zone := systimestamp + numtodsinterval(${DURATION_SECONDS}, 'SECOND');
