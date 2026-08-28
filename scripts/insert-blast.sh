@@ -787,15 +787,16 @@ DECLARE
 BEGIN
   WHILE l_start_row <= l_total_rows LOOP
     l_rows_this_chunk := LEAST(l_chunk_size, l_total_rows - l_start_row + 1);
-    EXECUTE IMMEDIATE '
+    EXECUTE IMMEDIATE q'~
       INSERT /*+ APPEND PARALLEL(${table}, ${BULK_PARALLEL_DEGREE}) */
       INTO ${table} (${insert_columns})
       SELECT ${select_columns}
       FROM (
-        SELECT ' || TO_CHAR(l_start_row) || ' + LEVEL - 1 AS n
+        SELECT :1 + LEVEL - 1 AS n
         FROM dual
-        CONNECT BY LEVEL <= ' || TO_CHAR(l_rows_this_chunk) || '
-      )';
+        CONNECT BY LEVEL <= :2
+      )~'
+      USING l_start_row, l_rows_this_chunk;
     COMMIT;
     l_loaded_rows := l_loaded_rows + l_rows_this_chunk;
     l_start_row := l_start_row + l_rows_this_chunk;
