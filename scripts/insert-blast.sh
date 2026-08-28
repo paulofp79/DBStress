@@ -17,6 +17,9 @@ TABLESPACE_DATAFILE_LOCATION=""
 TABLESPACE_ENCRYPTION_ENABLED="false"
 TABLESPACE_ENCRYPTION_ALGORITHM="AES256"
 WORKLOADS=()
+BULK_ROWS_PER_TABLE="1000000"
+BULK_CHUNK_ROWS="1000000"
+BULK_PARALLEL_DEGREE="8"
 HW_MITIGATION_ENABLED="false"
 PREALLOCATE_ON_START="true"
 EXTENT_SIZE_MB="128"
@@ -30,6 +33,7 @@ usage() {
 Usage:
   scripts/insert-blast.sh create  --connect USER/PASSWORD@DB [options]
   scripts/insert-blast.sh run     --connect USER/PASSWORD@DB [options]
+  scripts/insert-blast.sh bulk-load --connect USER/PASSWORD@DB [options]
   scripts/insert-blast.sh monitor --connect USER/PASSWORD@DB [options]
   scripts/insert-blast.sh status  --connect USER/PASSWORD@DB [options]
   scripts/insert-blast.sh drop    --connect USER/PASSWORD@DB [options]
@@ -67,6 +71,12 @@ Workload options:
   --allocate-every-inserts NUMBER         Default: 100000
   --log-dir PATH                          Worker logs for run mode. Default: ./insert-blast-logs
 
+Bulk-load options:
+  --bulk-rows-per-table NUMBER            Rows generated and loaded into each table. Default: 1000000
+  --bulk-chunk-rows NUMBER                Rows per direct-path transaction. Default: 1000000
+  --bulk-parallel-degree NUMBER           Oracle parallel DML degree. Default: 8
+                                          Bulk load generates rows inside Oracle with APPEND + PARALLEL.
+
 Monitor options:
   --interval SECONDS                      Default: 5
   --iterations NUMBER                     0 means run until Ctrl-C. Default: 0
@@ -78,6 +88,8 @@ Examples:
     --workload Workload_1:8:8:60:50:reuse:insert
   scripts/insert-blast.sh run --prefix IBLAST --tables 8 \
     --workload Select_Only:8:32:120:1:reuse:select
+  scripts/insert-blast.sh bulk-load --prefix IBLAST --tables 16 \
+    --bulk-rows-per-table 100000000 --bulk-chunk-rows 5000000 --bulk-parallel-degree 16
   scripts/insert-blast.sh monitor --interval 5
   scripts/insert-blast.sh drop --prefix IBLAST --drop-tablespaces true
   scripts/insert-blast.sh create --prefix IBLAST4 --tables 1000 \
@@ -151,6 +163,9 @@ normalize_config() {
   TABLESPACE_NEXT_MB="$(clamp_int "$TABLESPACE_NEXT_MB" 16 65536 1024)"
   EXTENT_SIZE_MB="$(clamp_int "$EXTENT_SIZE_MB" 8 1024 128)"
   ALLOCATE_EVERY_INSERTS="$(clamp_int "$ALLOCATE_EVERY_INSERTS" 1000 10000000 100000)"
+  BULK_ROWS_PER_TABLE="$(clamp_int "$BULK_ROWS_PER_TABLE" 1 1000000000000 1000000)"
+  BULK_CHUNK_ROWS="$(clamp_int "$BULK_CHUNK_ROWS" 1 1000000000000 1000000)"
+  BULK_PARALLEL_DEGREE="$(clamp_int "$BULK_PARALLEL_DEGREE" 1 1024 8)"
   TABLESPACE_ENCRYPTION_ALGORITHM="$(normalize_encryption_algorithm "$TABLESPACE_ENCRYPTION_ALGORITHM")"
   MONITOR_INTERVAL="$(clamp_int "$MONITOR_INTERVAL" 1 86400 5)"
   MONITOR_ITERATIONS="$(clamp_int "$MONITOR_ITERATIONS" 0 1000000 0)"
@@ -240,6 +255,23 @@ insert_columns_csv() {
       columns+=("num_${suffix}")
     else
       columns+=("dt_${suffix}")
+    fi
+  done
+  local IFS=", "
+  printf '%s' "${columns[*]}"
+}
+
+bulk_select_columns_csv() {
+  local columns=()
+  local index suffix
+  for ((index = 1; index <= COLUMNS_PER_TABLE; index += 1)); do
+    suffix="$(printf '%03d' "$index")"
+    if (( index % 3 == 1 )); then
+      columns+=("'BULK_R' || TO_CHAR(n) || '_C${suffix}'")
+    elif (( index % 3 == 2 )); then
+      columns+=("n + ${index}")
+    else
+      columns+=("TRUNC(SYSDATE) - (MOD(n + ${index}, 86400) / 86400)")
     fi
   done
   local IFS=", "
@@ -737,6 +769,60 @@ run_workload() {
   (( failures == 0 ))
 }
 
+bulk_load_table() {
+  local table="$1"
+  local insert_columns select_columns
+  insert_columns="$(insert_columns_csv)"
+  select_columns="$(bulk_select_columns_csv)"
+
+  run_sql "WHENEVER SQLERROR EXIT SQL.SQLCODE
+SET SERVEROUTPUT ON
+ALTER SESSION ENABLE PARALLEL DML;
+DECLARE
+  l_total_rows CONSTANT NUMBER := ${BULK_ROWS_PER_TABLE};
+  l_chunk_size CONSTANT NUMBER := ${BULK_CHUNK_ROWS};
+  l_start_row NUMBER := 1;
+  l_rows_this_chunk NUMBER;
+  l_loaded_rows NUMBER := 0;
+BEGIN
+  WHILE l_start_row <= l_total_rows LOOP
+    l_rows_this_chunk := LEAST(l_chunk_size, l_total_rows - l_start_row + 1);
+    EXECUTE IMMEDIATE '
+      INSERT /*+ APPEND PARALLEL(${table}, ${BULK_PARALLEL_DEGREE}) */
+      INTO ${table} (${insert_columns})
+      SELECT ${select_columns}
+      FROM (
+        SELECT ' || TO_CHAR(l_start_row) || ' + LEVEL - 1 AS n
+        FROM dual
+        CONNECT BY LEVEL <= ' || TO_CHAR(l_rows_this_chunk) || '
+      )';
+    COMMIT;
+    l_loaded_rows := l_loaded_rows + l_rows_this_chunk;
+    l_start_row := l_start_row + l_rows_this_chunk;
+  END LOOP;
+  DBMS_OUTPUT.PUT_LINE('${table}: direct-path rows loaded=' || l_loaded_rows);
+END;
+/
+"
+}
+
+bulk_load() {
+  normalize_config
+  require_sqlplus
+  require_connection
+
+  echo "Starting database-side direct-path bulk load: tables=${TABLE_COUNT}, rowsPerTable=${BULK_ROWS_PER_TABLE}, chunkRows=${BULK_CHUNK_ROWS}, parallelDegree=${BULK_PARALLEL_DEGREE}"
+  echo "Tables must already exist. Create them first with: $SCRIPT_NAME create ..."
+  echo "Warning: this rapidly consumes tablespace. Direct-path NOLOGGING benefits may be overridden by FORCE LOGGING or Data Guard requirements."
+
+  local table
+  for ((i = 1; i <= TABLE_COUNT; i += 1)); do
+    table="$(table_name "$i")"
+    echo "Loading ${table}..."
+    bulk_load_table "$table"
+  done
+}
+
 monitor_once() {
   run_sql "COLUMN username FORMAT A24
 COLUMN source FORMAT A18
@@ -817,6 +903,9 @@ parse_args() {
       --tablespace-encryption|--encrypt-tablespaces) TABLESPACE_ENCRYPTION_ENABLED="$(to_bool "${2:-}")"; shift 2 ;;
       --tablespace-encryption-algorithm|--tablespace-encryption-cipher) TABLESPACE_ENCRYPTION_ALGORITHM="${2:-}"; shift 2 ;;
       --workload) WORKLOADS+=("${2:-}"); shift 2 ;;
+      --bulk-rows-per-table) BULK_ROWS_PER_TABLE="${2:-}"; shift 2 ;;
+      --bulk-chunk-rows) BULK_CHUNK_ROWS="${2:-}"; shift 2 ;;
+      --bulk-parallel-degree) BULK_PARALLEL_DEGREE="${2:-}"; shift 2 ;;
       --hw-mitigation) HW_MITIGATION_ENABLED="$(to_bool "${2:-}")"; shift 2 ;;
       --preallocate-on-start) PREALLOCATE_ON_START="$(to_bool "${2:-}")"; shift 2 ;;
       --extent-size-mb) EXTENT_SIZE_MB="${2:-}"; shift 2 ;;
@@ -841,6 +930,7 @@ main() {
     drop) drop_tables ;;
     status) status_tables ;;
     run) run_workload ;;
+    bulk-load) bulk_load ;;
     monitor) monitor_loop ;;
     *) die "Unknown command '$COMMAND'. Use --help for usage." ;;
   esac
