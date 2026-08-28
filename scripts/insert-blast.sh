@@ -20,6 +20,7 @@ WORKLOADS=()
 BULK_ROWS_PER_TABLE="1000000"
 BULK_CHUNK_ROWS="1000000"
 BULK_PARALLEL_DEGREE="8"
+BULK_CONCURRENT_TABLES="1"
 HW_MITIGATION_ENABLED="false"
 PREALLOCATE_ON_START="true"
 EXTENT_SIZE_MB="128"
@@ -76,6 +77,8 @@ Bulk-load options:
   --bulk-chunk-rows NUMBER                Rows per direct-path transaction. Default: 1000000
   --bulk-parallel-degree NUMBER           Oracle parallel DML degree. Default: 8
                                           Bulk load generates rows inside Oracle with APPEND + PARALLEL.
+  --bulk-concurrent-tables NUMBER         Tables to load concurrently (one sqlplus session per table).
+                                          Default: 1. Set to --tables to start every table at once.
 
 Monitor options:
   --interval SECONDS                      Default: 5
@@ -89,7 +92,8 @@ Examples:
   scripts/insert-blast.sh run --prefix IBLAST --tables 8 \
     --workload Select_Only:8:32:120:1:reuse:select
   scripts/insert-blast.sh bulk-load --prefix IBLAST --tables 16 \
-    --bulk-rows-per-table 100000000 --bulk-chunk-rows 5000000 --bulk-parallel-degree 16
+    --bulk-rows-per-table 100000000 --bulk-chunk-rows 5000000 --bulk-parallel-degree 16 \
+    --bulk-concurrent-tables 16
   scripts/insert-blast.sh monitor --interval 5
   scripts/insert-blast.sh drop --prefix IBLAST --drop-tablespaces true
   scripts/insert-blast.sh create --prefix IBLAST4 --tables 1000 \
@@ -166,6 +170,7 @@ normalize_config() {
   BULK_ROWS_PER_TABLE="$(clamp_int "$BULK_ROWS_PER_TABLE" 1 1000000000000 1000000)"
   BULK_CHUNK_ROWS="$(clamp_int "$BULK_CHUNK_ROWS" 1 1000000000000 1000000)"
   BULK_PARALLEL_DEGREE="$(clamp_int "$BULK_PARALLEL_DEGREE" 1 1024 8)"
+  BULK_CONCURRENT_TABLES="$(clamp_int "$BULK_CONCURRENT_TABLES" 1 5000 1)"
   TABLESPACE_ENCRYPTION_ALGORITHM="$(normalize_encryption_algorithm "$TABLESPACE_ENCRYPTION_ALGORITHM")"
   MONITOR_INTERVAL="$(clamp_int "$MONITOR_INTERVAL" 1 86400 5)"
   MONITOR_ITERATIONS="$(clamp_int "$MONITOR_ITERATIONS" 0 1000000 0)"
@@ -807,21 +812,66 @@ END;
 "
 }
 
+bulk_load_batch() {
+  local start_index="$1"
+  local end_index="$2"
+  local i table log_file failures=0
+  local -a pids=()
+  local -a tables=()
+  local -a log_files=()
+
+  for ((i = start_index; i <= end_index; i += 1)); do
+    table="$(table_name "$i")"
+    log_file="${LOG_DIR}/bulk_${table}.log"
+    echo "Starting ${table}..."
+    bulk_load_table "$table" >"$log_file" 2>&1 &
+    pids+=("$!")
+    tables+=("$table")
+    log_files+=("$log_file")
+  done
+
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      grep -h "direct-path rows loaded=" "${log_files[$i]}" || true
+    else
+      echo "${tables[$i]}: bulk load failed; see ${log_files[$i]}" >&2
+      failures=$((failures + 1))
+    fi
+  done
+
+  if (( failures > 0 )); then
+    print_worker_failure_summary "${log_files[@]}"
+    return 1
+  fi
+}
+
 bulk_load() {
   normalize_config
+  mkdir -p "$LOG_DIR"
   require_sqlplus
   require_connection
 
-  echo "Starting database-side direct-path bulk load: tables=${TABLE_COUNT}, rowsPerTable=${BULK_ROWS_PER_TABLE}, chunkRows=${BULK_CHUNK_ROWS}, parallelDegree=${BULK_PARALLEL_DEGREE}"
+  echo "Starting database-side direct-path bulk load: tables=${TABLE_COUNT}, rowsPerTable=${BULK_ROWS_PER_TABLE}, chunkRows=${BULK_CHUNK_ROWS}, parallelDegree=${BULK_PARALLEL_DEGREE}, concurrentTables=${BULK_CONCURRENT_TABLES}"
   echo "Tables must already exist. Create them first with: $SCRIPT_NAME create ..."
   echo "Warning: this rapidly consumes tablespace. Direct-path NOLOGGING benefits may be overridden by FORCE LOGGING or Data Guard requirements."
+  echo "Each concurrent table uses a separate sqlplus session; Oracle may allocate parallel-execution servers for each session."
+  echo "Bulk-load logs: ${LOG_DIR}"
 
-  local table
-  for ((i = 1; i <= TABLE_COUNT; i += 1)); do
-    table="$(table_name "$i")"
-    echo "Loading ${table}..."
-    bulk_load_table "$table"
+  local start_index=1 end_index failures=0
+  while (( start_index <= TABLE_COUNT )); do
+    end_index=$((start_index + BULK_CONCURRENT_TABLES - 1))
+    if (( end_index > TABLE_COUNT )); then
+      end_index="$TABLE_COUNT"
+    fi
+    echo "Launching tables ${start_index}-${end_index} concurrently..."
+    if ! bulk_load_batch "$start_index" "$end_index"; then
+      failures=$((failures + 1))
+    fi
+    start_index=$((end_index + 1))
   done
+
+  echo "Bulk load complete. Failed batches: ${failures}"
+  (( failures == 0 ))
 }
 
 monitor_once() {
@@ -907,6 +957,7 @@ parse_args() {
       --bulk-rows-per-table) BULK_ROWS_PER_TABLE="${2:-}"; shift 2 ;;
       --bulk-chunk-rows) BULK_CHUNK_ROWS="${2:-}"; shift 2 ;;
       --bulk-parallel-degree) BULK_PARALLEL_DEGREE="${2:-}"; shift 2 ;;
+      --bulk-concurrent-tables) BULK_CONCURRENT_TABLES="${2:-}"; shift 2 ;;
       --hw-mitigation) HW_MITIGATION_ENABLED="$(to_bool "${2:-}")"; shift 2 ;;
       --preallocate-on-start) PREALLOCATE_ON_START="$(to_bool "${2:-}")"; shift 2 ;;
       --extent-size-mb) EXTENT_SIZE_MB="${2:-}"; shift 2 ;;
